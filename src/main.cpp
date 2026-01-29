@@ -1,3 +1,6 @@
+// Copyright (c) 2026 T. C. Raymond
+// SPDX-License-Identifier: MIT
+
 #include <unordered_set>
 #include <memory>
 #include "input_parser.hpp"
