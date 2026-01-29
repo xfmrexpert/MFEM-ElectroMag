@@ -1,0 +1,63 @@
+{
+  "simulation": {
+    "type": "electrostatics",
+    "mesh": "electrostatic_test.msh",
+    "order": 2,
+    "axisymmetric": true
+  },
+  "materials": [
+    {
+      "name": "Oil",
+      "attributes": [1],
+      "properties": { "epsilon_r": 2.2 }
+    },
+    {
+      "name": "Pressboard",
+      "attributes": [2],
+      "properties": { "epsilon_r": 4.5 }
+    },
+    {
+      "name": "Paper",
+      "attributes": [3],
+      "properties": { "epsilon_r": 4.0 }
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "High_Voltage",
+      "attributes": [11, 21, 22],
+      "type": "Dirichlet",
+      "value": 230000.0
+    },
+    {
+      "name": "Low_Voltage_GND",
+      "attributes": [12],
+      "type": "Dirichlet",
+      "value": 0.0
+    },
+    {
+      "name": "Regulating_Windings_GND",
+      "attributes": [13],
+      "type": "Dirichlet",
+      "value": 0.0
+    },
+    {
+      "name": "Static_Rings_GND",
+      "attributes": [14, 23, 24],
+      "type": "Dirichlet",
+      "value": 0.0
+    },
+    {
+      "name": "Clamping_Ring_GND",
+      "attributes": [15, 16],
+      "type": "Dirichlet",
+      "value": 0.0
+    },
+    {
+      "name": "Tank_Wall",
+      "attributes": [17],
+      "type": "Dirichlet",
+      "value": 0.0
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+# ------------------------------------------------------------------------------
+# Build Systems (CMake)
+# ------------------------------------------------------------------------------
+/build/
+/bin/
+/lib/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!MFEMConfig.cmake
+!/cmake/*.cmake
+
+# ------------------------------------------------------------------------------
+# C++ Compiled Objects & Binaries
+# ------------------------------------------------------------------------------
+*.o
+*.obj
+*.so
+*.dylib
+*.a
+*.lib
+*.exe
+*.out
+*.app
+
+# ------------------------------------------------------------------------------
+# MFEM & Simulation Artifacts
+# ------------------------------------------------------------------------------
+# Prevent committing heavy solution vectors or generated meshes
+*.gf
+*.saved
+*.vtk
+*.vtu
+*.pvd
+
+# MFEM often outputs directories for parallel runs (e.g., 'ParaView', 'Vis')
+ParaView/
+Vis/
+Example*_*/
+
+# Ignore standard output logs (unless you specifically want to save them)
+*.log
+
+# ------------------------------------------------------------------------------
+# IDE & Editor Configuration
+# ------------------------------------------------------------------------------
+# VS Code
+.vscode/
+*.code-workspace
+
+# CLion / IntelliJ
+.idea/
+cmake-build-*/
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.user
+
+# Vim/Emacs/Mac
+*.swp
+*~
+.DS_Store
+
+# ------------------------------------------------------------------------------
+# Documentation / Reports
+# ------------------------------------------------------------------------------
+# If you generate LaTeX reports automatically, ignore the build clutter
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
