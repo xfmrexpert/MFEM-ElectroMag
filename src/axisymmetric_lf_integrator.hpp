@@ -4,6 +4,7 @@
 #pragma once
 
 #include "mfem.hpp"
+#include "constants.hpp"
 
 // -----------------------------------------------------------------------------
 // 2. Linear Form Integrator: Space Charge (rho)
@@ -13,7 +14,7 @@ class AxisymmetricLFIntegrator : public mfem::LinearFormIntegrator
 {
 private:
    mfem::Coefficient *Q; // Represents Space Charge Density (rho)
-   static constexpr double factor = 2.0 * M_PI;
+   static constexpr double factor = Constants::TWO_PI;
 
 public:
    AxisymmetricLFIntegrator(mfem::Coefficient &q) : Q(&q) 

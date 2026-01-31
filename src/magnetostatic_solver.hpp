@@ -125,8 +125,10 @@ public:
         umf_solver.SetOperator(*Matrix);
         umf_solver.Mult(B, X);
 #else
+        InputParser parser(config);
         mfem::GSSmoother M((mfem::SparseMatrix&)(*Matrix));
-        mfem::PCG(*Matrix, M, B, X, 1, 1000, 1e-12, 0.0);
+        mfem::PCG(*Matrix, M, B, X, parser.GetSolverPrintLevel(),
+                  parser.GetSolverMaxIter(), parser.GetSolverTolerance(), 0.0);
 #endif
 
         a.RecoverFEMSolution(X, *b, *A);

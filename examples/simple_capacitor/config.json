@@ -1,0 +1,47 @@
+{
+  "simulation": {
+    "type": "electrostatics",
+    "mesh": "capacitor.mesh",
+    "order": 2,
+    "axisymmetric": true,
+    "solver_tolerance": 1e-12,
+    "solver_max_iter": 2000,
+    "solver_print_level": 1
+  },
+  "materials": [
+    {
+      "name": "Air",
+      "attributes": [1],
+      "properties": {
+        "epsilon_r": 1.0
+      }
+    },
+    {
+      "name": "Dielectric",
+      "attributes": [2],
+      "properties": {
+        "epsilon_r": 2.5
+      }
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "TopPlate",
+      "attributes": [1],
+      "type": "Dirichlet",
+      "value": 1000.0
+    },
+    {
+      "name": "BottomPlate",
+      "attributes": [2],
+      "type": "Dirichlet",
+      "value": 0.0
+    },
+    {
+      "name": "FarField",
+      "attributes": [3],
+      "type": "Dirichlet",
+      "value": 0.0
+    }
+  ]
+}

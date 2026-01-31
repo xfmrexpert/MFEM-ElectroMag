@@ -1,0 +1,57 @@
+{
+  "simulation": {
+    "type": "magnetoquasistatics",
+    "mesh": "eddy_current.mesh",
+    "order": 2,
+    "axisymmetric": true,
+    "frequency": 60.0,
+    "solver_tolerance": 1e-10,
+    "solver_max_iter": 3000,
+    "solver_print_level": 1
+  },
+  "materials": [
+    {
+      "name": "Air",
+      "attributes": [1],
+      "properties": {
+        "mu_r": 1.0,
+        "sigma": 0.0
+      }
+    },
+    {
+      "name": "AluminumConductor",
+      "attributes": [2],
+      "properties": {
+        "mu_r": 1.0,
+        "sigma": 3.5e7,
+        "comment": "Aluminum: sigma = 3.5e7 S/m"
+      }
+    },
+    {
+      "name": "Coil",
+      "attributes": [3],
+      "properties": {
+        "mu_r": 1.0,
+        "sigma": 0.0,
+        "comment": "Coil treated as current source, not conductor"
+      }
+    }
+  ],
+  "sources": [
+    {
+      "name": "ExcitationCoil",
+      "attributes": [3],
+      "type": "CurrentDensity",
+      "value": 100000.0,
+      "comment": "J_source = 1e5 A/m^2 (RMS)"
+    }
+  ],
+  "boundaries": [
+    {
+      "name": "FarField",
+      "attributes": [1],
+      "type": "Dirichlet",
+      "value": 0.0
+    }
+  ]
+}

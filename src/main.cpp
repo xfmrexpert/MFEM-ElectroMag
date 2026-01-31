@@ -1,45 +1,47 @@
 // Copyright (c) 2026 T. C. Raymond
 // SPDX-License-Identifier: MIT
 
-#include <unordered_set>
+#include <iostream>
 #include <memory>
+#include <string>
 #include "input_parser.hpp"
 #include "physics_solver.hpp"
-#include "electrostatic_solver.hpp"
-#include "magnetostatic_solver.hpp"
-#include "magnetoquasistatic_solver.hpp"
-
-using namespace std;
-using namespace mfem;
+#include "solver_factory.hpp"
+#include "config_validator.hpp"
 
 int main(int argc, char *argv[]) {
-    // 1. Shared Infrastructure
-    std::string config_file = (argc > 1) ? argv[1] : "config.json";
-    InputParser parser(config_file);
-    Mesh mesh(parser.GetMeshPath(), 1, 1);
+    try {
+        // 1. Shared Infrastructure
+        std::string config_file = (argc > 1) ? argv[1] : "config.json";
+        InputParser parser(config_file);
 
-    // 2. Factory Logic
-    std::unique_ptr<PhysicsSolver> solver;
-    std::string type = parser.config["simulation"]["type"];
+        // 2. Validate Configuration (basic validation before mesh loading)
+        ConfigValidator validator;
+        validator.ValidateOrThrow(parser.config);
 
-    if (type == "electrostatics") {
-        solver = std::make_unique<ElectrostaticSolver>(mesh, parser.config);
-    } 
-    else if (type == "magnetostatics") {
-        solver = std::make_unique<MagnetostaticSolver>(mesh, parser.config);
+        // 3. Load Mesh
+        mfem::Mesh mesh(parser.GetMeshPath(), 1, 1);
+
+        // 4. Validate Configuration (with mesh for attribute checking)
+        validator.ValidateOrThrow(parser.config, &mesh);
+
+        // 5. Factory Logic - Create Solver
+        std::string type = parser.config["simulation"]["type"];
+        auto solver = SolverFactory::Instance().Create(type, mesh, parser.config);
+
+        // 6. Execution
+        solver->Setup();
+        solver->Run();
+        solver->Save();
+
+        return 0;
     }
-    else if (type == "magnetoquasistatics") {
-        solver = std::make_unique<MagnetoquasistaticSolver>(mesh, parser.config);
-    }
-    else {
-        std::cerr << "Unknown physics type: " << type << std::endl;
+    catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
-
-    // 3. Execution
-    solver->Setup();
-    solver->Run();
-    solver->Save();
-
-    return 0;
+    catch (...) {
+        std::cerr << "Error: Unknown exception occurred" << std::endl;
+        return 2;
+    }
 }

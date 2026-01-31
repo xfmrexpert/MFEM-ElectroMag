@@ -5,11 +5,16 @@ A finite element solver for electromagnetic problems using MFEM (Modular Finite 
 ## Features
 
 - **Electrostatics**: Solves for electric potential and field distributions
-- **Magnetostatics**: Solves for magnetic vector potential and field distributions  
+- **Magnetostatics**: Solves for magnetic vector potential and field distributions
 - **Magnetoquasistatics**: Time-harmonic eddy current problems
 - **Axisymmetric and Planar**: Supports both 2D coordinate systems
 - **JSON Configuration**: Easy problem setup via JSON files
 - **ParaView Output**: Direct visualization of results
+- **Comprehensive Testing**: Unit and integration tests with Catch2
+- **Configuration Validation**: Automatic checking of input files
+- **Solver Factory Pattern**: Extensible architecture for new physics types
+- **OpenMP Support**: Parallel assembly for improved performance
+- **API Documentation**: Doxygen-generated documentation
 
 ## Dependencies
 
@@ -27,6 +32,9 @@ A finite element solver for electromagnetic problems using MFEM (Modular Finite 
 - **SuiteSparse**: For direct sparse solvers (recommended for better performance)
 - **HYPRE**: For advanced preconditioners and solvers
 - **METIS**: For mesh partitioning
+- **OpenMP**: For parallel assembly (usually included with compiler)
+- **Doxygen**: For generating API documentation
+- **Catch2**: For running tests (automatically downloaded)
 
 ## Installation Instructions
 
@@ -123,16 +131,38 @@ make -j
 
 ## Usage
 
-After building, the executable `solve_axi` will be in the `build` directory:
+After building, the executable `mfem-electromag` will be in the `build` directory:
 
 ```bash
 # Run with a configuration file
-./solve_axi path/to/config.json
+./mfem-electromag path/to/config.json
 
 # Example: Run test cases
-./solve_axi ../test/electrostatic_test.json
-./solve_axi ../test/magnetostatic_test.json
-./solve_axi ../test/mqs_test.json
+./mfem-electromag ../test/electrostatic_test.json
+./mfem-electromag ../test/magnetostatic_test.json
+./mfem-electromag ../test/mqs_test.json
+
+# Run with OpenMP parallelism (if enabled)
+OMP_NUM_THREADS=4 ./mfem-electromag config.json
+```
+
+### Running Tests
+
+```bash
+# In build directory
+ctest --output-on-failure
+
+# Or run test executable directly
+./mfem_tests
+```
+
+### Generating Documentation
+
+```bash
+# In build directory (requires Doxygen)
+make docs
+
+# Documentation will be in docs/doxygen/html/index.html
 ```
 
 ## Configuration
@@ -141,6 +171,13 @@ Problems are configured using JSON files. See the `test/` directory for examples
 - `electrostatic_test.json`: Electrostatic problem setup
 - `magnetostatic_test.json`: Magnetostatic problem setup
 - `mqs_test.json`: Magnetoquasistatic problem setup
+
+See `examples/` directory for complete example problems with documentation:
+- `simple_capacitor/`: Parallel plate capacitor with analytical validation
+- `solenoid/`: Magnetostatic coil with field calculations
+- `eddy_current/`: Time-harmonic eddy current analysis
+
+For detailed mathematical formulation, see `docs/math_formulation.md`.
 
 ## Output
 
@@ -159,12 +196,58 @@ Results are saved in ParaView format (`.pvd`, `.vtu` files) and can be visualize
 │   ├── magnetostatic_solver.hpp   # Magnetostatic solver
 │   ├── magnetoquasistatic_solver.hpp  # MQS solver
 │   ├── input_parser.hpp           # JSON configuration parser
+│   ├── solver_factory.hpp         # Solver factory pattern
+│   ├── config_validator.hpp       # Configuration validation
+│   ├── constants.hpp              # Physical constants
+│   ├── enums.hpp                  # Type enumerations
 │   └── axisymmetric_*.hpp         # Custom axisymmetric integrators
-├── test/                          # Test configurations
+├── test/                          # Test configurations and unit tests
+│   ├── test_*.cpp                 # Unit tests (Catch2)
+│   └── *.json                     # Test configurations
+├── examples/                      # Complete example problems
+│   ├── simple_capacitor/          # Capacitor example
+│   ├── solenoid/                  # Solenoid example
+│   └── eddy_current/              # Eddy current example
+├── docs/                          # Documentation
+│   ├── math_formulation.md        # Mathematical formulation
+│   ├── solver_performance.md      # Performance optimization guide
+│   ├── future_3d.md               # 3D extension roadmap
+│   └── future_amr.md              # AMR implementation guide
+├── .github/workflows/             # CI/CD configuration
 ├── CMakeLists.txt                 # CMake build configuration
+├── Doxyfile                       # Doxygen configuration
 ├── LICENSE                        # MIT License
 └── README.md                      # This file
 ```
+
+## Design Decisions
+
+### Header-Only Implementation
+
+This project uses a header-only design for the following reasons:
+
+**Advantages:**
+- **Simplicity**: No separate compilation of library components
+- **Fast development**: Changes don't require recompiling a library
+- **Template flexibility**: All solver code can be templated without export issues
+- **Easy integration**: Users just include headers, no linking needed
+- **Inline optimization**: Compiler can optimize across all boundaries
+
+**Trade-offs:**
+- **Compilation time**: Each translation unit compiles all included headers
+- **Code bloat**: Potential for larger binaries
+
+**Mitigation:**
+- Single `main.cpp` keeps compilation fast for this application
+- MFEM (the heavy dependency) is pre-compiled separately
+- For larger projects, consider explicit template instantiation
+
+**When to reconsider:**
+- If compilation time becomes problematic (> 1 minute)
+- If building a shared library for other projects
+- Monitor: We track compile times in CI
+
+Current compile time: ~30 seconds (acceptable for rapid development)
 
 ## License
 
@@ -172,9 +255,32 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 Copyright (c) 2026 T. C. Raymond
 
+## Performance
+
+For large-scale simulations:
+- Use `Release` build type: `cmake .. -DCMAKE_BUILD_TYPE=Release`
+- Enable OpenMP: `cmake .. -DUSE_OPENMP=ON` (default)
+- Use configurable solver parameters in JSON:
+  ```json
+  {
+    "simulation": {
+      "solver_tolerance": 1e-10,
+      "solver_max_iter": 2000,
+      "solver_print_level": 1
+    }
+  }
+  ```
+- For > 100k DOFs, consider using HYPRE preconditioners (see `docs/solver_performance.md`)
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+**Development workflow:**
+1. Run tests: `ctest` in build directory
+2. Check code compiles without warnings: `-Wall -Wextra`
+3. Ensure examples still run correctly
+4. Update documentation for API changes
 
 ## Acknowledgments
 

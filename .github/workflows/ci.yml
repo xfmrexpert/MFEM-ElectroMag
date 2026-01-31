@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} - ${{ matrix.compiler }} - ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        compiler: [g++-9, g++-10, g++-11, g++-12]
+        build_type: [Debug, Release]
+        exclude:
+          # Ubuntu 24.04 doesn't have GCC 9
+          - os: ubuntu-24.04
+            compiler: g++-9
+          # Ubuntu 24.04 doesn't have GCC 10
+          - os: ubuntu-24.04
+            compiler: g++-10
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ${{ matrix.compiler }}
+
+    - name: Set up compiler
+      run: |
+        echo "CXX=${{ matrix.compiler }}" >> $GITHUB_ENV
+
+    - name: Cache MFEM build
+      uses: actions/cache@v4
+      with:
+        path: |
+          build/_deps/mfem-build
+          build/_deps/mfem-src
+        key: ${{ runner.os }}-${{ matrix.compiler }}-mfem-v4.7-${{ hashFiles('CMakeLists.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.compiler }}-mfem-v4.7-
+
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
+          -DBUILD_TESTING=ON \
+          -DENABLE_NATIVE_ARCH=OFF
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }} -j$(nproc)
+
+    - name: Run tests
+      working-directory: build
+      run: ctest --output-on-failure -C ${{ matrix.build_type }}
+
+    - name: Test executable
+      working-directory: build
+      run: |
+        ./mfem-electromag --help || echo "Executable built successfully"
+
+  build-sanitizers:
+    name: Sanitizers - ${{ matrix.sanitizer }}
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++-12
+
+    - name: Configure CMake with sanitizers
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_CXX_COMPILER=g++-12 \
+          -DBUILD_TESTING=ON \
+          -DENABLE_SANITIZERS=ON \
+          -DENABLE_NATIVE_ARCH=OFF
+
+    - name: Build
+      run: cmake --build build --config Debug -j$(nproc)
+
+    - name: Run tests with sanitizers
+      working-directory: build
+      run: ctest --output-on-failure -C Debug
+      env:
+        ASAN_OPTIONS: detect_leaks=1:symbolize=1
+        UBSAN_OPTIONS: print_stacktrace=1

@@ -11,14 +11,15 @@
 #include "axisymmetric_lf_integrator.hpp"
 #include "magnetic_field_coefficient.hpp"
 #include "input_parser.hpp"
+#include "constants.hpp"
 
 class MagnetoquasistaticSolver : public PhysicsSolver {
     // 1. Logic Types
     enum class SolverType { Axisymmetric, Planar };
     SolverType type = SolverType::Axisymmetric; // Default initialization
 
-    double frequency = 60.0; 
-    double omega = 2.0 * M_PI * frequency;
+    double frequency = 60.0;
+    double omega = Constants::TWO_PI * frequency;
 
     // 2. Smart Pointers for MFEM Objects
     // Order matters for destruction: GridFunctions depend on Spaces, Spaces depend on Collections.
@@ -48,7 +49,7 @@ public:
         // 1. Config
         int order = config["simulation"].value("order", 1);
         frequency = config["simulation"].value("frequency", 60.0);
-        omega = 2.0 * M_PI * frequency;
+        omega = Constants::TWO_PI * frequency;
 
         std::string mode = config["simulation"].value("model_type", "axisymmetric");
         type = (mode == "planar") ? SolverType::Planar : SolverType::Axisymmetric;
@@ -149,11 +150,12 @@ public:
         solver.Mult(B_vec, X_vec);
 #else
         // Iterative Complex Solver
+        InputParser parser(config);
         mfem::GMRESSolver gmres;
         gmres.SetOperator(*A_op.Ptr());
-        gmres.SetPrintLevel(1);
-        gmres.SetRelTol(1e-8);
-        gmres.SetMaxIter(2000);
+        gmres.SetPrintLevel(parser.GetSolverPrintLevel());
+        gmres.SetRelTol(parser.GetSolverTolerance());
+        gmres.SetMaxIter(parser.GetSolverMaxIter());
         gmres.Mult(B_vec, X_vec);
 #endif
 

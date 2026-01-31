@@ -7,15 +7,16 @@
 
 using json = nlohmann::json;
 
+/**
+ * @brief Base class for physics solvers using MFEM
+ *
+ * @warning The mesh and config references must outlive this solver instance.
+ *          Do not destroy the mesh or config objects before the solver is done.
+ */
 class PhysicsSolver {
 protected:
     mfem::Mesh &mesh;
     json &config;
-
-    // Helper for generating consistent output names
-    std::string GetOutputName(const std::string& base) {
-        return base;
-    }
 
 public:
     PhysicsSolver(mfem::Mesh &m, json &c) : mesh(m), config(c) {}

@@ -4,6 +4,7 @@
 #pragma once
 
 #include "mfem.hpp"
+#include "constants.hpp"
 
 // -----------------------------------------------------------------------------
 // 1. Stiffness Integrator: -div( eps * grad(u) )
@@ -13,7 +14,7 @@ class AxisymmetricDiffusionIntegrator : public mfem::BilinearFormIntegrator
 {
 private:
    mfem::Coefficient *Q;
-   static constexpr double factor = 2.0 * M_PI;
+   static constexpr double factor = Constants::TWO_PI;
 
 public:
    AxisymmetricDiffusionIntegrator(mfem::Coefficient &q) : Q(&q) 

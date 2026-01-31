@@ -98,8 +98,10 @@ public:
         umf_solver.SetOperator(*A);
         umf_solver.Mult(B, X);
 #else
+        InputParser parser(config);
         mfem::GSSmoother M((mfem::SparseMatrix&)(*A));
-        mfem::PCG(*A, M, B, X, 0, 2000, 1e-12, 0.0);
+        mfem::PCG(*A, M, B, X, parser.GetSolverPrintLevel(),
+                  parser.GetSolverMaxIter(), parser.GetSolverTolerance(), 0.0);
 #endif
 
         // Recover solution into GridFunction x

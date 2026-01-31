@@ -4,6 +4,7 @@
 #pragma once
 
 #include "mfem.hpp"
+#include "constants.hpp"
 
 /**
  * @brief Axisymmetric Curl-Curl Integrator for Magnetostatics
@@ -14,8 +15,8 @@ class AxisymmetricCurlCurlIntegrator : public mfem::BilinearFormIntegrator
 {
 private:
    mfem::Coefficient *Q; // Reluctivity (1/mu)
-   static constexpr double factor = 2.0 * M_PI;
-   static constexpr double r_tol = 1e-12; // Tolerance for axis detection
+   static constexpr double factor = Constants::TWO_PI;
+   static constexpr double r_tol = Constants::AXIS_TOLERANCE; // Tolerance for axis detection
 
 public:
    AxisymmetricCurlCurlIntegrator(mfem::Coefficient &q) : Q(&q) 
