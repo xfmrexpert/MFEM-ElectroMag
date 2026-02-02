@@ -71,49 +71,69 @@ public:
          Mult(dshape, Trans.InverseJacobian(), dshape_phys);
 
          // 4. Assemble Matrix
-         for (int j = 0; j < nd; j++)
+         if (r > r_tol)
          {
-             // Physical derivatives of shape function j
-             double dNj_dr = dshape_phys(j, 0); // x-derivative
-             double dNj_dz = dshape_phys(j, 1); // y-derivative (mapped to z)
-
-             // Calculate the Azimuthal Curl components
-             // Curl(A)_r = -dA/dz
-             // Curl(A)_z = A/r + dA/dr
-             
-             double curl_j_r = -dNj_dz;
-             double curl_j_z = 0.0;
-
-             // --- ROBUST SINGULARITY HANDLING ---
-             if (r > r_tol) {
-                 curl_j_z = (shape(j) / r) + dNj_dr;
-             } else {
-                 // Limit as r->0: A/r -> dA/dr
-                 // Total term becomes 2 * dA/dr
-                 curl_j_z = 2.0 * dNj_dr;
-             }
-
-             // Exploit symmetry: only compute upper triangle
-             for (int k = j; k < nd; k++)
+             // --- ROBUST SINGULARITY HANDLING (Far Field) ---
+             // curl_z = (shape / r) + dN_dr
+             for (int j = 0; j < nd; j++)
              {
-                 double dNk_dr = dshape_phys(k, 0);
-                 double dNk_dz = dshape_phys(k, 1);
+                 // Physical derivatives of shape function j
+                 double dNj_dr = dshape_phys(j, 0); // x-derivative
+                 double dNj_dz = dshape_phys(j, 1); // y-derivative (mapped to z)
 
-                 double curl_k_r = -dNk_dz;
-                 double curl_k_z = 0.0;
+                 // Calculate the Azimuthal Curl components
+                 // Curl(A)_r = -dA/dz
+                 // Curl(A)_z = A/r + dA/dr
 
-                 if (r > r_tol) {
-                     curl_k_z = (shape(k) / r) + dNk_dr;
-                 } else {
-                     curl_k_z = 2.0 * dNk_dr;
+                 double curl_j_r = -dNj_dz;
+                 double curl_j_z = (shape(j) / r) + dNj_dr;
+
+                 // Exploit symmetry: only compute upper triangle
+                 for (int k = j; k < nd; k++)
+                 {
+                     double dNk_dr = dshape_phys(k, 0);
+                     double dNk_dz = dshape_phys(k, 1);
+
+                     double curl_k_r = -dNk_dz;
+                     double curl_k_z = (shape(k) / r) + dNk_dr;
+
+                     // Dot Product of the two curl vectors
+                     double val = curl_j_r * curl_k_r + curl_j_z * curl_k_z;
+
+                     elmat(j, k) += w * val;
+                     if (k != j) {
+                         elmat(k, j) += w * val;
+                     }
                  }
+             }
+         }
+         else
+         {
+             // --- ROBUST SINGULARITY HANDLING (Near Field r->0) ---
+             // Limit as r->0: A/r -> dA/dr
+             // Total term becomes 2 * dA/dr
+             for (int j = 0; j < nd; j++)
+             {
+                 double dNj_dr = dshape_phys(j, 0);
+                 double dNj_dz = dshape_phys(j, 1);
 
-                 // Dot Product of the two curl vectors
-                 double val = curl_j_r * curl_k_r + curl_j_z * curl_k_z;
-                 
-                 elmat(j, k) += w * val;
-                 if (k != j) {
-                     elmat(k, j) += w * val;
+                 double curl_j_r = -dNj_dz;
+                 double curl_j_z = 2.0 * dNj_dr;
+
+                 for (int k = j; k < nd; k++)
+                 {
+                     double dNk_dr = dshape_phys(k, 0);
+                     double dNk_dz = dshape_phys(k, 1);
+
+                     double curl_k_r = -dNk_dz;
+                     double curl_k_z = 2.0 * dNk_dr;
+
+                     double val = curl_j_r * curl_k_r + curl_j_z * curl_k_z;
+
+                     elmat(j, k) += w * val;
+                     if (k != j) {
+                         elmat(k, j) += w * val;
+                     }
                  }
              }
          }
