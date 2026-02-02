@@ -16,8 +16,12 @@ private:
    mfem::Coefficient *Q; // Represents Space Charge Density (rho)
    static constexpr double factor = Constants::TWO_PI;
 
+   // Work vectors to avoid heap allocation in AssembleRHSElementVect
+   mfem::Vector shape;
+   mfem::Vector pos;
+
 public:
-   AxisymmetricLFIntegrator(mfem::Coefficient &q) : Q(&q) 
+   AxisymmetricLFIntegrator(mfem::Coefficient &q) : Q(&q), pos(2)
    {
       MFEM_ASSERT(Q != nullptr, "Coefficient cannot be null");
    }
@@ -30,8 +34,8 @@ public:
       elvect.SetSize(nd);
       elvect = 0.0;
 
-      mfem::Vector shape(nd);
-      mfem::Vector pos(2); // 2D axisymmetric
+      shape.SetSize(nd);
+      // pos is already size 2
 
       // Increase order by 1 for 'r' term
       int order = 2 * el.GetOrder() + 1; 
