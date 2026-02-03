@@ -125,9 +125,7 @@ public:
         E.ProjectCoefficient(grad_x);
         
         // Negate to get E = -Grad(V)
-        for (int i = 0; i < E.Size(); i++) {
-            E[i] = -E[i];
-        }
+        E *= -1.0;
         paraview.RegisterField("E", &E);
         
         // 2. Permittivity Scalar Space
