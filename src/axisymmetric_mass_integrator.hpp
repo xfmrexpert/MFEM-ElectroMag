@@ -31,8 +31,10 @@ public:
       elmat.SetSize(nd);
       elmat = 0.0;
 
-      mfem::Vector shape(nd);
-      mfem::Vector pos(2);
+      static thread_local mfem::Vector shape;
+      static thread_local mfem::Vector pos;
+      shape.SetSize(nd);
+      pos.SetSize(2);
 
       // Standard order is fine here (no 1/r singularity)
       // r dependency is linear, so Order + 1 is sufficient
