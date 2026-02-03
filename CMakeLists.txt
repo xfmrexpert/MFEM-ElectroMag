@@ -37,7 +37,7 @@ include(FetchContent)
 FetchContent_Declare(
   mfem
   GIT_REPOSITORY https://github.com/mfem/mfem.git
-  GIT_TAG        v4.7  # Pin to a stable version for reproducibility
+  GIT_TAG        v4.9  # Pin to a stable version for reproducibility
 )
 
 # This creates the 'mfem' target available for linking
