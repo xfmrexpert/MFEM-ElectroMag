@@ -18,6 +18,12 @@ private:
    static constexpr double factor = Constants::TWO_PI;
    static constexpr double r_tol = Constants::AXIS_TOLERANCE; // Tolerance for axis detection
 
+   // Temporary variables to avoid heap allocation in AssembleElementMatrix
+   mfem::Vector shape;
+   mfem::DenseMatrix dshape;
+   mfem::DenseMatrix dshape_phys;
+   mfem::Vector pos;
+
 public:
    AxisymmetricCurlCurlIntegrator(mfem::Coefficient &q) : Q(&q) 
    {
@@ -34,10 +40,11 @@ public:
       elmat.SetSize(nd);
       elmat = 0.0;
 
-      mfem::Vector shape(nd);
-      mfem::DenseMatrix dshape(nd, el.GetDim());      // Gradient in Reference Space
-      mfem::DenseMatrix dshape_phys(nd, el.GetDim()); // Gradient in Physical Space
-      mfem::Vector pos(2); // 2D axisymmetric
+      // Resize temporary variables if necessary
+      shape.SetSize(nd);
+      dshape.SetSize(nd, el.GetDim());
+      dshape_phys.SetSize(nd, el.GetDim());
+      pos.SetSize(2); // 2D axisymmetric
 
       // Increase order slightly to capture 1/r curvature near axis
       int order = 2 * el.GetOrder() + Trans.OrderGrad(&el);
