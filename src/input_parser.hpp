@@ -103,7 +103,7 @@ public:
                     for (int attr : mat["attributes"]) {
                         // Protect against out-of-bounds keys
                         if (attr > 0 && attr <= max_attr) {
-                            nu_values[attr - 1] = nu; // <--- FIX: attr - 1
+                            nu_values[attr - 1] = nu;
                         }
                     }
                 }
@@ -126,7 +126,7 @@ public:
 
                     for (int attr : mat["attributes"]) {
                         if (attr > 0 && attr <= max_attr) {
-                            sigma_values[attr - 1] = sigma; // <--- FIX: attr - 1
+                            sigma_values[attr - 1] = sigma;
                         }
                     }
                 }
@@ -149,7 +149,7 @@ public:
 
                     for (int attr : mat["attributes"]) {
                         if (attr > 0 && attr <= max_attr) {
-                            eps_values[attr - 1] = eps_r; // <--- FIX: attr - 1
+                            eps_values[attr - 1] = eps_r;
                         }
                     }
                 }
@@ -230,7 +230,7 @@ public:
                     double val = src["value"];
                     for (int attr : src["attributes"]) {
                         if (attr > 0 && attr <= max_attr) {
-                            j_values[attr - 1] = val; // <--- FIX: attr - 1
+                            j_values[attr - 1] = val;
                         }
                     }
                 }
