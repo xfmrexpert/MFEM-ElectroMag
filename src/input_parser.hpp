@@ -9,23 +9,28 @@
 #include <iostream>
 #include <unordered_map>
 #include <optional>
+#include <memory>
 #include <filesystem> // C++17
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 class InputParser {
+    std::unique_ptr<json> owned_config;
+
 public:
-    json config;
+    const json& config;
     std::string config_dir;
 
-    InputParser(const std::string &filename) {
+    InputParser(const std::string &filename)
+        : owned_config(std::make_unique<json>()),
+          config(*owned_config) {
         std::ifstream f(filename);
         if (!f.is_open()) {
             throw std::runtime_error("Could not open config file: " + filename);
         }
-        f >> config;
-        
+        f >> *owned_config;
+
         // Store directory of config file
         fs::path p(filename);
         config_dir = p.parent_path().string();
@@ -34,24 +39,28 @@ public:
 
     // Allow construction from existing json
     InputParser(const json& c) : config(c), config_dir(".") {}
+    InputParser(json&&) = delete;
 
     // Get solver parameters with defaults
     [[nodiscard]] double GetSolverTolerance() const {
-        if (config["simulation"].contains("solver_tolerance")) {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("solver_tolerance")) {
             return config["simulation"]["solver_tolerance"];
         }
         return Constants::DEFAULT_SOLVER_TOLERANCE;
     }
 
     [[nodiscard]] int GetSolverMaxIter() const {
-        if (config["simulation"].contains("solver_max_iter")) {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("solver_max_iter")) {
             return config["simulation"]["solver_max_iter"];
         }
         return Constants::DEFAULT_SOLVER_MAX_ITER;
     }
 
     [[nodiscard]] int GetSolverPrintLevel() const {
-        if (config["simulation"].contains("solver_print_level")) {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("solver_print_level")) {
             return config["simulation"]["solver_print_level"];
         }
         return Constants::DEFAULT_SOLVER_PRINT_LEVEL;
@@ -60,7 +69,8 @@ public:
     [[nodiscard]] std::string GetMeshPath() {
         std::string mesh_path;
 
-        if (config["simulation"].contains("mesh")) {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("mesh")) {
             mesh_path = config["simulation"]["mesh"];
             fs::path p(mesh_path);
 
