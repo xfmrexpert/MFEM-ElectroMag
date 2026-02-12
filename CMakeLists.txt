@@ -98,3 +98,10 @@ if(BUILD_TESTING)
     include(Catch)
     catch_discover_tests(mfem_tests)
 endif()
+
+# Benchmark
+add_executable(bench_mass_integrator benchmark/bench_mass_integrator.cpp)
+target_link_libraries(bench_mass_integrator PRIVATE mfem)
+if(USE_OPENMP AND OpenMP_CXX_FOUND)
+    target_link_libraries(bench_mass_integrator PRIVATE OpenMP::OpenMP_CXX)
+endif()

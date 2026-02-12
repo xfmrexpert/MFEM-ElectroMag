@@ -61,7 +61,7 @@ TEST_CASE("ElectrostaticSolver can be constructed", "[solvers]") {
     InputParser parser(test_config);
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
 
-    REQUIRE_NOTHROW(ElectrostaticSolver(mesh, parser.config));
+    REQUIRE_NOTHROW(ElectrostaticSolver(mesh, test_config));
 
     // Cleanup
     fs::remove(mesh_file);
@@ -106,7 +106,7 @@ TEST_CASE("MagnetostaticSolver can be constructed", "[solvers]") {
     InputParser parser(test_config);
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
 
-    REQUIRE_NOTHROW(MagnetostaticSolver(mesh, parser.config));
+    REQUIRE_NOTHROW(MagnetostaticSolver(mesh, test_config));
 
     // Cleanup
     fs::remove(mesh_file);
@@ -155,7 +155,7 @@ TEST_CASE("MagnetoquasistaticSolver can be constructed", "[solvers]") {
     InputParser parser(test_config);
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
 
-    REQUIRE_NOTHROW(MagnetoquasistaticSolver(mesh, parser.config));
+    REQUIRE_NOTHROW(MagnetoquasistaticSolver(mesh, test_config));
 
     // Cleanup
     fs::remove(mesh_file);

@@ -17,6 +17,11 @@ private:
    mfem::Coefficient *Q; // Conductivity (sigma)
    static constexpr double factor = Constants::TWO_PI;
 
+   // Temporary vectors to avoid reallocation
+   // Warning: This makes the integrator stateful and not thread-safe for shared use.
+   mfem::Vector shape;
+   mfem::Vector pos;
+
 public:
    AxisymmetricMassIntegrator(mfem::Coefficient &q) : Q(&q) 
    {
@@ -31,8 +36,8 @@ public:
       elmat.SetSize(nd);
       elmat = 0.0;
 
-      mfem::Vector shape(nd);
-      mfem::Vector pos(2);
+      shape.SetSize(nd);
+      pos.SetSize(2);
 
       // Standard order is fine here (no 1/r singularity)
       // r dependency is linear, so Order + 1 is sufficient
