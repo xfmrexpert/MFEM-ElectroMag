@@ -3,13 +3,14 @@
 
 #pragma once
 
-#include <memory> 
+#include <memory>
 #include "mfem.hpp"
 #include "physics_solver.hpp"
 #include "axisymmetric_curl_curl_integrator.hpp"
 #include "axisymmetric_lf_integrator.hpp"
 #include "magnetic_field_coefficient.hpp"
 #include "input_parser.hpp"
+#include "boundary_validation.hpp"
 
 class MagnetostaticSolver : public PhysicsSolver {
     // 1. Logic
@@ -68,6 +69,11 @@ public:
         std::vector<std::pair<mfem::Array<int>, double>> bcs;
         parser.SetupBoundaries(mesh, bcs);
 
+        // Validate that BCs don't create physical conflicts
+        BoundaryConditionValidator validator(mesh, *fespace);
+        validator.ValidateBoundaryConditions(bcs, false);  // Strict mode - reject conflicts
+
+        // Apply boundary conditions
         for (const auto& [marker, val] : bcs) {
             mfem::ConstantCoefficient val_coeff(val);
             A->ProjectBdrCoefficient(val_coeff, marker);

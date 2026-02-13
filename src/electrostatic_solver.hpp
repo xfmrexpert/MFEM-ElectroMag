@@ -7,6 +7,7 @@
 #include "physics_solver.hpp"
 #include "axisymmetric_diffusion_integrator.hpp"
 #include "input_parser.hpp"
+#include "boundary_validation.hpp"
 
 class ElectrostaticSolver : public PhysicsSolver {
     enum class SolverType { Axisymmetric, Planar };
@@ -39,7 +40,7 @@ public:
         fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
         x = std::make_unique<mfem::GridFunction>(fespace.get());
         *x = 0.0;
-        
+
         // 3. Material Properties (Permittivity)
         InputParser parser(config);
         mfem::Vector epsilon_values;
@@ -49,10 +50,15 @@ public:
         // 4. Boundary Conditions
         ess_bdr.SetSize(mesh.bdr_attributes.Max());
         ess_bdr = 0;
-        
+
         std::vector<std::pair<mfem::Array<int>, double>> bcs;
         parser.SetupBoundaries(mesh, bcs);
 
+        // Validate that BCs don't create physical conflicts
+        BoundaryConditionValidator validator(mesh, *fespace);
+        validator.ValidateBoundaryConditions(bcs, false);  // Strict mode - reject conflicts
+
+        // Apply boundary conditions
         for (const auto& [marker, val] : bcs) {
             mfem::ConstantCoefficient val_coeff(val);
             x->ProjectBdrCoefficient(val_coeff, marker);
@@ -61,7 +67,7 @@ public:
                 if(marker[i]) ess_bdr[i] = 1;
             }
         }
-        
+
         // 5. Linear Form (RHS)
         b = std::make_unique<mfem::LinearForm>(fespace.get());
         *b = 0.0;
@@ -112,23 +118,21 @@ public:
         mfem::ParaViewDataCollection paraview("results_electrostatic", &mesh);
         paraview.SetLevelsOfDetail(1);
         paraview.RegisterField("V", x.get());
-        
-        // --- Electric Field & Visualization Spaces ---
-        // Stack allocate temporaries that are managed automatically
+
+        // Electric Field: E = -Grad(V)
         mfem::L2_FECollection fec_l2(fec->GetOrder() - 1, mesh.Dimension());
         
-        // 1. Electric Field Vector Space
-        mfem::FiniteElementSpace fespace_l2_vec(&mesh, &fec_l2, mesh.Dimension()); 
+        // Electric Field Vector Space
+        mfem::FiniteElementSpace fespace_l2_vec(&mesh, &fec_l2, mesh.Dimension());
         mfem::GridFunction E(&fespace_l2_vec);
-        
+
         mfem::GradientGridFunctionCoefficient grad_x(x.get());
         E.ProjectCoefficient(grad_x);
-        
-        // Negate to get E = -Grad(V)
-        E *= -1.0;
+        E *= -1.0;  // E = -Grad(V)
+
         paraview.RegisterField("E", &E);
-        
-        // 2. Permittivity Scalar Space
+
+        // Permittivity
         mfem::FiniteElementSpace fespace_l2_scalar(&mesh, &fec_l2);
         mfem::GridFunction eps_gf(&fespace_l2_scalar);
         eps_gf.ProjectCoefficient(*epsilon_coeff);

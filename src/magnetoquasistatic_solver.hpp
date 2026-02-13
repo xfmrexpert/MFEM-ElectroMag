@@ -12,6 +12,7 @@
 #include "magnetic_field_coefficient.hpp"
 #include "input_parser.hpp"
 #include "constants.hpp"
+#include "boundary_validation.hpp"
 
 class MagnetoquasistaticSolver : public PhysicsSolver {
     // 1. Logic Types
@@ -80,13 +81,17 @@ public:
         // 4. Boundary Attributes
         ess_bdr.SetSize(mesh.bdr_attributes.Max());
         ess_bdr = 0;
-        
+
         std::vector<std::pair<mfem::Array<int>, double>> bcs;
         parser.SetupBoundaries(mesh, bcs);
-        
-        // Structured binding (C++17) for cleaner loop
+
+        // Validate that BCs don't create physical conflicts
+        BoundaryConditionValidator validator(mesh, *fespace);
+        validator.ValidateBoundaryConditions(bcs, false);  // Strict mode - reject conflicts
+
+        // Mark essential boundaries (only those with zero BC in this formulation)
         for (const auto& [marker, val] : bcs) {
-            if (val == 0.0) { 
+            if (val == 0.0) {
                  for(int i=0; i<marker.Size(); i++) if(marker[i]) ess_bdr[i] = 1;
             }
         }

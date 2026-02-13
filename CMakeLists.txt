@@ -98,3 +98,27 @@ if(BUILD_TESTING)
     include(Catch)
     catch_discover_tests(mfem_tests)
 endif()
+
+# Minimal test executable  
+add_executable(test_minimal build/test_minimal.cpp)
+target_link_libraries(test_minimal mfem)
+
+# Axisymmetric test
+add_executable(test_axisym build/test_axisym.cpp)
+target_link_libraries(test_axisym mfem)
+target_include_directories(test_axisym PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Magnetostatic multiple BC test
+add_executable(test_magnetostatic_multi_bc build/test_magnetostatic_multi_bc.cpp)
+target_link_libraries(test_magnetostatic_multi_bc mfem)
+target_include_directories(test_magnetostatic_multi_bc PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Magnetostatic with capacitor mesh test
+add_executable(test_magnetostatic_capacitor_mesh build/test_magnetostatic_capacitor_mesh.cpp)
+target_link_libraries(test_magnetostatic_capacitor_mesh mfem)
+target_include_directories(test_magnetostatic_capacitor_mesh PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Magnetostatic with FIXED BC approach
+add_executable(test_magnetostatic_fixed build/test_magnetostatic_fixed.cpp)
+target_link_libraries(test_magnetostatic_fixed mfem)
+target_include_directories(test_magnetostatic_fixed PRIVATE ${CMAKE_SOURCE_DIR}/src)

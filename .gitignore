@@ -75,3 +75,5 @@ cmake-build-*/
 *.synctex.gz
 *.toc
 test/electrostatic_test.msh
+lib64
+pyvenv.cfg
