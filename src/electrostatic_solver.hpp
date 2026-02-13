@@ -25,7 +25,7 @@ class ElectrostaticSolver : public PhysicsSolver {
     mfem::Array<int> ess_bdr;
 
 public:
-    ElectrostaticSolver(mfem::Mesh &m, json &c) : PhysicsSolver(m, c) {}
+    ElectrostaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
     
     void Setup() override {
         // 1. Config & Logic

@@ -41,7 +41,7 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
 
 public:
     // Constructor deals only with initialization, no manual nullptr assignment needed
-    MagnetoquasistaticSolver(mfem::Mesh &m, json &c) : PhysicsSolver(m, c) {}
+    MagnetoquasistaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
 
     // Destructor is implicitly defined and handles cleanup automatically!
     // ~MagnetoquasistaticSolver() = default;

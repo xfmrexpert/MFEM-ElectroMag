@@ -32,7 +32,7 @@ class MagnetostaticSolver : public PhysicsSolver {
     mfem::Array<int> ess_bdr;
 
 public:
-    MagnetostaticSolver(mfem::Mesh &m, json &c) : PhysicsSolver(m, c) {}
+    MagnetostaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
     
     // No manual destructor needed!
 

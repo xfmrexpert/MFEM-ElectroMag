@@ -77,3 +77,4 @@ cmake-build-*/
 test/electrostatic_test.msh
 lib64
 pyvenv.cfg
+results_magnetostatic/*

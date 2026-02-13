@@ -23,7 +23,7 @@ using json = nlohmann::json;
  */
 class SolverFactory {
 public:
-    using SolverCreator = std::function<std::unique_ptr<PhysicsSolver>(mfem::Mesh&, json&)>;
+    using SolverCreator = std::function<std::unique_ptr<PhysicsSolver>(mfem::Mesh&, const json&)>;
 
 private:
     std::unordered_map<std::string, SolverCreator> registry;
@@ -31,17 +31,17 @@ private:
     SolverFactory() {
         // Register all available solvers
         Register("electrostatics",
-            [](mfem::Mesh& mesh, json& config) -> std::unique_ptr<PhysicsSolver> {
+            [](mfem::Mesh& mesh, const json& config) -> std::unique_ptr<PhysicsSolver> {
                 return std::make_unique<ElectrostaticSolver>(mesh, config);
             });
 
         Register("magnetostatics",
-            [](mfem::Mesh& mesh, json& config) -> std::unique_ptr<PhysicsSolver> {
+            [](mfem::Mesh& mesh, const json& config) -> std::unique_ptr<PhysicsSolver> {
                 return std::make_unique<MagnetostaticSolver>(mesh, config);
             });
 
         Register("magnetoquasistatics",
-            [](mfem::Mesh& mesh, json& config) -> std::unique_ptr<PhysicsSolver> {
+            [](mfem::Mesh& mesh, const json& config) -> std::unique_ptr<PhysicsSolver> {
                 return std::make_unique<MagnetoquasistaticSolver>(mesh, config);
             });
     }
@@ -75,7 +75,7 @@ public:
     [[nodiscard]] std::unique_ptr<PhysicsSolver> Create(
         const std::string& type,
         mfem::Mesh& mesh,
-        json& config) const {
+        const json& config) const {
 
         auto it = registry.find(type);
         if (it == registry.end()) {

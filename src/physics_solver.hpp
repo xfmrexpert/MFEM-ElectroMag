@@ -16,10 +16,10 @@ using json = nlohmann::json;
 class PhysicsSolver {
 protected:
     mfem::Mesh &mesh;
-    json &config;
+    const json &config;
 
 public:
-    PhysicsSolver(mfem::Mesh &m, json &c) : mesh(m), config(c) {}
+    PhysicsSolver(mfem::Mesh &m, const json &c) : mesh(m), config(c) {}
     
     // Virtual destructor is essential for unique_ptr polymorphism
     virtual ~PhysicsSolver() = default;
