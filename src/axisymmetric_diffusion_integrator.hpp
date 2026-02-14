@@ -48,7 +48,7 @@ public:
          Trans.Transform(ip, pos);
          
          double r = pos(0); // Radius is X
-         
+
          // Weight = quad_weight * det(J) * (2 * pi * r) * epsilon
          w = ip.weight * Trans.Weight() * (factor * r) * Q->Eval(Trans, ip);
 

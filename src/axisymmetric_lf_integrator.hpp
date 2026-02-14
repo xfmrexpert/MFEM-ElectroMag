@@ -7,54 +7,48 @@
 #include "constants.hpp"
 
 // -----------------------------------------------------------------------------
-// 2. Linear Form Integrator: Space Charge (rho)
+// 2. Linear Form Integrator: Current Density (J_phi)
 // -----------------------------------------------------------------------------
-// Solves: Integral( rho * v * 2*pi*r * dr * dz )
+// Solves: Integral( J_phi * v * r * dr * dz )
 class AxisymmetricLFIntegrator : public mfem::LinearFormIntegrator
 {
 private:
-   mfem::Coefficient *Q; // Represents Space Charge Density (rho)
-   static constexpr double factor = Constants::TWO_PI;
-
-   // Work vectors to avoid heap allocation in AssembleRHSElementVect
-   mfem::Vector shape;
-   mfem::Vector pos;
+   mfem::Coefficient *src; // e.g., J_phi (magnetostatics) or rho (electrostatics)
 
 public:
-   AxisymmetricLFIntegrator(mfem::Coefficient &q) : Q(&q), pos(2)
+   AxisymmetricLFIntegrator(mfem::Coefficient &q) : src(&q)
    {
-      MFEM_ASSERT(Q != nullptr, "Coefficient cannot be null");
+      MFEM_ASSERT(src != nullptr, "Coefficient cannot be null");
    }
 
    void AssembleRHSElementVect(const mfem::FiniteElement &el,
-                                mfem::ElementTransformation &Trans,
-                                mfem::Vector &elvect) override
+                               mfem::ElementTransformation &Trans,
+                               mfem::Vector &elvect) override
    {
-      int nd = el.GetDof();
+      const int nd = el.GetDof();
       elvect.SetSize(nd);
       elvect = 0.0;
 
-      shape.SetSize(nd);
-      // pos is already size 2
+      mfem::Vector shape(nd);
+      mfem::Vector pos(Trans.GetSpaceDim());
 
-      // Increase order by 1 for 'r' term
-      int order = 2 * el.GetOrder() + 1; 
-      const mfem::IntegrationRule *ir = &mfem::IntRules.Get(el.GetGeomType(), order);
+      const int order = 2 * el.GetOrder() + 1;
+      const mfem::IntegrationRule &ir =
+         mfem::IntRules.Get(el.GetGeomType(), order);
 
-      for (int i = 0; i < ir->GetNPoints(); i++)
+      for (int i = 0; i < ir.GetNPoints(); i++)
       {
-         const mfem::IntegrationPoint &ip = ir->IntPoint(i);
+         const mfem::IntegrationPoint &ip = ir.IntPoint(i);
          Trans.SetIntPoint(&ip);
          Trans.Transform(ip, pos);
 
-         double r = pos(0);
+         const double r = pos(0);
+         const double val = src->Eval(Trans, ip);
 
-         // Weight = quad_weight * det(J) * (2 * pi * r) * rho
-         double val = Q->Eval(Trans, ip);
-         double w = ip.weight * Trans.Weight() * (factor * r) * val;
+         const double w = ip.weight * Trans.Weight() * r * val;
 
          el.CalcShape(ip, shape);
-         add(elvect, w, shape, elvect);
+         elvect.Add(w, shape);
       }
    }
 };

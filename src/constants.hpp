@@ -10,7 +10,8 @@ namespace Constants {
     constexpr double TWO_PI = 2.0 * 3.141592653589793;        // 2*pi
 
     // Numerical tolerances
-    constexpr double AXIS_TOLERANCE = 1e-6;                   // Tolerance for axis detection
+    constexpr double AXIS_TOLERANCE = 0.0;                    // Disabled (using mesh shifting instead)
+                                                              // Set to 0 to disable weighted residual near axis
 
     // Default solver parameters
     constexpr double DEFAULT_SOLVER_TOLERANCE = 1e-12;

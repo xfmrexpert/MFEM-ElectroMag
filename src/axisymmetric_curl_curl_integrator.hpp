@@ -3,147 +3,113 @@
 
 #pragma once
 
+#include <algorithm>
+#include <limits>
+
 #include "mfem.hpp"
-#include "constants.hpp"
 
 /**
- * @brief Axisymmetric Curl-Curl Integrator for Magnetostatics
- * Solves: Integral( 1/mu * Curl(A) . Curl(v) * 2*pi*r * dr * dz )
- * Handles the r=0 singularity by substituting A/r -> dA/dr
+ * @brief Thread-safe axisymmetric curl-curl bilinear form integrator for magnetostatics
+ *        with A = A_phi(r,z) e_phi.
+ *
+ * Assembles (up to a global 2π factor, omitted consistently):
+ *
+ *   ∫ ν [ (∂A/∂r)(∂v/∂r) + (∂A/∂z)(∂v/∂z) + (A/r)(v/r) ] * r dr dz
+ *
+ * where ν = 1/μ.
+ *
+ * IMPORTANT:
+ *   Enforce the essential BC A_phi = 0 on the symmetry axis r = 0 (regularity).
+ *
+ * Notes:
+ *   - This class is THREAD-SAFE: all scratch storage is local to AssembleElementMatrix().
+ *   - A tiny r clamp is used only as a safety net against pathological quadrature/mappings.
+ *     Proper behavior near the axis should come from essential BC elimination.
  */
 class AxisymmetricCurlCurlIntegrator : public mfem::BilinearFormIntegrator
 {
-private:
-   mfem::Coefficient *Q; // Reluctivity (1/mu)
-   static constexpr double factor = Constants::TWO_PI;
-   static constexpr double r_tol = Constants::AXIS_TOLERANCE; // Tolerance for axis detection
-
-   // Temporary variables to avoid heap allocation in AssembleElementMatrix
-   mfem::Vector shape;
-   mfem::DenseMatrix dshape;
-   mfem::DenseMatrix dshape_phys;
-   mfem::Vector pos;
-
 public:
-   AxisymmetricCurlCurlIntegrator(mfem::Coefficient &q) : Q(&q) 
+   explicit AxisymmetricCurlCurlIntegrator(mfem::Coefficient &reluctivity)
+      : nu_(&reluctivity)
    {
-      MFEM_ASSERT(Q != nullptr, "Coefficient cannot be null");
+      MFEM_ASSERT(nu_ != nullptr, "Reluctivity coefficient cannot be null");
    }
 
    void AssembleElementMatrix(const mfem::FiniteElement &el,
-                               mfem::ElementTransformation &Trans,
-                               mfem::DenseMatrix &elmat) override
+                              mfem::ElementTransformation &Trans,
+                              mfem::DenseMatrix &elmat) override
    {
-      int nd = el.GetDof();
-      double w;
+      const int nd  = el.GetDof();
+      const int dim = el.GetDim();
+
+      MFEM_ASSERT(dim == 2, "AxisymmetricCurlCurlIntegrator expects a 2D (r,z) finite element.");
 
       elmat.SetSize(nd);
       elmat = 0.0;
 
-      // Resize temporary variables if necessary
-      shape.SetSize(nd);
-      dshape.SetSize(nd, el.GetDim());
-      dshape_phys.SetSize(nd, el.GetDim());
-      pos.SetSize(2); // 2D axisymmetric
+      // Thread-safe scratch (local)
+      mfem::Vector      shape(nd);
+      mfem::DenseMatrix dshape_ref(nd, dim);
+      mfem::DenseMatrix dshape_phys(nd, dim);
+      mfem::Vector      pos(dim);
 
-      // Increase order slightly to capture 1/r curvature near axis
-      int order = 2 * el.GetOrder() + Trans.OrderGrad(&el);
-      const mfem::IntegrationRule *ir = &mfem::IntRules.Get(el.GetGeomType(), order);
+      // Conservative quadrature order for products of gradients + 1/r term.
+      const int order = 2 * el.GetOrder() + Trans.OrderGrad(&el);
+      const mfem::IntegrationRule &ir = mfem::IntRules.Get(el.GetGeomType(), order);
 
-      for (int i = 0; i < ir->GetNPoints(); i++)
+      for (int i = 0; i < ir.GetNPoints(); i++)
       {
-         const mfem::IntegrationPoint &ip = ir->IntPoint(i);
+         const mfem::IntegrationPoint &ip = ir.IntPoint(i);
          Trans.SetIntPoint(&ip);
+
+         // Physical coordinates: pos(0)=r, pos(1)=z
          Trans.Transform(ip, pos);
-         
-         double r = pos(0); 
+         const double r_raw = pos(0);
 
-         // 1. Material Property (1/mu)
-         double nu = Q->Eval(Trans, ip);
+         // Safety net only: avoids division by zero in pathological cases.
+         const double r = std::max(r_raw, std::numeric_limits<double>::min());
 
-         // 2. Integration Weight
-         // w = alpha * weight_ip * det(J) * (2*pi*r)
-         double geometry_factor = factor * r;
-         
-         // Safety: If r is effectively zero, the volume element vanishes,
-         // but we still need the limit for the stiffness term stability.
-         // However, standard FEM integration usually relies on r in the weight.
-         // If r ~ 0, weight ~ 0, so contribution is minimal unless the term blows up.
-         // We handle the blow-up below.
-         w = ip.weight * Trans.Weight() * geometry_factor * nu;
+         const double nu = nu_->Eval(Trans, ip);
 
-         // 3. Shape Functions & Gradients
+         // Axisymmetric weight (global 2π omitted): ip.weight * detJ * r * nu
+         const double w = ip.weight * Trans.Weight() * r * nu;
+
          el.CalcShape(ip, shape);
-         el.CalcDShape(ip, dshape);
-         Mult(dshape, Trans.InverseJacobian(), dshape_phys);
+         el.CalcDShape(ip, dshape_ref);
 
-         // 4. Assemble Matrix
-         if (r > r_tol)
+         // Map reference derivatives -> physical derivatives.
+         // This assumes MFEM convention: dshape_phys = dshape_ref * InvJ.
+         // If your unit test shows transpose, switch to InvJ^T.
+         Mult(dshape_ref, Trans.InverseJacobian(), dshape_phys);
+
+         for (int j = 0; j < nd; j++)
          {
-             // --- ROBUST SINGULARITY HANDLING (Far Field) ---
-             // curl_z = (shape / r) + dN_dr
-             for (int j = 0; j < nd; j++)
-             {
-                 // Physical derivatives of shape function j
-                 double dNj_dr = dshape_phys(j, 0); // x-derivative
-                 double dNj_dz = dshape_phys(j, 1); // y-derivative (mapped to z)
+            const double Nj     = shape(j);
+            const double dNj_dr = dshape_phys(j, 0);
+            const double dNj_dz = dshape_phys(j, 1);
 
-                 // Calculate the Azimuthal Curl components
-                 // Curl(A)_r = -dA/dz
-                 // Curl(A)_z = A/r + dA/dr
+            for (int k = j; k < nd; k++)
+            {
+               const double Nk     = shape(k);
+               const double dNk_dr = dshape_phys(k, 0);
+               const double dNk_dz = dshape_phys(k, 1);
 
-                 double curl_j_r = -dNj_dz;
-                 double curl_j_z = (shape(j) / r) + dNj_dr;
+               // ν * [ ∇A·∇v + (A v)/r^2 ] * r
+               const double val =
+                  (dNj_dr * dNk_dr) +
+                  (dNj_dz * dNk_dz) +
+                  (Nj * Nk) / (r * r);
 
-                 // Exploit symmetry: only compute upper triangle
-                 for (int k = j; k < nd; k++)
-                 {
-                     double dNk_dr = dshape_phys(k, 0);
-                     double dNk_dz = dshape_phys(k, 1);
+               const double a = w * val;
 
-                     double curl_k_r = -dNk_dz;
-                     double curl_k_z = (shape(k) / r) + dNk_dr;
-
-                     // Dot Product of the two curl vectors
-                     double val = curl_j_r * curl_k_r + curl_j_z * curl_k_z;
-
-                     elmat(j, k) += w * val;
-                     if (k != j) {
-                         elmat(k, j) += w * val;
-                     }
-                 }
-             }
-         }
-         else
-         {
-             // --- ROBUST SINGULARITY HANDLING (Near Field r->0) ---
-             // Limit as r->0: A/r -> dA/dr
-             // Total term becomes 2 * dA/dr
-             for (int j = 0; j < nd; j++)
-             {
-                 double dNj_dr = dshape_phys(j, 0);
-                 double dNj_dz = dshape_phys(j, 1);
-
-                 double curl_j_r = -dNj_dz;
-                 double curl_j_z = 2.0 * dNj_dr;
-
-                 for (int k = j; k < nd; k++)
-                 {
-                     double dNk_dr = dshape_phys(k, 0);
-                     double dNk_dz = dshape_phys(k, 1);
-
-                     double curl_k_r = -dNk_dz;
-                     double curl_k_z = 2.0 * dNk_dr;
-
-                     double val = curl_j_r * curl_k_r + curl_j_z * curl_k_z;
-
-                     elmat(j, k) += w * val;
-                     if (k != j) {
-                         elmat(k, j) += w * val;
-                     }
-                 }
-             }
+               elmat(j, k) += a;
+               if (k != j) { elmat(k, j) += a; }
+            }
          }
       }
    }
+
+private:
+   mfem::Coefficient *nu_ = nullptr;
 };
+

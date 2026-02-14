@@ -122,3 +122,33 @@ target_include_directories(test_magnetostatic_capacitor_mesh PRIVATE ${CMAKE_SOU
 add_executable(test_magnetostatic_fixed build/test_magnetostatic_fixed.cpp)
 target_link_libraries(test_magnetostatic_fixed mfem)
 target_include_directories(test_magnetostatic_fixed PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Cartesian magnetostatic test (no axisymmetric)
+add_executable(test_cartesian_magnetostatic build/test_cartesian_magnetostatic.cpp)
+target_link_libraries(test_cartesian_magnetostatic mfem)
+
+# Axisymmetric simple test
+add_executable(test_axisym_simple build/test_axisym_simple.cpp)
+target_link_libraries(test_axisym_simple mfem)
+target_include_directories(test_axisym_simple PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# Mesh checker
+add_executable(test_check_mesh build/test_check_mesh.cpp)
+target_link_libraries(test_check_mesh mfem)
+
+add_executable(test_check_r_zero build/test_check_r_zero.cpp)
+target_link_libraries(test_check_r_zero mfem)
+
+add_executable(test_check_r_zero_bc build/test_check_r_zero_bc.cpp)
+target_link_libraries(test_check_r_zero_bc mfem)
+target_include_directories(test_check_r_zero_bc PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(test_rA_simple build/test_rA_simple.cpp)
+target_link_libraries(test_rA_simple mfem)
+target_include_directories(test_rA_simple PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(check_mesh_bounds build/check_mesh_bounds.cpp)
+target_link_libraries(check_mesh_bounds mfem)
+
+add_executable(check_loop_mesh build/check_loop_mesh.cpp)
+target_link_libraries(check_loop_mesh mfem)
