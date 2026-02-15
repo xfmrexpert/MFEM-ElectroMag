@@ -95,10 +95,9 @@ public:
                const double dNk_dz = dshape_phys(k, 1);
 
                // ν * [ ∇A·∇v + (A v)/r^2 ] * r
-               const double val =
-                  (dNj_dr * dNk_dr) +
-                  (dNj_dz * dNk_dz) +
-                  (Nj * Nk) / (r * r);
+               // {[dNj/dr dNj/dz] dot [dNk/dr dNk/dz] + Nj * Nk / r^2} * r
+               // {dNj/dr * dNk/dr + dNj/dz * dNk/dz + Nj * Nk/r^2} * r
+               const double val = (dNj_dr * dNk_dr) + (dNj_dz * dNk_dz) + (Nj * Nk) / (r * r);
 
                const double a = w * val;
 

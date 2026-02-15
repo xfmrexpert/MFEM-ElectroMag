@@ -53,7 +53,9 @@ public:
          w = ip.weight * Trans.Weight() * (factor * r) * Q->Eval(Trans, ip);
 
          el.CalcDShape(ip, dshape);
+         // dN/ds * J^-1
          Mult(dshape, Trans.InverseJacobian(), dshapedxt);
+         // Integral of grad u dot grad v r dr dz
          AddMult_a_AAt(w, dshapedxt, elmat);
       }
    }
