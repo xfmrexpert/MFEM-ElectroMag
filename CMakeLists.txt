@@ -152,3 +152,19 @@ target_link_libraries(check_mesh_bounds mfem)
 
 add_executable(check_loop_mesh build/check_loop_mesh.cpp)
 target_link_libraries(check_loop_mesh mfem)
+
+add_executable(test_mesh_geometry test_mesh_geometry.cpp)
+target_link_libraries(test_mesh_geometry mfem)
+
+add_executable(check_loop_axis check_loop_axis.cpp)
+target_link_libraries(check_loop_axis mfem)
+
+add_executable(check_axis_solution check_axis_solution.cpp)
+target_link_libraries(check_axis_solution mfem)
+target_include_directories(check_axis_solution PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(check_axis_nodes check_axis_nodes.cpp)
+target_link_libraries(check_axis_nodes mfem)
+
+add_executable(check_connectivity check_connectivity.cpp)
+target_link_libraries(check_connectivity mfem)

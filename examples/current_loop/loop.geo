@@ -22,9 +22,14 @@ Rectangle(3) = {a + delta/2, -domain_z, 0, domain_r - a - delta/2, 2*domain_z}; 
 Rectangle(4) = {a - delta/2, -domain_z, 0, delta, delta/2 + domain_z};  // Below loop
 Rectangle(5) = {a - delta/2, delta/2, 0, delta, delta/2 + domain_z};    // Above loop
 
-// Physical surfaces
-Physical Surface("Loop", 2) = {1};  // Current loop
-Physical Surface("Air", 1) = {2, 3, 4, 5};
+// Fragment all rectangles to ensure proper connectivity at interfaces
+BooleanFragments{ Surface{1, 2, 3, 4, 5}; Delete; }{}
+
+// Physical surfaces (note: surface IDs will change after fragmentation)
+// Will need to identify correct IDs after fragmentation
+// For now, mark all surfaces and assign attributes based on geometry
+Physical Surface("Loop", 2) = {1};  // Will need to update this
+Physical Surface("Air", 1) = {2, 3, 4, 5};  // Will need to update this
 
 // Physical boundaries (outer edges)
 Physical Curve("Outer", 1) = {15, 19, 12, 7};  // Outer boundary (A=0)

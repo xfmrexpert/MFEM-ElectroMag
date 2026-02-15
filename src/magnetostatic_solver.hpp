@@ -58,9 +58,36 @@ public:
       parser.SetupReluctivity(mesh, nu_vec);
       nu_coeff_ = std::make_unique<mfem::PWConstCoefficient>(nu_vec);
 
+      // Debug: Check reluctivity values
+      mfem::out << "\n=== Reluctivity (nu = 1/mu) by attribute ===\n";
+      for (int i = 0; i < nu_vec.Size(); i++) {
+         mfem::out << "  Attribute " << (i+1) << ": nu = " << nu_vec[i]
+                   << " (mu = " << (1.0/nu_vec[i]) << ")\n";
+      }
+      mfem::out << "Mesh has " << mesh.attributes.Max() << " domain attributes\n";
+
+      // Count elements per attribute
+      mfem::Array<int> elem_count(mesh.attributes.Max());
+      elem_count = 0;
+      for (int i = 0; i < mesh.GetNE(); i++) {
+         int attr = mesh.GetAttribute(i);
+         if (attr > 0 && attr <= elem_count.Size()) {
+            elem_count[attr-1]++;
+         }
+      }
+      for (int i = 0; i < elem_count.Size(); i++) {
+         mfem::out << "  Attribute " << (i+1) << ": " << elem_count[i] << " elements\n";
+      }
+
       mfem::Vector j_vec;
       parser.SetupSources(mesh, j_vec);
       j_coeff_ = std::make_unique<mfem::PWConstCoefficient>(j_vec);
+
+      // Debug: Check current density values
+      mfem::out << "\n=== Current Density (J) by attribute ===\n";
+      for (int i = 0; i < j_vec.Size(); i++) {
+         mfem::out << "  Attribute " << (i+1) << ": J = " << j_vec[i] << " A/m²\n";
+      }
 
       // 4) Boundary conditions (essential)
       const int nbattr = mesh.bdr_attributes.Size() ? mesh.bdr_attributes.Max() : 0;
@@ -96,6 +123,14 @@ public:
       // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
       if (type_ == SolverType::Axisymmetric)
       {
+         mfem::out << "\n=== Axis Boundary Detection ===\n";
+         mfem::out << "Total boundary elements: " << mesh.GetNBE() << "\n";
+         mfem::out << "Boundary attributes: ";
+         for (int i = 0; i < mesh.bdr_attributes.Size(); i++) {
+            mfem::out << mesh.bdr_attributes[i] << " ";
+         }
+         mfem::out << "\n";
+
          // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
          // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
          // If your mesh already has an "axis" boundary attribute, prefer using that in InputParser instead.
@@ -103,6 +138,12 @@ public:
          // After this, ess_bdr_ includes axis attributes, and A_ has already been projected
          // for other BCs. We also project A=0 on the axis here for safety.
          ProjectAxisZero_();
+
+         mfem::out << "After axis detection, essential boundaries: ";
+         for (int i = 0; i < ess_bdr_.Size(); i++) {
+            if (ess_bdr_[i]) mfem::out << (i+1) << " ";
+         }
+         mfem::out << "\n";
       }
 
       // 5) RHS
@@ -140,6 +181,78 @@ public:
       mfem::Array<int> ess_tdof_list;
       fespace_->GetEssentialTrueDofs(ess_bdr_, ess_tdof_list);
 
+      // 7b) For axisymmetric: Mark ALL DOFs at r=0 as essential (regularity condition)
+      if (type_ == SolverType::Axisymmetric) {
+         // For H1 elements, we need to identify all DOFs (vertex, edge, face) at r=0
+         // For simplicity with order-1 or order-2, check vertex DOFs
+         const int ndofs = fespace_->GetNDofs();
+         mfem::Array<int> axis_dofs;
+
+         // Get DOF coordinates - for H1 space, vertex DOFs are straightforward
+         for (int i = 0; i < mesh.GetNV(); i++) {
+            const double *coords = mesh.GetVertex(i);
+            if (std::abs(coords[0]) < 1e-10) {  // r ≈ 0
+               // For P1 elements: vertex i = DOF i
+               // For P2 elements: need to map vertex to DOF
+               if (i < ndofs) {  // Simple case: vertex DOF
+                  axis_dofs.Append(i);
+               }
+            }
+         }
+
+         // Merge axis DOFs into essential DOF list
+         mfem::Array<int> combined_list;
+         combined_list.Reserve(ess_tdof_list.Size() + axis_dofs.Size());
+         for (int i = 0; i < ess_tdof_list.Size(); i++) {
+            combined_list.Append(ess_tdof_list[i]);
+         }
+         for (int i = 0; i < axis_dofs.Size(); i++) {
+            // Check if already in list
+            bool already_added = false;
+            for (int j = 0; j < ess_tdof_list.Size(); j++) {
+               if (ess_tdof_list[j] == axis_dofs[i]) {
+                  already_added = true;
+                  break;
+               }
+            }
+            if (!already_added) {
+               combined_list.Append(axis_dofs[i]);
+            }
+         }
+         ess_tdof_list = combined_list;
+
+         mfem::out << "Added " << axis_dofs.Size() << " axis DOFs to essential list\n";
+      }
+
+      // Debug: Count essential DOFs
+      mfem::out << "Essential boundary markers: ";
+      for (int i = 0; i < ess_bdr_.Size(); i++) {
+         if (ess_bdr_[i]) mfem::out << (i+1) << " ";
+      }
+      mfem::out << "\n";
+      mfem::out << "Total DOFs: " << fespace_->GetNDofs() << "\n";
+      mfem::out << "Essential DOFs: " << ess_tdof_list.Size() << "\n";
+      mfem::out << "Free DOFs: " << (fespace_->GetNDofs() - ess_tdof_list.Size()) << "\n";
+
+      // Check how many axis DOFs are essential vs free
+      int axis_dofs_essential = 0, axis_dofs_free = 0;
+      for (int i = 0; i < mesh.GetNV(); i++) {
+         const double *coords = mesh.GetVertex(i);
+         if (std::abs(coords[0]) < 1e-10 && i < fespace_->GetNDofs()) {  // Axis node
+            bool is_essential = false;
+            for (int j = 0; j < ess_tdof_list.Size(); j++) {
+               if (ess_tdof_list[j] == i) {
+                  is_essential = true;
+                  break;
+               }
+            }
+            if (is_essential) axis_dofs_essential++;
+            else axis_dofs_free++;
+         }
+      }
+      mfem::out << "Axis DOFs: " << axis_dofs_essential << " essential, "
+                << axis_dofs_free << " free (NOT constrained!)\n";
+
       // 8) Form and solve
       mfem::OperatorPtr Aop;
       mfem::Vector X, B;
@@ -176,6 +289,64 @@ public:
       mfem::out << "  A min:     " << A_->Min() << "\n";
       mfem::out << "  A max:     " << A_->Max() << "\n";
       mfem::out << "  A L2 norm: " << A_->Norml2() << "\n";
+
+      // Count non-zero DOFs
+      int nonzero_dofs = 0;
+      for (int i = 0; i < A_->Size(); i++) {
+         if (std::abs((*A_)(i)) > 1e-14) nonzero_dofs++;
+      }
+      mfem::out << "  Non-zero DOFs: " << nonzero_dofs << " out of " << A_->Size() << "\n";
+
+      // Check A values at axis (r=0) for axisymmetric problems
+      if (type_ == SolverType::Axisymmetric) {
+         double max_A_at_axis = 0.0;
+         int count_axis = 0;
+         for (int i = 0; i < mesh.GetNV(); i++) {
+            const double *coords = mesh.GetVertex(i);
+            if (std::abs(coords[0]) < 1e-10) {  // r ≈ 0
+               // For order-1 FE, vertex DOF = vertex index
+               if (i < A_->Size()) {
+                  max_A_at_axis = std::max(max_A_at_axis, std::abs((*A_)(i)));
+                  count_axis++;
+               }
+            }
+         }
+         mfem::out << "  Axis nodes (r=0): " << count_axis << "\n";
+         mfem::out << "  Max |A| at axis:  " << max_A_at_axis << " (should be 0 for regularity)\n";
+         if (max_A_at_axis > 1e-10) {
+            mfem::out << "  *** WARNING: A_phi is NOT zero at axis! Regularity condition violated. ***\n";
+         }
+
+         // Check A values in INTERIOR of air region (away from all boundaries)
+         mfem::out << "\n=== A values in interior of air region ===\n";
+         int count_interior = 0;
+         for (int i = 0; i < mesh.GetNV(); i++) {
+            const double *coords = mesh.GetVertex(i);
+            double r = coords[0];
+            double z = coords[1];
+            // Interior: 0.02 < r < 0.08, -0.4 < z < 0.4 (well away from boundaries)
+            if (r > 0.02 && r < 0.08 && z > -0.4 && z < 0.4 && i < A_->Size()) {
+               double A_val = (*A_)(i);
+               if (count_interior < 10) {
+                  mfem::out << "  r=" << r << ", z=" << z << ": A=" << A_val << "\n";
+               }
+               count_interior++;
+            }
+         }
+         mfem::out << "Total interior air nodes checked: " << count_interior << "\n";
+
+         // Check A values in loop region
+         mfem::out << "\n=== A values in loop region (r~0.1) ===\n";
+         for (int i = 0; i < mesh.GetNV(); i++) {
+            const double *coords = mesh.GetVertex(i);
+            double r = coords[0];
+            double z = coords[1];
+            if (r > 0.098 && r < 0.102 && std::abs(z) < 0.01 && i < A_->Size()) {  // In/near loop
+               double A_val = (*A_)(i);
+               mfem::out << "  r=" << r << ", z=" << z << ": A=" << A_val << "\n";
+            }
+         }
+      }
    }
 
    void Save() override
