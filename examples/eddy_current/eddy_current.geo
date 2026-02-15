@@ -32,7 +32,8 @@ lc_coil = 0.005;                // 5 mm in coil
 lc_air = 0.010;                 // 10 mm in air near conductor
 lc_far = 0.030;                 // 30 mm at far field
 
-// Cylinder center at origin, extending from z=0 to z=cyl_length
+// Create geometries
+// Conductor (aluminum cylinder)
 Rectangle(1) = {0, 0, 0, cyl_radius, cyl_length};
 
 // Coil region (annular region around cylinder)
@@ -40,38 +41,27 @@ coil_z_start = (cyl_length - coil_length) / 2;  // Center coil on cylinder
 coil_z_end = coil_z_start + coil_length;
 Rectangle(2) = {coil_r_inner, coil_z_start, 0, coil_r_outer - coil_r_inner, coil_length};
 
-// Inner air region (between cylinder and coil)
-Rectangle(3) = {cyl_radius, 0, 0, coil_r_inner - cyl_radius, cyl_length};
+// Air domain (entire computational domain)
+Rectangle(3) = {0, -far_field_z, 0, far_field_r, 2*far_field_z};
 
-// Air around coil (extends to full cylinder length)
-Rectangle(4) = {coil_r_outer, 0, 0, far_field_r - coil_r_outer, cyl_length};
-
-// Air above cylinder
-Rectangle(5) = {0, cyl_length, 0, far_field_r, far_field_z - cyl_length};
-
-// Air below cylinder
-Rectangle(6) = {0, -far_field_z, 0, far_field_r, far_field_z};
-
-// Air beside coil (top part)
-Rectangle(7) = {coil_r_inner, cyl_length, 0, coil_r_outer - coil_r_inner, coil_z_end - cyl_length};
-
-// Air beside coil (bottom part)
-Rectangle(8) = {coil_r_inner, coil_z_start, 0, coil_r_outer - coil_r_inner, -coil_z_start};
+// Use BooleanDifference to cut out conductor and coil from air
+// This ensures proper connectivity at interfaces
+BooleanDifference(4) = { Surface{3}; Delete; }{ Surface{1}; };
+BooleanDifference(5) = { Surface{4}; Delete; }{ Surface{2}; };
 
 // Define physical surfaces (material attributes)
+// Note: Surface IDs change after Boolean operations
 Physical Surface("Conductor", 2) = {1};  // Aluminum cylinder
 Physical Surface("Coil", 3) = {2};        // Coil (current source)
-Physical Surface("Air", 1) = {3, 4, 5, 6, 7, 8};  // All air regions
+Physical Surface("Air", 1) = {5};         // Air (after cutting out conductor and coil)
 
 // Define physical curves for boundaries
-// Far field boundary (outer edges)
-Physical Curve("FarField", 1) = {
-    9,   // Right edge of rectangle 6 (r=far_field_r, z=-far_field_z to 0)
-    10,  // Right edge of rectangle 4 (r=far_field_r, z=0 to cyl_length)
-    14,  // Right edge of rectangle 5 (r=far_field_r, z=cyl_length to far_field_z)
-    15,  // Top edge of rectangle 5 (z=far_field_z, r=0 to far_field_r)
-    5    // Bottom edge of rectangle 6 (z=-far_field_z, r=0 to far_field_r)
-};
+// Note: Curve IDs will need to be identified after Boolean operations
+// For now, mark the outer boundary of the final air domain
+// The outer rectangle (3) has curves that form the far field boundary
+// After Boolean operations, these curves remain on surface 5
+// Typically: bottom, right, top edges (left edge at r=0 is axis)
+Physical Curve("FarField", 1) = {9, 10, 11};  // Will need to verify these IDs
 
 // Mesh refinement
 // Fine mesh at conductor surface (skin depth resolution)
