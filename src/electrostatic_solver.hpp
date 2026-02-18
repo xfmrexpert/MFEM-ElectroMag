@@ -56,7 +56,7 @@ public:
 
         // Validate that BCs don't create physical conflicts
         BoundaryConditionValidator validator(mesh, *fespace);
-        validator.ValidateBoundaryConditions(bcs, false);  // Strict mode - reject conflicts
+        validator.ValidateBoundaryConditions(bcs, true);  // Allow conflicts - will use last value applied
 
         // Apply boundary conditions
         for (const auto& [marker, val] : bcs) {

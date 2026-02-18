@@ -79,3 +79,4 @@ lib64
 pyvenv.cfg
 results_magnetostatic/*
 results_mqs/*
+examples/simple_capacitor/results_electrostatic/*
