@@ -1,7 +1,7 @@
 {
   "simulation": {
     "type": "magnetostatics",
-    "mesh": "solenoid.mesh",
+    "mesh": "solenoid_fixed.msh",
     "order": 2,
     "axisymmetric": true,
     "solver_tolerance": 1e-12,
@@ -36,7 +36,7 @@
   "boundaries": [
     {
       "name": "FarField",
-      "attributes": [1],
+      "attributes": [101],
       "type": "Dirichlet",
       "value": 0.0
     }

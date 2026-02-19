@@ -86,21 +86,34 @@ Rectangle(10) = {plate_radius, z_top_plate_top, 0, far_field_r - plate_radius, f
 Physical Surface("Dielectric", 2) = {2, 13};  // Dielectric between plates (including axis region)
 Physical Surface("Air", 1) = {4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15};  // All air regions
 
-// Boundary conditions
-// Top plate (surface 3) - we want its top edge
-// Bottom plate (surface 1) - we want its bottom edge
+// Boundary conditions - Identify and tag curves by spatial location
+// We need to tag:
+//   1 = Top plate (V = 1000 V): top edge of Rectangle 3
+//   2 = Bottom plate (V = 0 V): bottom edge of Rectangle 1
+//   3 = Far field (V = 0 V): outer boundary at r=far_field_r
 
-// Get all boundaries and manually filter
-// Rectangle 1 (bottom plate): curves are its 4 edges
-// Rectangle 3 (top plate): curves are its 4 edges
-// We want: bottom edge of rect 1, top edge of rect 3
+// Get all boundary curves
+all_curves[] = Curve "*";
 
-// Manually identified after inspection:
-// Bottom plate bottom edge: curve at z=0, r from r_min to plate_radius
-// Top plate top edge: curve at z=z_top_plate_top, r from r_min to plate_radius
+// Select curves by bounding box (with small tolerance)
+tol = 0.0001;
 
-// For now, let's tag NO boundaries and see what happens
-// This will help us understand the mesh structure
+// Bottom plate: curves at z ≈ z_bot_plate (0), r from r_min to plate_radius
+bottom_plate_curves[] = Curve In BoundingBox {r_min - tol, z_bot_plate - tol, -tol,
+                                                plate_radius + tol, z_bot_plate + tol, tol};
+
+// Top plate: curves at z ≈ z_top_plate_top (0.012), r from r_min to plate_radius
+top_plate_curves[] = Curve In BoundingBox {r_min - tol, z_top_plate_top - tol, -tol,
+                                             plate_radius + tol, z_top_plate_top + tol, tol};
+
+// Far field: curves at r ≈ far_field_r, all z
+far_field_curves[] = Curve In BoundingBox {far_field_r - tol, -far_field_z_bot - tol, -tol,
+                                             far_field_r + tol, far_field_z_top + tol, tol};
+
+// Define physical curves
+Physical Curve("TopPlate", 1) = {top_plate_curves[]};
+Physical Curve("BottomPlate", 2) = {bottom_plate_curves[]};
+Physical Curve("FarField", 3) = {far_field_curves[]};
 
 // Mesh refinement
 // Fine mesh at plates and in dielectric

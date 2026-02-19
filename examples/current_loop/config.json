@@ -1,7 +1,7 @@
 {
   "simulation": {
     "type": "magnetostatics",
-    "mesh": "loop.mesh",
+    "mesh": "loop_fixed.msh",
     "order": 2,
     "model_type": "axisymmetric",
     "solver_tolerance": 1e-12,
@@ -36,7 +36,7 @@
   "boundaries": [
     {
       "name": "Outer",
-      "attributes": [1],
+      "attributes": [101],
       "type": "Dirichlet",
       "value": 0.0
     }
