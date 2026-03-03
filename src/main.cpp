@@ -14,13 +14,14 @@ int main(int argc, char *argv[]) {
         // 1. Shared Infrastructure
         std::string config_file = (argc > 1) ? argv[1] : "config.json";
         InputParser parser(config_file);
+        ProblemConfig config = parser.GetProblemConfig();
 
         // 2. Validate Configuration (basic validation before mesh loading)
         ConfigValidator validator;
         validator.ValidateOrThrow(parser.config);
 
         // 3. Load Mesh
-        mfem::Mesh mesh(parser.GetMeshPath(), 1, 1);
+        mfem::Mesh mesh(config.MeshPath, 1, 1);
 
         // 4. Validate Configuration (with mesh for attribute checking)
         validator.ValidateOrThrow(parser.config, &mesh);

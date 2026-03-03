@@ -67,7 +67,9 @@ public:
          const double r_raw = pos(0);
 
          // Safety net only: avoids division by zero in pathological cases.
-         const double r = std::max(r_raw, std::numeric_limits<double>::min());
+         // Using a larger tolerance (e.g. 1e-12) prevents Infinity in the matrix
+         // which can cause solver crashes. (1e-12)^(-2) = 1e24 which fits in double.
+         const double r = std::max(r_raw, 1e-12);
 
          const double nu = nu_->Eval(Trans, ip);
 
@@ -99,16 +101,22 @@ public:
                // {dNj/dr * dNk/dr + dNj/dz * dNk/dz + Nj * Nk/r^2} * r
                const double val = (dNj_dr * dNk_dr) + (dNj_dz * dNk_dz) + (Nj * Nk) / (r * r);
 
-               const double a = w * val;
-
-               elmat(j, k) += a;
-               if (k != j) { elmat(k, j) += a; }
+               elmat(j, k) += w * val;
             }
+         }
+      }
+
+      // Symmetrize
+      for (int j = 0; j < nd; j++)
+      {
+         for (int k = 0; k < j; k++)
+         {
+            elmat(j, k) = elmat(k, j);
          }
       }
    }
 
 private:
-   mfem::Coefficient *nu_ = nullptr;
+   mfem::Coefficient *nu_;
 };
 

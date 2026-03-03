@@ -19,8 +19,7 @@
 class MagnetostaticSolver : public PhysicsSolver
 {
 private:
-   enum class SolverType { Axisymmetric, Planar };
-   SolverType type_ = SolverType::Axisymmetric;
+   ModelType type_ = ModelType::Axisymmetric;
 
    // Resources (order of declaration = order of destruction)
    std::unique_ptr<mfem::H1_FECollection>    fec_;
@@ -37,38 +36,69 @@ public:
 
    void Setup() override
    {
-      // 1) Config & solver type
-      const int order = config["simulation"].value("order", 1);
+      // Config & solver type
+      InputParser parser(config_json);
+      config = parser.GetProblemConfig();
+        
+      int order = config.Order;
       const int dim   = mesh.Dimension();
 
-      const std::string mode = config["simulation"].value("model_type", "axisymmetric");
-      type_ = (mode == "planar") ? SolverType::Planar : SolverType::Axisymmetric;
+      type_ = config.ModelType;
 
-      // 2) FE space
+      // FE space
       fec_     = std::make_unique<mfem::H1_FECollection>(order, dim);
       fespace_ = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec_.get());
 
       A_ = std::make_unique<mfem::GridFunction>(fespace_.get());
       *A_ = 0.0;
 
-      // 3) Materials & sources
-      InputParser parser(config);
+      // Materials & sources
 
-      mfem::Vector nu_vec;
-      parser.SetupReluctivity(mesh, nu_vec);
+      std::vector<Material> materials = config.Materials;
+      // Reluctivity
+      mfem::Vector nu_vec(mesh.attributes.Max());
+      nu_vec = 0.0;
+      
+      //parser.SetupReluctivity(mesh, nu_vec);
+      for (auto& region : config.Regions) {
+         for (auto attribute_id : region.AttributeIds) {
+                if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
+                    auto& material = materials[region.Material];
+                    double nu = 1.0 / (Constants::MU_0 * material.RelPermeability);
+                    nu_vec[attribute_id - 1] = nu;
+                }
+            }
+      }
       nu_coeff_ = std::make_unique<mfem::PWConstCoefficient>(nu_vec);
 
-      mfem::Vector j_vec;
-      parser.SetupSources(mesh, j_vec);
-      j_coeff_ = std::make_unique<mfem::PWConstCoefficient>(j_vec);
+      // Source
+      mfem::Vector j_src(mesh.attributes.Max());
+      j_src = 0.0;
+      
+      for (const auto& src : config.Sources) {
+         for (int attr : src.Markers) {
+               if (attr > 0 && attr <= mesh.attributes.Max()) {
+                  j_src[attr - 1] = src.CurrentDensity;
+               }
+         }
+      }
+      j_coeff_ = std::make_unique<mfem::PWConstCoefficient>(j_src);
 
-      // 4) Boundary conditions (essential)
-      const int nbattr = mesh.bdr_attributes.Size() ? mesh.bdr_attributes.Max() : 0;
-      ess_bdr_.SetSize(nbattr);
+      // Boundary Attributes
+      ess_bdr_.SetSize(mesh.bdr_attributes.Max());
       ess_bdr_ = 0;
 
       std::vector<std::pair<mfem::Array<int>, double>> bcs;
-      parser.SetupBoundaries(mesh, bcs);
+      for (const auto& bc : config.BoundaryConditions) {
+            mfem::Array<int> marker(mesh.bdr_attributes.Max());
+            marker = 0;
+            for (int attr : bc.marker) {
+               if (attr > 0 && attr <= mesh.bdr_attributes.Max()) {
+                  marker[attr - 1] = 1;
+               }
+            }
+            bcs.push_back({marker, bc.value});
+      }
 
       BoundaryConditionValidator validator(mesh, *fespace_);
       validator.ValidateBoundaryConditions(bcs, /*allow_overlap=*/false);
@@ -94,7 +124,7 @@ public:
       // 4b) Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
       // Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
       // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
-      if (type_ == SolverType::Axisymmetric)
+      if (type_ == ModelType::Axisymmetric)
       {
          // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
          // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
@@ -108,7 +138,7 @@ public:
       // 5) RHS
       b_ = std::make_unique<mfem::LinearForm>(fespace_.get());
 
-      if (type_ == SolverType::Axisymmetric)
+      if (type_ == ModelType::Axisymmetric)
       {
          // Integrates J * v * r  (global 2π omitted consistently)
          b_->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff_));
@@ -125,7 +155,7 @@ public:
       // 6) Stiffness
       mfem::BilinearForm a(fespace_.get());
 
-      if (type_ == SolverType::Axisymmetric)
+      if (type_ == ModelType::Axisymmetric)
       {
          a.AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff_));
       }
@@ -141,7 +171,7 @@ public:
       fespace_->GetEssentialTrueDofs(ess_bdr_, ess_tdof_list);
 
       // 7b) For axisymmetric: Mark ALL DOFs at r=0 as essential (regularity condition)
-      if (type_ == SolverType::Axisymmetric) {
+      if (type_ == ModelType::Axisymmetric) {
          // For H1 elements, we need to identify all DOFs (vertex, edge, face) at r=0
          // For simplicity with order-1 or order-2, check vertex DOFs
          const int ndofs = fespace_->GetNDofs();
@@ -199,15 +229,14 @@ public:
       umf.SetOperator(*Aop);
       umf.Mult(B, X);
 #else
-      InputParser parser(config);
       auto *sp = dynamic_cast<mfem::SparseMatrix*>(Aop.Ptr());
       MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
 
       mfem::GSSmoother M(*sp);
       mfem::PCG(*sp, M, B, X,
-                parser.GetSolverPrintLevel(),
-                parser.GetSolverMaxIter(),
-                parser.GetSolverTolerance(),
+                config.SolverPrintLevel,
+                config.SolverMaxIter,
+                config.SolverTolerance,
                 0.0);
 #endif
 
@@ -237,10 +266,10 @@ public:
       mfem::GridFunction B_gf(&fes_l2);
       B_gf = 0.0;
 
-      if (type_ == SolverType::Axisymmetric)
+      if (type_ == ModelType::Axisymmetric)
       {
          // B_r = -∂A/∂z, B_z = ∂A/∂r + A/r
-         MagneticFieldCoefficient B_coeff(*A_);
+         MagneticFieldCoefficient B_coeff(A_.get());
          B_gf.ProjectCoefficient(B_coeff);
       }
       else

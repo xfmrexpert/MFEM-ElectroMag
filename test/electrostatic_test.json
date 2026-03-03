@@ -5,20 +5,34 @@
     "order": 2,
     "axisymmetric": true
   },
-  "materials": [
+  "regions": [
     {
       "name": "Oil",
-      "attributes": [1],
-      "properties": { "epsilon_r": 2.2 }
+      "attributes": [1], 
+      "material": 1
     },
     {
       "name": "Pressboard",
       "attributes": [2],
+      "material": 2
+    },
+    {
+      "name": "Copper",
+      "attributes": [2],
+      "material": 2
+    }
+  ],
+  "materials": [
+    {
+      "name": "Oil",
+      "properties": { "epsilon_r": 2.2 }
+    },
+    {
+      "name": "Pressboard",
       "properties": { "epsilon_r": 4.5 }
     },
     {
       "name": "Paper",
-      "attributes": [3],
       "properties": { "epsilon_r": 4.0 }
     }
   ],

@@ -81,6 +81,51 @@ private:
         }
     }
 
+    void ValidateRegions(const json& config, const mfem::Mesh* mesh = nullptr) {
+        if (!config.contains("regions")) {
+            return;
+        }
+
+        const auto& regions = config["regions"];
+        if (!regions.is_array()) {
+            AddError("regions", "Regions must be an array");
+            return;
+        }
+
+        int max_attr = mesh ? mesh->attributes.Max() : 0;
+        size_t num_materials = 0;
+        if (config.contains("materials") && config["materials"].is_array()) {
+            num_materials = config["materials"].size();
+        }
+
+        for (size_t i = 0; i < regions.size(); ++i) {
+            const auto& reg = regions[i];
+            std::string prefix = "regions[" + std::to_string(i) + "]";
+
+            if (!reg.contains("attribute_ids")) {
+                AddError(prefix + ".attribute_ids", "Missing required field 'attribute_ids'");
+            } else if (mesh) {
+                for (auto attr : reg["attribute_ids"]) {
+                    int attr_val = attr;
+                    if (attr_val <= 0 || attr_val > max_attr) {
+                        AddError(prefix + ".attribute_id", "Attribute " + std::to_string(attr_val) +
+                                " is out of range [1, " + std::to_string(max_attr) + "]");
+                    }
+                }
+            }
+
+            if (!reg.contains("material")) {
+                AddError(prefix + ".material", "Missing required field 'material'");
+            } else {
+                int mat_idx = reg["material"];
+                if (mat_idx < 1 || mat_idx > static_cast<int>(num_materials)) {
+                    AddError(prefix + ".material", "Material index " + std::to_string(mat_idx) +
+                             " is out of range [1, " + std::to_string(num_materials) + "]");
+                }
+            }
+        }
+    }
+
     void ValidateMaterials(const json& config, const mfem::Mesh* mesh = nullptr) {
         if (!config.contains("materials")) {
             return; // Materials are optional for some physics types
@@ -93,25 +138,10 @@ private:
         }
 
         std::string type = config["simulation"].value("type", "");
-        int max_attr = mesh ? mesh->attributes.Max() : 0;
 
         for (size_t i = 0; i < materials.size(); ++i) {
             const auto& mat = materials[i];
             std::string prefix = "materials[" + std::to_string(i) + "]";
-
-            if (!mat.contains("attributes")) {
-                AddError(prefix + ".attributes", "Missing required field 'attributes'");
-            } else if (!mat["attributes"].is_array()) {
-                AddError(prefix + ".attributes", "Attributes must be an array");
-            } else if (mesh) {
-                // Validate attribute ranges
-                for (int attr : mat["attributes"]) {
-                    if (attr <= 0 || attr > max_attr) {
-                        AddError(prefix + ".attributes", "Attribute " + std::to_string(attr) +
-                                " is out of range [1, " + std::to_string(max_attr) + "]");
-                    }
-                }
-            }
 
             if (!mat.contains("properties")) {
                 AddError(prefix + ".properties", "Missing required field 'properties'");
@@ -252,6 +282,7 @@ public:
 
         ValidateSimulation(config);
         ValidateMaterials(config, mesh);
+        ValidateRegions(config, mesh);
         ValidateBoundaries(config, mesh);
         ValidateSources(config, mesh);
 

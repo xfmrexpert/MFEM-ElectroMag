@@ -4,6 +4,7 @@
 #pragma once
 #include "mfem.hpp"
 #include "json.hpp"
+#include "problem_config.hpp"
 
 using json = nlohmann::json;
 
@@ -16,10 +17,11 @@ using json = nlohmann::json;
 class PhysicsSolver {
 protected:
     mfem::Mesh &mesh;
-    const json &config;
+    const json &config_json;
+    ProblemConfig config;
 
 public:
-    PhysicsSolver(mfem::Mesh &m, const json &c) : mesh(m), config(c) {}
+    PhysicsSolver(mfem::Mesh &m, const json &c) : mesh(m), config_json(c) {}
     
     // Virtual destructor is essential for unique_ptr polymorphism
     virtual ~PhysicsSolver() = default;

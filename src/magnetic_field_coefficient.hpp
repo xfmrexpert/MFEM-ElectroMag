@@ -17,8 +17,8 @@ private:
    static constexpr double r_tol = 1e-12;
 
 public:
-   MagneticFieldCoefficient(mfem::GridFunction &a_gf) 
-      : mfem::VectorCoefficient(2), A(&a_gf) { }
+   MagneticFieldCoefficient(mfem::GridFunction* a_gf) 
+      : mfem::VectorCoefficient(2), A(a_gf) { }
 
    void Eval(mfem::Vector &B, mfem::ElementTransformation &T, 
              const mfem::IntegrationPoint &ip) override

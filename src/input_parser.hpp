@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 #pragma once
-#include "mfem.hpp"
 #include "json.hpp" // nlohmann/json
 #include "constants.hpp"
+#include "problem_config.hpp"
 #include <fstream>
 #include <iostream>
 #include <unordered_map>
@@ -41,7 +41,36 @@ public:
     InputParser(const json& c) : config(c), config_dir(".") {}
     InputParser(json&&) = delete;
 
-    // Get solver parameters with defaults
+    const ProblemConfig GetProblemConfig() const {
+        ProblemConfig prob_config;
+        prob_config.SolverTolerance = GetSolverTolerance();
+        prob_config.SolverMaxIter = GetSolverMaxIter();
+        prob_config.SolverPrintLevel = GetSolverPrintLevel();
+        prob_config.ModelType = GetModelType();
+        prob_config.MeshPath = GetMeshPath();
+        prob_config.Ports = GetPorts();
+        prob_config.Regions = GetRegions();
+        prob_config.Materials = GetMaterials();
+        prob_config.BoundaryConditions = GetBoundaries();
+        prob_config.Sources = GetSources();
+        return prob_config;
+    }
+
+private:
+    [[nodiscard]] ::ModelType GetModelType() const {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("model_type")) {
+            std::string type_str = config["simulation"]["model_type"];
+            if (type_str == "axisymmetric") {
+                return ::ModelType::Axisymmetric;
+            } else if (type_str == "planar") {
+                return ::ModelType::Planar; 
+            }
+        }
+        return ::ModelType::Planar; // Default
+    }
+
+// Get solver parameters with defaults
     [[nodiscard]] double GetSolverTolerance() const {
         if (config.contains("simulation") && config["simulation"].is_object() &&
             config["simulation"].contains("solver_tolerance")) {
@@ -66,7 +95,7 @@ public:
         return Constants::DEFAULT_SOLVER_PRINT_LEVEL;
     }
     
-    [[nodiscard]] std::string GetMeshPath() {
+    [[nodiscard]] std::string GetMeshPath() const {
         std::string mesh_path;
 
         if (config.contains("simulation") && config["simulation"].is_object() &&
@@ -85,166 +114,114 @@ public:
             mesh_path = "default.msh";
         }
 
-        // Validate that the mesh file exists
-        if (!fs::exists(mesh_path)) {
-            throw std::runtime_error("Mesh file not found: " + mesh_path);
-        }
-
         return mesh_path;
     }
 
-    // --------------------------------------------------------
-    // Material Setup (Reluctivity nu = 1/mu) for Magnetostatics
-    // --------------------------------------------------------
-    void SetupReluctivity(mfem::Mesh &mesh, mfem::Vector &nu_values) {
-        int max_attr = mesh.attributes.Max();
-        // PWConstCoefficient expects index = attr - 1
-        // So we need exactly max_attr entries.
-        nu_values.SetSize(max_attr);
-        nu_values = 1.0 / Constants::MU_0; // Default nu0 (air)
-
-        if (config.contains("materials")) {
-            for (auto &mat : config["materials"]) {
-                if (mat.contains("properties") && mat["properties"].contains("mu_r")) {
-                    double mu_r = mat["properties"]["mu_r"];
-                    double mu = mu_r * Constants::MU_0;
-                    double nu = 1.0 / mu;
-
-                    for (int attr : mat["attributes"]) {
-                        // Protect against out-of-bounds keys
-                        if (attr > 0 && attr <= max_attr) {
-                            nu_values[attr - 1] = nu;
-                        }
-                    }
+    std::vector<Port> GetPorts() const {
+        std::vector<Port> ports;
+        if (config.contains("ports")) {
+            for (auto &port : config["ports"]) {
+                if (port.contains("region")) {
+                    int region = port["region"];
+                    ports.push_back({region});
                 }
             }
         }
+        return ports;
     }
 
-    // --------------------------------------------------------
-    // Material Setup (Conductivity) for Magnetoquasistatics
-    // --------------------------------------------------------
-    void SetupConductivity(mfem::Mesh &mesh, mfem::Vector &sigma_values) {
-        int max_attr = mesh.attributes.Max();
-        sigma_values.SetSize(max_attr);
-        sigma_values = 0.0; 
-
-        if (config.contains("materials")) {
-            for (auto &mat : config["materials"]) {
-                if (mat.contains("properties") && mat["properties"].contains("sigma")) {
-                    double sigma = mat["properties"]["sigma"];
-
-                    for (int attr : mat["attributes"]) {
-                        if (attr > 0 && attr <= max_attr) {
-                            sigma_values[attr - 1] = sigma;
-                        }
+    std::vector<Region> GetRegions() const {
+        std::vector<Region> regions;
+        if (config.contains("regions")) {
+            for (auto &region : config["regions"]) {
+                Region _region;
+                if (region.contains("attribute_ids")) {
+                    for (int attr : region["attribute_ids"]) {
+                        _region.AttributeIds.push_back(attr);
                     }
                 }
+                if (region.contains("material")) {
+                    _region.Material = (int)region["material"] - 1; // Convert 1-based to 0-based
+                }
+                regions.push_back(_region);
             }
         }
+        return regions;
     }
 
-    // --------------------------------------------------------
-    // Material Setup (Permittivity epsilon) for Electrostatics
-    // --------------------------------------------------------
-    void SetupPermittivity(mfem::Mesh &mesh, mfem::Vector &eps_values) {
-        int max_attr = mesh.attributes.Max();
-        eps_values.SetSize(max_attr);
-        eps_values = 1.0; 
-
+    std::vector<Material> GetMaterials() const {
+        std::vector<Material> materials;
         if (config.contains("materials")) {
-            for (auto &mat : config["materials"]) {
-                if (mat.contains("properties") && mat["properties"].contains("epsilon_r")) {
-                    double eps_r = mat["properties"]["epsilon_r"];
-
-                    for (int attr : mat["attributes"]) {
-                        if (attr > 0 && attr <= max_attr) {
-                            eps_values[attr - 1] = eps_r;
-                        }
+            for (auto &material : config["materials"]) {
+                Material _material;
+                if (material.contains("properties")) {
+                    auto& props = material["properties"];
+                    if (props.contains("sigma")) {
+                        _material.Conductivity = props["sigma"];
+                    }
+                    if (props.contains("epsilon_r")) {
+                        _material.RelPermittivity = props["epsilon_r"];
+                    }
+                    if (props.contains("mu_r")) {
+                        _material.RelPermeability = props["mu_r"];
                     }
                 }
+                materials.push_back(_material);
             }
         }
+        return materials;
     }
 
     // --------------------------------------------------------
     // Boundary Conditions
     // --------------------------------------------------------
-    struct BoundaryCondition {
-        std::string type;      // "Dirichlet", "Neumann", "Robin"
-        mfem::Array<int> marker;
-        double value;
-        double robin_coeff;    // For Robin BCs: alpha * u + beta * du/dn = value
 
-        BoundaryCondition(const std::string& t, const mfem::Array<int>& m, double v, double rc = 0.0)
-            : type(t), marker(m), value(v), robin_coeff(rc) {}
-    };
-
-    void SetupBoundaries(mfem::Mesh &mesh,
-                         std::vector<std::pair<mfem::Array<int>, double>> &dirichlet_bcs) {
-
-        int max_bdr = mesh.bdr_attributes.Max();
+    std::vector<BoundaryCondition> GetBoundaries() const {
+        
+        std::vector<BoundaryCondition> bcs;
 
         if (config.contains("boundaries")) {
             for (auto &bc : config["boundaries"]) {
-                if (bc["type"] == "Dirichlet") {
-                    mfem::Array<int> marker(max_bdr);
-                    marker = 0;
-                    double val = bc["value"];
-
-                    for (int attr : bc["attributes"]) {
-                        if (attr > 0 && attr <= max_bdr) marker[attr - 1] = 1;
-                    }
-                    dirichlet_bcs.push_back({marker, val});
+                if (!bc.contains("type") || !bc.contains("value") || !bc.contains("attributes")) {
+                     continue; // Skip invalid entries, let validator handle reporting
                 }
-                // Neumann and Robin BCs are stored but not yet fully implemented in solvers
-                // This provides the infrastructure for future implementation
-            }
-        }
-    }
-
-    // Extended version that handles all boundary types
-    void SetupAllBoundaries(mfem::Mesh &mesh,
-                           std::vector<BoundaryCondition> &all_bcs) {
-
-        int max_bdr = mesh.bdr_attributes.Max();
-
-        if (config.contains("boundaries")) {
-            for (auto &bc : config["boundaries"]) {
                 std::string bc_type = bc["type"];
-                mfem::Array<int> marker(max_bdr);
-                marker = 0;
+                std::vector<int> markers;
                 double val = bc["value"];
                 double robin_coeff = bc.value("robin_coefficient", 1.0);
 
                 for (int attr : bc["attributes"]) {
-                    if (attr > 0 && attr <= max_bdr) marker[attr - 1] = 1;
+                    markers.push_back(attr);
                 }
 
-                all_bcs.emplace_back(bc_type, marker, val, robin_coeff);
+                bcs.emplace_back(bc_type, markers, val, robin_coeff);
             }
         }
+        return bcs;
     }
 
     // --------------------------------------------------------
     // Sources (Current Density J)
     // --------------------------------------------------------
-    void SetupSources(mfem::Mesh &mesh, mfem::Vector &j_values) {
-        int max_attr = mesh.attributes.Max();
-        j_values.SetSize(max_attr);
-        j_values = 0.0; 
+    std::vector<Source> GetSources() const {
+        std::vector<Source> sources;
 
         if (config.contains("sources")) {
             for (auto &src : config["sources"]) {
-                if (src["type"] == "CurrentDensity") {
-                    double val = src["value"];
-                    for (int attr : src["attributes"]) {
-                        if (attr > 0 && attr <= max_attr) {
-                            j_values[attr - 1] = val;
+                Source source;
+                if (src.contains("type") && src["type"] == "CurrentDensity") {
+                    if (src.contains("value")) {
+                        source.CurrentDensity = src["value"];
+                    }
+                    if (src.contains("attributes")) {
+                        for (int attr : src["attributes"]) {
+                            source.Markers.push_back(attr);
                         }
                     }
+                    sources.push_back(source);
                 }
             }
         }
+        return sources;
     }
 };

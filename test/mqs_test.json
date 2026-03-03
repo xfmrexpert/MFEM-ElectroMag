@@ -5,16 +5,26 @@
     "order": 2,
     "axisymmetric": true
   },
-  "materials": [
+  "regions": [
     {
       "name": "Vacuum",
       "attributes": [1], 
-      "properties": { "mu_r": 1.0 }
+      "material": 1
     },
     {
       "name": "Coil_Source",
       "attributes": [2],
-      "properties": { "mu_r": 1.0 }
+      "material": 2
+    }
+  ],
+  "materials": [
+    {
+      "name": "Vacuum", 
+      "properties": { "mu_r": 1.0, "sigma": 0 }
+    },
+    {
+      "name": "Coil_Source",
+      "properties": { "mu_r": 1.0, "sigma": 59.6e6 }
     }
   ],
   "boundaries": [

@@ -10,8 +10,7 @@
 #include "boundary_validation.hpp"
 
 class ElectrostaticSolver : public PhysicsSolver {
-    enum class SolverType { Axisymmetric, Planar };
-    SolverType type = SolverType::Axisymmetric; 
+    ModelType type = ModelType::Axisymmetric; 
 
     // Primary Spaces
     std::unique_ptr<mfem::H1_FECollection> fec;
@@ -28,35 +27,55 @@ public:
     ElectrostaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
     
     void Setup() override {
-        // 1. Config & Logic
-        int order = config["simulation"].value("order", 1);
-        int dim = mesh.Dimension(); // Should be 2
+        // Config & solver type
+        InputParser parser(config_json);
+        config = parser.GetProblemConfig();
+            
+        int order = config.Order;
+        const int dim   = mesh.Dimension();
 
-        std::string mode = config["simulation"].value("model_type", "axisymmetric");
-        type = (mode == "planar") ? SolverType::Planar : SolverType::Axisymmetric;
+        type = config.ModelType;
 
-        // 2. Spaces
+        // Spaces
         fec = std::make_unique<mfem::H1_FECollection>(order, dim);
         fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
         x = std::make_unique<mfem::GridFunction>(fespace.get());
         *x = 0.0;
 
-        // 3. Material Properties (Permittivity)
-        InputParser parser(config);
-        mfem::Vector epsilon_values;
-        parser.SetupPermittivity(mesh, epsilon_values);
+        // Material Properties (Permittivity)
+        std::vector<Material> materials = config.Materials;
+        mfem::Vector epsilon_values(mesh.attributes.Max());
+        epsilon_values = 0.0;
+      
+        for (auto& region : config.Regions) {
+            for (auto attribute_id : region.AttributeIds) {
+                if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
+                    auto& material = materials[region.Material];
+                    epsilon_values[attribute_id - 1] = material.RelPermittivity * Constants::EPSILON_0;
+                }
+            }
+        }
+        
         epsilon_coeff = std::make_unique<mfem::PWConstCoefficient>(epsilon_values);
 
-        // 4. Boundary Conditions
+        // Boundary Attributes
         ess_bdr.SetSize(mesh.bdr_attributes.Max());
         ess_bdr = 0;
 
         std::vector<std::pair<mfem::Array<int>, double>> bcs;
-        parser.SetupBoundaries(mesh, bcs);
+        for (const auto& bc : config.BoundaryConditions) {
+                mfem::Array<int> marker(mesh.bdr_attributes.Max());
+                marker = 0;
+                for (int attr : bc.marker) {
+                if (attr > 0 && attr <= mesh.bdr_attributes.Max()) {
+                    marker[attr - 1] = 1;
+                }
+                }
+                bcs.push_back({marker, bc.value});
+        }
 
-        // Validate that BCs don't create physical conflicts
         BoundaryConditionValidator validator(mesh, *fespace);
-        validator.ValidateBoundaryConditions(bcs, true);  // Allow conflicts - will use last value applied
+        validator.ValidateBoundaryConditions(bcs, /*allow_overlap=*/false);
 
         // Apply boundary conditions
         for (const auto& [marker, val] : bcs) {
@@ -77,7 +96,7 @@ public:
         // 6. Assemble Stiffness Matrix
         mfem::BilinearForm a(fespace.get());
 
-        if (type == SolverType::Axisymmetric) {
+        if (type == ModelType::Axisymmetric) {
             // Solves: Div( r * eps * Grad(V) ) = 0
             // Integrator handles 'r' weight and 'epsilon'
             a.AddDomainIntegrator(new AxisymmetricDiffusionIntegrator(*epsilon_coeff));
@@ -104,10 +123,9 @@ public:
         umf_solver.SetOperator(*A);
         umf_solver.Mult(B, X);
 #else
-        InputParser parser(config);
         mfem::GSSmoother M((mfem::SparseMatrix&)(*A));
-        mfem::PCG(*A, M, B, X, parser.GetSolverPrintLevel(),
-                  parser.GetSolverMaxIter(), parser.GetSolverTolerance(), 0.0);
+        mfem::PCG(*A, M, B, X, config.SolverPrintLevel,
+                  config.SolverMaxIter, config.SolverTolerance, 0.0);
 #endif
 
         // Recover solution into GridFunction x

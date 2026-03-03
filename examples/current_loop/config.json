@@ -1,27 +1,33 @@
 {
   "simulation": {
     "type": "magnetostatics",
-    "mesh": "loop_fixed.msh",
+    "mesh": "loop.mesh",
     "order": 2,
     "model_type": "axisymmetric",
     "solver_tolerance": 1e-12,
     "solver_max_iter": 2000,
     "solver_print_level": 0
   },
-  "materials": [
+  "regions": [
     {
-      "name": "Air",
-      "attributes": [1],
-      "properties": {
-        "mu_r": 1.0
-      }
+      "name": "Vacuum",
+      "attribute_ids": [1], 
+      "material": 1
     },
     {
       "name": "Loop",
-      "attributes": [2],
-      "properties": {
-        "mu_r": 1.0
-      }
+      "attribute_ids": [2],
+      "material": 2
+    }
+  ],
+  "materials": [
+    {
+      "name": "Vacuum", 
+      "properties": { "mu_r": 1.0 }
+    },
+    {
+      "name": "Copper",
+      "properties": { "mu_r": 1.0 }
     }
   ],
   "sources": [
@@ -36,7 +42,7 @@
   "boundaries": [
     {
       "name": "Outer",
-      "attributes": [101],
+      "attributes": [1],
       "type": "Dirichlet",
       "value": 0.0
     }

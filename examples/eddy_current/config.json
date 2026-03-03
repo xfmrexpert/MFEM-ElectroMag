@@ -3,16 +3,32 @@
     "type": "magnetoquasistatics",
     "mesh": "eddy_current.mesh",
     "order": 2,
-    "axisymmetric": true,
+    "model_type": "axisymmetric",
     "frequency": 60.0,
-    "solver_tolerance": 1e-10,
+    "solver_tolerance": 1e-6,
     "solver_max_iter": 3000,
-    "solver_print_level": 1
+    "solver_print_level": 0
   },
+  "regions": [
+    {
+      "name": "Air",
+      "attribute_ids": [1],
+      "material": 1
+    },
+    {
+      "name": "AluminumConductor",
+      "attribute_ids": [2],
+      "material": 2
+    },
+    {
+      "name": "Coil",
+      "attribute_ids": [3],
+      "material": 3
+    }
+  ],
   "materials": [
     {
       "name": "Air",
-      "attributes": [1],
       "properties": {
         "mu_r": 1.0,
         "sigma": 0.0
@@ -20,7 +36,6 @@
     },
     {
       "name": "AluminumConductor",
-      "attributes": [2],
       "properties": {
         "mu_r": 1.0,
         "sigma": 3.5e7,
@@ -29,7 +44,6 @@
     },
     {
       "name": "Coil",
-      "attributes": [3],
       "properties": {
         "mu_r": 1.0,
         "sigma": 0.0,
