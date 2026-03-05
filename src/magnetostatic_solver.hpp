@@ -19,17 +19,17 @@
 class MagnetostaticSolver : public PhysicsSolver
 {
 private:
-   ModelType type_ = ModelType::Axisymmetric;
+   ModelType type = ModelType::Axisymmetric;
 
    // Resources (order of declaration = order of destruction)
-   std::unique_ptr<mfem::H1_FECollection>    fec_;
-   std::unique_ptr<mfem::FiniteElementSpace> fespace_;
-   std::unique_ptr<mfem::GridFunction>       A_;        // A_phi (axisym) or A (planar scalar)
-   std::unique_ptr<mfem::PWConstCoefficient> nu_coeff_;  // ν = 1/μ
-   std::unique_ptr<mfem::PWConstCoefficient> j_coeff_;   // J_phi (axisym) or J (planar scalar src)
+   std::unique_ptr<mfem::H1_FECollection>    fec;
+   std::unique_ptr<mfem::FiniteElementSpace> fespace;
+   std::unique_ptr<mfem::GridFunction>       A;        // A_phi (axisym) or A (planar scalar)
+   std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;  // ν = 1/μ
+   std::unique_ptr<mfem::PWConstCoefficient> j_coeff;   // J_phi (axisym) or J (planar scalar src)
 
-   std::unique_ptr<mfem::LinearForm> b_;
-   mfem::Array<int> ess_bdr_; // boundary attribute marker (size = bdr_attributes.Max())
+   std::unique_ptr<mfem::LinearForm> b;
+   mfem::Array<int> ess_bdr; // boundary attribute marker (size = bdr_attributes.Max())
 
 public:
    MagnetostaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
@@ -43,14 +43,14 @@ public:
       int order = config.Order;
       const int dim   = mesh.Dimension();
 
-      type_ = config.ModelType;
+      type = config.ModelType;
 
       // FE space
-      fec_     = std::make_unique<mfem::H1_FECollection>(order, dim);
-      fespace_ = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec_.get());
+      fec     = std::make_unique<mfem::H1_FECollection>(order, dim);
+      fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
 
-      A_ = std::make_unique<mfem::GridFunction>(fespace_.get());
-      *A_ = 0.0;
+      A = std::make_unique<mfem::GridFunction>(fespace.get());
+      *A = 0.0;
 
       // Materials & sources
 
@@ -59,7 +59,6 @@ public:
       mfem::Vector nu_vec(mesh.attributes.Max());
       nu_vec = 0.0;
       
-      //parser.SetupReluctivity(mesh, nu_vec);
       for (auto& region : config.Regions) {
          for (auto attribute_id : region.AttributeIds) {
                 if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
@@ -69,7 +68,7 @@ public:
                 }
             }
       }
-      nu_coeff_ = std::make_unique<mfem::PWConstCoefficient>(nu_vec);
+      nu_coeff = std::make_unique<mfem::PWConstCoefficient>(nu_vec);
 
       // Source
       mfem::Vector j_src(mesh.attributes.Max());
@@ -82,11 +81,11 @@ public:
                }
          }
       }
-      j_coeff_ = std::make_unique<mfem::PWConstCoefficient>(j_src);
+      j_coeff = std::make_unique<mfem::PWConstCoefficient>(j_src);
 
       // Boundary Attributes
-      ess_bdr_.SetSize(mesh.bdr_attributes.Max());
-      ess_bdr_ = 0;
+      ess_bdr.SetSize(mesh.bdr_attributes.Max());
+      ess_bdr = 0;
 
       std::vector<std::pair<mfem::Array<int>, double>> bcs;
       for (const auto& bc : config.BoundaryConditions) {
@@ -100,122 +99,81 @@ public:
             bcs.push_back({marker, bc.value});
       }
 
-      BoundaryConditionValidator validator(mesh, *fespace_);
+      BoundaryConditionValidator validator(mesh, *fespace);
       validator.ValidateBoundaryConditions(bcs, /*allow_overlap=*/false);
 
-      // Apply BC values to A_ and build essential boundary marker.
+      // Apply BC values to A and build essential boundary marker.
       for (const auto &bc : bcs)
       {
          const mfem::Array<int> &marker = bc.first;
          const double val              = bc.second;
 
          mfem::ConstantCoefficient val_coeff(val);
-         A_->ProjectBdrCoefficient(val_coeff, marker);
+         A->ProjectBdrCoefficient(val_coeff, marker);
 
          // Merge marker -> ess_bdr_
-         MFEM_ASSERT(marker.Size() == ess_bdr_.Size(),
+         MFEM_ASSERT(marker.Size() == ess_bdr.Size(),
                      "Boundary marker size must match bdr_attributes.Max().");
          for (int i = 0; i < marker.Size(); i++)
          {
-            if (marker[i]) { ess_bdr_[i] = 1; }
+            if (marker[i]) { ess_bdr[i] = 1; }
          }
       }
 
-      // 4b) Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
+      // Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
       // Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
       // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
-      if (type_ == ModelType::Axisymmetric)
+      if (type == ModelType::Axisymmetric)
       {
          // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
          // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
          // If your mesh already has an "axis" boundary attribute, prefer using that in InputParser instead.
-         MarkAxisBoundaryAttributesGeometric_();
-         // After this, ess_bdr_ includes axis attributes, and A_ has already been projected
+         MarkAxisBoundaryAttributesGeometric();
+         // After this, ess_bdr includes axis attributes, and A has already been projected
          // for other BCs. We also project A=0 on the axis here for safety.
-         ProjectAxisZero_();
+         ProjectAxisZero();
       }
 
-      // 5) RHS
-      b_ = std::make_unique<mfem::LinearForm>(fespace_.get());
+      // RHS
+      b = std::make_unique<mfem::LinearForm>(fespace.get());
 
-      if (type_ == ModelType::Axisymmetric)
+      if (type == ModelType::Axisymmetric)
       {
          // Integrates J * v * r  (global 2π omitted consistently)
-         b_->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff_));
+         b->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
       }
       else
       {
-         b_->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff_));
+         b->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
       }
-      b_->Assemble();
+      b->Assemble();
    }
 
    void Run() override
    {
-      // 6) Stiffness
-      mfem::BilinearForm a(fespace_.get());
+      // Stiffness
+      mfem::BilinearForm a(fespace.get());
 
-      if (type_ == ModelType::Axisymmetric)
+      if (type == ModelType::Axisymmetric)
       {
-         a.AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff_));
+         a.AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff));
       }
       else
       {
-         a.AddDomainIntegrator(new mfem::DiffusionIntegrator(*nu_coeff_));
+         a.AddDomainIntegrator(new mfem::DiffusionIntegrator(*nu_coeff));
       }
 
       a.Assemble();
 
-      // 7) Essential DOFs
+      // Essential DOFs
       mfem::Array<int> ess_tdof_list;
-      fespace_->GetEssentialTrueDofs(ess_bdr_, ess_tdof_list);
+      fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
 
-      // 7b) For axisymmetric: Mark ALL DOFs at r=0 as essential (regularity condition)
-      if (type_ == ModelType::Axisymmetric) {
-         // For H1 elements, we need to identify all DOFs (vertex, edge, face) at r=0
-         // For simplicity with order-1 or order-2, check vertex DOFs
-         const int ndofs = fespace_->GetNDofs();
-         mfem::Array<int> axis_dofs;
-
-         // Get DOF coordinates - for H1 space, vertex DOFs are straightforward
-         for (int i = 0; i < mesh.GetNV(); i++) {
-            const double *coords = mesh.GetVertex(i);
-            if (std::abs(coords[0]) < 1e-10) {  // r ≈ 0
-               // For P1 elements: vertex i = DOF i
-               // For P2 elements: need to map vertex to DOF
-               if (i < ndofs) {  // Simple case: vertex DOF
-                  axis_dofs.Append(i);
-               }
-            }
-         }
-
-         // Merge axis DOFs into essential DOF list
-         mfem::Array<int> combined_list;
-         combined_list.Reserve(ess_tdof_list.Size() + axis_dofs.Size());
-         for (int i = 0; i < ess_tdof_list.Size(); i++) {
-            combined_list.Append(ess_tdof_list[i]);
-         }
-         for (int i = 0; i < axis_dofs.Size(); i++) {
-            // Check if already in list
-            bool already_added = false;
-            for (int j = 0; j < ess_tdof_list.Size(); j++) {
-               if (ess_tdof_list[j] == axis_dofs[i]) {
-                  already_added = true;
-                  break;
-               }
-            }
-            if (!already_added) {
-               combined_list.Append(axis_dofs[i]);
-            }
-         }
-         ess_tdof_list = combined_list;
-      }
-
-      // 8) Form and solve
+      // Form and solve
       mfem::OperatorPtr Aop;
       mfem::Vector X, B;
 
-      a.FormLinearSystem(ess_tdof_list, *A_, *b_, Aop, X, B);
+      a.FormLinearSystem(ess_tdof_list, *A, *b, Aop, X, B);
 
       if (B.Norml2() < 1e-12 && X.Norml2() < 1e-12)
       {
@@ -240,25 +198,25 @@ public:
                 0.0);
 #endif
 
-      a.RecoverFEMSolution(X, *b_, *A_);
+      a.RecoverFEMSolution(X, *b, *A);
 
       mfem::out << "\n=== A Statistics ===\n";
-      mfem::out << "  A min:     " << A_->Min() << "\n";
-      mfem::out << "  A max:     " << A_->Max() << "\n";
-      mfem::out << "  A L2 norm: " << A_->Norml2() << "\n";
+      mfem::out << "  A min:     " << A->Min() << "\n";
+      mfem::out << "  A max:     " << A->Max() << "\n";
+      mfem::out << "  A L2 norm: " << A->Norml2() << "\n";
    }
 
    void Save() override
    {
       mfem::ParaViewDataCollection pv("results_magnetostatic", &mesh);
       pv.SetLevelsOfDetail(1);
-      pv.RegisterField("A", A_.get());
+      pv.RegisterField("A", A.get());
 
-      // 1) Vector B field in (r,z) (axisym) or (x,y) (planar): vdim = 2 for 2D problems.
+      // Vector B field in (r,z) (axisym) or (x,y) (planar): vdim = 2 for 2D problems.
       const int dim = mesh.Dimension();
       MFEM_ASSERT(dim == 2, "Save() currently assumes a 2D mesh (axisymmetric r-z or planar x-y).");
 
-      const int h1_order = fec_->GetOrder();
+      const int h1_order = fec->GetOrder();
       const int l2_order = std::max(0, h1_order - 1);
 
       mfem::L2_FECollection fec_l2(l2_order, dim);
@@ -266,10 +224,10 @@ public:
       mfem::GridFunction B_gf(&fes_l2);
       B_gf = 0.0;
 
-      if (type_ == ModelType::Axisymmetric)
+      if (type == ModelType::Axisymmetric)
       {
          // B_r = -∂A/∂z, B_z = ∂A/∂r + A/r
-         MagneticFieldCoefficient B_coeff(A_.get());
+         MagneticFieldCoefficient B_coeff(A.get());
          B_gf.ProjectCoefficient(B_coeff);
       }
       else
@@ -279,7 +237,7 @@ public:
          // then B = (∂A/∂y, -∂A/∂x). Implement that explicitly if needed.
          //
          // Placeholder: keep your original approach but you should verify it.
-         mfem::CurlGridFunctionCoefficient B_coeff(A_.get());
+         mfem::CurlGridFunctionCoefficient B_coeff(A.get());
          B_gf.ProjectCoefficient(B_coeff);
       }
 
@@ -311,7 +269,7 @@ public:
 private:
    // Geometric fallback: find boundary attributes whose boundary elements lie on r=0 and mark them essential.
    // This is intentionally conservative. Best practice is to tag the axis in your mesh and handle it in InputParser.
-   void MarkAxisBoundaryAttributesGeometric_()
+   void MarkAxisBoundaryAttributesGeometric()
    {
       const double tol = Constants::AXIS_TOLERANCE;
       if (!mesh.bdr_attributes.Size()) { return; }
@@ -339,20 +297,20 @@ private:
          }
       }
 
-      // Merge axis boundary attributes into ess_bdr_
+      // Merge axis boundary attributes into ess_bdr
       for (int i = 0; i < axis_attr.Size(); i++)
       {
-         if (axis_attr[i]) { ess_bdr_[i] = 1; }
+         if (axis_attr[i]) { ess_bdr[i] = 1; }
       }
    }
 
-   void ProjectAxisZero_()
+   void ProjectAxisZero()
    {
       if (!mesh.bdr_attributes.Size()) { return; }
 
-      // Build a marker from ess_bdr_ that contains ONLY axis attributes (geometric fallback marks them)
+      // Build a marker from ess_bdr that contains ONLY axis attributes (geometric fallback marks them)
       // Here we just project 0 on all essential boundaries again (cheap & safe).
       mfem::ConstantCoefficient zero(0.0);
-      A_->ProjectBdrCoefficient(zero, ess_bdr_);
+      A->ProjectBdrCoefficient(zero, ess_bdr);
    }
 };

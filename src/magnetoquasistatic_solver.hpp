@@ -115,6 +115,43 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
         return G_dc;
     }
 
+    // Geometric fallback: find boundary attributes whose boundary elements lie on r=0 and mark them essential.
+   // This is intentionally conservative. Best practice is to tag the axis in your mesh and handle it in InputParser.
+   void MarkAxisBoundaryAttributesGeometric()
+   {
+      const double tol = Constants::AXIS_TOLERANCE;
+      if (!mesh.bdr_attributes.Size()) { return; }
+
+      mfem::Array<int> axis_attr(mesh.bdr_attributes.Max());
+      axis_attr = 0;
+
+      for (int be = 0; be < mesh.GetNBE(); be++)
+      {
+         mfem::Element *bEl = mesh.GetBdrElement(be);
+         const int attr = bEl->GetAttribute();
+         mfem::Array<int> v;
+         bEl->GetVertices(v);
+
+         bool on_axis = true;
+         for (int i = 0; i < v.Size(); i++)
+         {
+            const double *vx = mesh.GetVertex(v[i]);
+            if (std::abs(vx[0]) > tol) { on_axis = false; break; }
+         }
+
+         if (on_axis)
+         {
+            axis_attr[attr - 1] = 1; // attributes are 1-based
+         }
+      }
+
+      // Merge axis boundary attributes into ess_bdr
+      for (int i = 0; i < axis_attr.Size(); i++)
+      {
+         if (axis_attr[i]) { ess_bdr[i] = 1; }
+      }
+   }
+
 public:
     // Constructor deals only with initialization, no manual nullptr assignment needed
     MagnetoquasistaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
@@ -141,7 +178,6 @@ public:
         mfem::Vector sigma_vec(mesh.attributes.Max());
         nu_vec = 0.0; sigma_vec = 0.0;
         
-        //parser.SetupReluctivity(mesh, nu_vec);
         for (auto& region : config.Regions) {
             for (auto attribute_id : region.AttributeIds) {
                 if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
@@ -202,6 +238,17 @@ public:
                  for(int i=0; i<marker.Size(); i++) if(marker[i]) ess_bdr[i] = 1;
             }
         }
+
+        // Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
+      // Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
+      // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
+      if (type == ModelType::Axisymmetric)
+      {
+         // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
+         // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
+         // If your mesh already has an "axis" boundary attribute, prefer using that in InputParser instead.
+         MarkAxisBoundaryAttributesGeometric();
+      }
     }
 
     void Run() override {
@@ -327,7 +374,8 @@ public:
         mfem::Operator *A_op_ptr;
         
         global_complex_system.FormLinearSystem(ess_tdof_list, x_combined, b_combined, A_op_ptr, X_vec, B_vec);
-        A_op.Reset(A_op_ptr, false);
+        bool own_A = (A_op_ptr != &global_complex_system);
+        A_op.Reset(A_op_ptr, own_A);
 
 #ifdef MFEM_USE_SUITESPARSE
         // Direct Complex Solver
@@ -360,6 +408,12 @@ public:
         int offset_imag = N_DOFs + N_Ports;
         for (int i = 0; i < N_DOFs; i++) {
              A->imag()(i) = X_vec(offset_imag + i);
+        }
+
+        // Cleanup port vectors
+        for (int i = 0; i < port_forms.Size(); i++)
+        {
+             delete port_forms[i];
         }
     }
 

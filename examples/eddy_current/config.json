@@ -7,7 +7,7 @@
     "frequency": 60.0,
     "solver_tolerance": 1e-6,
     "solver_max_iter": 3000,
-    "solver_print_level": 0
+    "solver_print_level": 1
   },
   "regions": [
     {
@@ -38,16 +38,14 @@
       "name": "AluminumConductor",
       "properties": {
         "mu_r": 1.0,
-        "sigma": 3.5e7,
-        "comment": "Aluminum: sigma = 3.5e7 S/m"
+        "sigma": 3.5e7
       }
     },
     {
       "name": "Coil",
       "properties": {
         "mu_r": 1.0,
-        "sigma": 0.0,
-        "comment": "Coil treated as current source, not conductor"
+        "sigma": 0.0
       }
     }
   ],

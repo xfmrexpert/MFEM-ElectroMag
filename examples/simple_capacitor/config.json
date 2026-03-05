@@ -8,17 +8,27 @@
     "solver_max_iter": 2000,
     "solver_print_level": 1
   },
+  "regions": [
+    {
+      "name": "Air",
+      "attribute_ids": [1],
+      "material": 1
+    },
+    {
+      "name": "Dielectric",
+      "attribute_ids": [2],
+      "material": 2
+    }
+  ],
   "materials": [
     {
       "name": "Air",
-      "attributes": [1],
       "properties": {
         "epsilon_r": 1.0
       }
     },
     {
       "name": "Dielectric",
-      "attributes": [2],
       "properties": {
         "epsilon_r": 2.5
       }
