@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mfem.hpp"
+#include "constants.hpp"
 
 // Custom coefficient for axisymmetric G_dc = sigma / (2 * pi * r)
 class AxisymmetricConductanceCoeff : public mfem::Coefficient
@@ -19,6 +20,6 @@ public:
         // Prevent division by zero if the domain touches the axis of symmetry
         if (r < 1e-12) return 0.0; 
         
-        return sigma / (2.0 * M_PI * r);
+        return sigma / (Constants::TWO_PI * r);
     }
 };

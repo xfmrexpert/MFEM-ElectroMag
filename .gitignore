@@ -80,3 +80,4 @@ pyvenv.cfg
 results_magnetostatic/*
 results_mqs/*
 examples/simple_capacitor/results_electrostatic/*
+/out/build/x64-Debug
