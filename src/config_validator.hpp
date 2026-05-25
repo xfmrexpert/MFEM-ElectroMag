@@ -209,9 +209,9 @@ private:
                 AddError(prefix + ".attributes", "Attributes must be an array");
             } else if (mesh) {
                 for (int attr : bc["attributes"]) {
-                    if (attr <= 0 || attr > max_bdr) {
+                    if (attr < 0 || attr > max_bdr) {
                         AddError(prefix + ".attributes", "Boundary attribute " + std::to_string(attr) +
-                                " is out of range [1, " + std::to_string(max_bdr) + "]");
+                                " is out of range [0, " + std::to_string(max_bdr) + "]");
                     }
                 }
             }

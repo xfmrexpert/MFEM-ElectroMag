@@ -67,9 +67,9 @@ public:
                 mfem::Array<int> marker(mesh.bdr_attributes.Max());
                 marker = 0;
                 for (int attr : bc.marker) {
-                if (attr > 0 && attr <= mesh.bdr_attributes.Max()) {
-                    marker[attr - 1] = 1;
-                }
+                    if (attr > 0 && attr <= mesh.bdr_attributes.Max()) {
+                        marker[attr - 1] = 1;
+                    }
                 }
                 bcs.push_back({marker, bc.value});
         }

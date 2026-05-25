@@ -43,6 +43,7 @@ public:
 
     const ProblemConfig GetProblemConfig() const {
         ProblemConfig prob_config;
+        prob_config.Order = GetOrder();
         prob_config.SolverTolerance = GetSolverTolerance();
         prob_config.SolverMaxIter = GetSolverMaxIter();
         prob_config.SolverPrintLevel = GetSolverPrintLevel();
@@ -58,16 +59,41 @@ public:
 
 private:
     [[nodiscard]] ::ModelType GetModelType() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("model_type")) {
-            std::string type_str = config["simulation"]["model_type"];
-            if (type_str == "axisymmetric") {
-                return ::ModelType::Axisymmetric;
-            } else if (type_str == "planar") {
-                return ::ModelType::Planar; 
+        if (config.contains("simulation") && config["simulation"].is_object()) {
+            const auto& sim = config["simulation"];
+
+            // Preferred: explicit string "model_type": "axisymmetric" | "planar"
+            if (sim.contains("model_type") && sim["model_type"].is_string()) {
+                std::string type_str = sim["model_type"];
+                if (type_str == "axisymmetric") {
+                    return ::ModelType::Axisymmetric;
+                } else if (type_str == "planar") {
+                    return ::ModelType::Planar;
+                }
+            }
+
+            // Convenience: boolean "axisymmetric": true | false
+            if (sim.contains("axisymmetric") && sim["axisymmetric"].is_boolean()) {
+                return sim["axisymmetric"].get<bool>()
+                    ? ::ModelType::Axisymmetric
+                    : ::ModelType::Planar;
             }
         }
         return ::ModelType::Planar; // Default
+    }
+
+    [[nodiscard]] int GetOrder() const {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("order")) {
+            int order = config["simulation"]["order"];
+            if (order < 1) {
+                std::cerr << "Warning: 'order' must be >= 1, got " << order
+                          << ". Using order = 1." << std::endl;
+                return 1;
+            }
+            return order;
+        }
+        return 1; // Default
     }
 
 // Get solver parameters with defaults
