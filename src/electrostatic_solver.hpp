@@ -3,11 +3,14 @@
 
 #pragma once
 #include <memory>
+#include <filesystem>
+#include <iostream>
 #include "mfem.hpp"
 #include "physics_solver.hpp"
 #include "axisymmetric_diffusion_integrator.hpp"
 #include "input_parser.hpp"
 #include "boundary_validation.hpp"
+#include "gmsh_results_writer.hpp"
 
 class ElectrostaticSolver : public PhysicsSolver {
     ModelType type = ModelType::Axisymmetric; 
@@ -139,7 +142,7 @@ public:
 
         // Electric Field: E = -Grad(V)
         mfem::L2_FECollection fec_l2(fec->GetOrder() - 1, mesh.Dimension());
-        
+
         // Electric Field Vector Space
         mfem::FiniteElementSpace fespace_l2_vec(&mesh, &fec_l2, mesh.Dimension());
         mfem::GridFunction E(&fespace_l2_vec);
@@ -159,5 +162,73 @@ public:
         paraview.SetCycle(0);
         paraview.SetTime(0.0);
         paraview.Save();
+
+        WriteGmshResultsFile();
+    }
+
+private:
+    void WriteGmshResultsFile() {
+        namespace fs = std::filesystem;
+
+        // Resolve output path: explicit override > derive from mesh path.
+        // A relative override is resolved against the mesh's directory rather
+        // than the process CWD, so the results land next to the input mesh
+        // regardless of where the executable was launched from (VS launches
+        // from out\build\<cfg>\, CTest from the build dir, etc.).
+        fs::path mesh_dir = fs::path(config.MeshPath).parent_path();
+        fs::path out_path;
+        if (!config.ResultsFile.empty()) {
+            fs::path rf(config.ResultsFile);
+            out_path = rf.is_absolute() ? rf : (mesh_dir / rf);
+        } else {
+            std::string stem = fs::path(config.MeshPath).stem().string();
+            if (stem.empty()) stem = "results";
+            out_path = mesh_dir / (stem + ".results.msh");
+        }
+
+        // Refinement factor: explicit override > Order (>=1).
+        int ref_factor = (config.ExportRefine > 0) ? config.ExportRefine
+                                                   : std::max(1, config.Order);
+
+        // Build refined export mesh. The ClosedUniform basis matches the
+        // ParaView export path and gives uniformly distributed sub-vertices.
+        mfem::Mesh export_mesh(&mesh, ref_factor,
+                               mfem::BasisType::ClosedUniform);
+
+        const int dim  = export_mesh.Dimension();
+        const int sdim = export_mesh.SpaceDimension();
+
+        // Linear H1 for V on the refined mesh (one DOF per vertex).
+        mfem::H1_FECollection fec_h1_lin(1, dim);
+        mfem::FiniteElementSpace fes_V(&export_mesh, &fec_h1_lin);
+        mfem::GridFunction V_h(&fes_V);
+        {
+            mfem::GridFunctionCoefficient phi_coeff(x.get());
+            V_h.ProjectCoefficient(phi_coeff);
+        }
+
+        // Linear L2 vector space for E. L2 keeps the (physical) discontinuity
+        // across material interfaces, which is required for breakdown work.
+        mfem::L2_FECollection fec_l2_lin(1, dim);
+        mfem::FiniteElementSpace fes_E(&export_mesh, &fec_l2_lin, sdim);
+        mfem::GridFunction E_h(&fes_E);
+        {
+            mfem::GradientGridFunctionCoefficient grad_phi(x.get());
+            mfem::ScalarVectorProductCoefficient minus_grad(-1.0, grad_phi);
+            E_h.ProjectCoefficient(minus_grad);
+        }
+
+        std::vector<gmsh_results::View> views;
+        views.push_back(gmsh_results::MakeScalarNodeView("V", V_h));
+        views.push_back(gmsh_results::MakeVectorElementNodeView("E", E_h));
+        views.push_back(gmsh_results::MakeMagnitudeElementNodeView("|E|", E_h));
+
+        // TODO: per-surface tangential field views "Et_<surface>" from
+        // creep-surface boundary attributes (FaceElementTransformations +
+        // E - (E.n) n). The C# loader simply ignores missing keys.
+
+        gmsh_results::WriteGmshResults(out_path.string(), export_mesh, fes_E, views);
+
+        std::cout << "Wrote " << out_path.string() << std::endl;
     }
 };

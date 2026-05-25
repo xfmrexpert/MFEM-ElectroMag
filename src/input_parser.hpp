@@ -49,6 +49,8 @@ public:
         prob_config.SolverPrintLevel = GetSolverPrintLevel();
         prob_config.ModelType = GetModelType();
         prob_config.MeshPath = GetMeshPath();
+        prob_config.ResultsFile = GetResultsFile();
+        prob_config.ExportRefine = GetExportRefine();
         prob_config.Ports = GetPorts();
         prob_config.Regions = GetRegions();
         prob_config.Materials = GetMaterials();
@@ -94,6 +96,27 @@ private:
             return order;
         }
         return 1; // Default
+    }
+
+    [[nodiscard]] std::string GetResultsFile() const {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("results_file")) {
+            std::string p = config["simulation"]["results_file"];
+            fs::path pp(p);
+            if (pp.is_absolute()) return pp.string();
+            return (fs::path(config_dir) / pp).string();
+        }
+        return {};
+    }
+
+    [[nodiscard]] int GetExportRefine() const {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("export_refine")) {
+            int n = config["simulation"]["export_refine"];
+            if (n < 1) return 1;
+            return n;
+        }
+        return -1; // Sentinel: caller should default to Order.
     }
 
 // Get solver parameters with defaults

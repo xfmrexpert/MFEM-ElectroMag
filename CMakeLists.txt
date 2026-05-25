@@ -49,14 +49,35 @@ endif()
 
 include(FetchContent)
 
+# Make MFEM throw mfem::ErrorException on failed MFEM_ASSERT/MFEM_VERIFY
+# instead of calling std::abort(). This lets us catch malformed-mesh errors
+# raised from inside the mfem::Mesh constructor (e.g. CheckBdrElementOrientation
+# indexing faces_info with -1 for orphan boundary edges) and report them
+# uniformly. Must be set before FetchContent_MakeAvailable(mfem).
+set(MFEM_USE_EXCEPTIONS ON CACHE BOOL "Throw mfem::ErrorException on MFEM errors" FORCE)
+
+# Enable MFEM's internal debug checks (MFEM_ASSERT and the extra MFEM_VERIFY
+# blocks guarded by #ifdef MFEM_DEBUG, e.g. the interior-face orientation
+# check in Mesh::Finalize). Independent of CMAKE_BUILD_TYPE. Override with
+# -DMFEM_DEBUG=OFF on the cmake command line if you need to match a release
+# build's looser behavior. Must be set before FetchContent_MakeAvailable(mfem).
+# set(MFEM_DEBUG ON CACHE BOOL "Enable MFEM internal debug checks" FORCE)
+
 # Automatically download and build MFEM
 FetchContent_Declare(
   mfem
   GIT_REPOSITORY https://github.com/mfem/mfem.git
   GIT_TAG        v4.9  # Pin to a stable version for reproducibility
+  GIT_PROGRESS   TRUE  # Stream clone progress to the CMake output pane so
+                       # configure does not appear to hang after
+                       # "Detecting CXX compile features".
+  EXCLUDE_FROM_ALL  # Don't build MFEM's miniapps/examples as part of "Build All"
 )
 
-# This creates the 'mfem' target available for linking
+# This creates the 'mfem' target available for linking.
+# EXCLUDE_FROM_ALL above keeps MFEM out of the default build set so Visual
+# Studio's Output window isn't dominated by MFEM compile messages; the 'mfem'
+# library is still built on demand when mfem-electromag links it.
 FetchContent_MakeAvailable(mfem)
 
 add_executable(mfem-electromag src/main.cpp)
@@ -96,6 +117,7 @@ if(BUILD_TESTING)
         Catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git
         GIT_TAG        v3.5.2  # Pin to stable version
+        GIT_PROGRESS   TRUE    # See MFEM block above for rationale.
     )
     FetchContent_MakeAvailable(Catch2)
 

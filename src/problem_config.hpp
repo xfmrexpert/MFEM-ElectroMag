@@ -47,6 +47,8 @@ struct ProblemConfig {
     int SolverMaxIter;
     int SolverPrintLevel;
     std::string MeshPath;
+    std::string ResultsFile;       // Optional Gmsh MSH 2.2 results path (empty = derive from config)
+    int ExportRefine = -1;         // Refinement factor for export mesh (<0 = default to Order)
     std::vector<Region> Regions;
     std::vector<Material> Materials;
     std::vector<Port> Ports;
