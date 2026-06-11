@@ -6,7 +6,8 @@
     "axisymmetric": true,
     "solver_tolerance": 1e-12,
     "solver_max_iter": 2000,
-    "solver_print_level": 1
+    "solver_print_level": 1,
+    "output_paraview": true
   },
   "regions": [
     {
@@ -34,24 +35,52 @@
       }
     }
   ],
-  "boundaries": [
+  "terminals": [
     {
       "name": "TopPlate",
-      "attributes": [1],
-      "type": "Dirichlet",
-      "value": 1000.0
+      "drive": "voltage",
+      "attribute_ids": [1]
     },
     {
       "name": "BottomPlate",
-      "attributes": [2],
-      "type": "Dirichlet",
-      "value": 0.0
-    },
+      "drive": "voltage",
+      "attribute_ids": [2]
+    }
+  ],
+  "boundaries": [
     {
       "name": "FarField",
-      "attributes": [3],
+      "attribute_ids": [3],
       "type": "Dirichlet",
       "value": 0.0
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "Top Plate",
+      "excitations": [
+        {
+          "terminal": "TopPlate",
+          "value": 1000.0
+        },
+        {
+          "terminal": "BottomPlate",
+          "value": 0.0
+        }
+      ]
+    },
+    {
+      "name": "Bottom Plate",
+      "excitations": [
+        {
+          "terminal": "TopPlate",
+          "value": 0.0
+        },
+        {
+          "terminal": "BottomPlate",
+          "value": 1.0
+        }
+      ]
     }
   ]
 }

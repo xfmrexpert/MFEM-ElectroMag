@@ -8,12 +8,12 @@
   "regions": [
     {
       "name": "Vacuum",
-      "attributes": [1], 
+      "attribute_ids": [1], 
       "material": 1
     },
     {
       "name": "Coil_Source",
-      "attributes": [2],
+      "attribute_ids": [2],
       "material": 2
     }
   ],
@@ -30,17 +30,24 @@
   "boundaries": [
     {
       "name": "Axis_and_FarField",
-      "attributes": [1, 2, 3, 4],
+      "attribute_ids": [1, 2, 3, 4],
       "type": "Dirichlet",
       "value": 0.0
     }
   ],
-  "sources": [
+  "terminals": [
     {
       "name": "Loop_Current",
-      "attributes": [2],
-      "type": "CurrentDensity",
-      "value": 1.0e7
+      "drive": "current",
+      "attribute_ids": [2]
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "energized",
+      "drives": [
+        { "terminal": "Loop_Current", "value": 1.0e7 }
+      ]
     }
   ]
 }

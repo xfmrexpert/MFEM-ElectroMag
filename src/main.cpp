@@ -169,7 +169,8 @@ int main(int argc, char *argv[]) {
         // 6. Execution
         solver->Setup();
         solver->Run();
-        solver->Save();
+        // Save is now called inside of Run()
+        solver->SaveStudy();
 
         return 0;
     }

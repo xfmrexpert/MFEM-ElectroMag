@@ -30,21 +30,27 @@
       "properties": { "mu_r": 1.0 }
     }
   ],
-  "sources": [
+  "terminals": [
     {
       "name": "LoopCurrent",
-      "attributes": [2],
-      "type": "CurrentDensity",
-      "value": 250000.0,
-      "comment": "J = I / A_loop = 1.0 A / (4e-6 m²) = 250,000 A/m²"
+      "drive": "current",
+      "attribute_ids": [2]
     }
   ],
   "boundaries": [
     {
       "name": "Outer",
-      "attributes": [1],
+      "attribute_ids": [1],
       "type": "Dirichlet",
       "value": 0.0
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "energized",
+      "drives": [
+        { "terminal": "LoopCurrent", "value": 250000.0 }
+      ]
     }
   ]
 }

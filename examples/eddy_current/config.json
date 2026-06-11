@@ -49,21 +49,27 @@
       }
     }
   ],
-  "sources": [
+  "terminals": [
     {
       "name": "ExcitationCoil",
-      "attributes": [3],
-      "type": "CurrentDensity",
-      "value": 100000.0,
-      "comment": "J_source = 1e5 A/m^2 (RMS)"
+      "drive": "current",
+      "attribute_ids": [3]
     }
   ],
   "boundaries": [
     {
       "name": "FarField",
-      "attributes": [1],
+      "attribute_ids": [1],
       "type": "Dirichlet",
       "value": 0.0
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "60Hz",
+      "drives": [
+        { "terminal": "ExcitationCoil", "value": 100000.0 }
+      ]
     }
   ]
 }

@@ -5,6 +5,7 @@
 
 #include <string>
 #include <vector>
+#include <set>
 #include <stdexcept>
 #include "json.hpp"
 #include "mfem.hpp"
@@ -203,14 +204,14 @@ private:
                 }
             }
 
-            if (!bc.contains("attributes")) {
-                AddError(prefix + ".attributes", "Missing required field 'attributes'");
-            } else if (!bc["attributes"].is_array()) {
-                AddError(prefix + ".attributes", "Attributes must be an array");
+            if (!bc.contains("attribute_ids")) {
+                AddError(prefix + ".attribute_ids", "Missing required field 'attribute_ids'");
+            } else if (!bc["attribute_ids"].is_array()) {
+                AddError(prefix + ".attribute_ids", "Attribute ids must be an array");
             } else if (mesh) {
-                for (int attr : bc["attributes"]) {
+                for (int attr : bc["attribute_ids"]) {
                     if (attr < 0 || attr > max_bdr) {
-                        AddError(prefix + ".attributes", "Boundary attribute " + std::to_string(attr) +
+                        AddError(prefix + ".attribute_ids", "Boundary attribute " + std::to_string(attr) +
                                 " is out of range [0, " + std::to_string(max_bdr) + "]");
                     }
                 }
@@ -222,50 +223,118 @@ private:
         }
     }
 
-    void ValidateSources(const json& config, const mfem::Mesh* mesh = nullptr) {
+    void ValidateTerminals(const json& config, const mfem::Mesh* mesh = nullptr) {
         std::string type = config["simulation"].value("type", "");
 
-        // Sources are required for magnetostatic/magnetoquasistatic
-        if ((type == "magnetostatics" || type == "magnetoquasistatics") && !config.contains("sources")) {
-            AddError("sources", "Magnetic simulations require at least one source");
+        // Magnetic simulations need at least one current terminal to excite the field.
+        if ((type == "magnetostatics" || type == "magnetoquasistatics") && !config.contains("terminals")) {
+            AddError("terminals", "Magnetic simulations require at least one terminal");
             return;
         }
 
-        if (!config.contains("sources")) {
+        if (!config.contains("terminals")) {
             return;
         }
 
-        const auto& sources = config["sources"];
-        if (!sources.is_array()) {
-            AddError("sources", "Sources must be an array");
+        const auto& terminals = config["terminals"];
+        if (!terminals.is_array()) {
+            AddError("terminals", "Terminals must be an array");
             return;
         }
 
-        int max_attr = mesh ? mesh->attributes.Max() : 0;
+        const int max_dom = mesh ? mesh->attributes.Max() : 0;
+        const int max_bdr = mesh ? mesh->bdr_attributes.Max() : 0;
 
-        for (size_t i = 0; i < sources.size(); ++i) {
-            const auto& src = sources[i];
-            std::string prefix = "sources[" + std::to_string(i) + "]";
+        for (size_t i = 0; i < terminals.size(); ++i) {
+            const auto& t = terminals[i];
+            std::string prefix = "terminals[" + std::to_string(i) + "]";
 
-            if (!src.contains("type")) {
-                AddError(prefix + ".type", "Missing required field 'type'");
+            if (!t.contains("name")) {
+                AddError(prefix + ".name", "Missing required field 'name'");
             }
 
-            if (!src.contains("attributes")) {
-                AddError(prefix + ".attributes", "Missing required field 'attributes'");
-            } else if (!src["attributes"].is_array()) {
-                AddError(prefix + ".attributes", "Attributes must be an array");
+            std::string drive = t.value("drive", "voltage");
+            if (drive != "voltage" && drive != "current") {
+                AddError(prefix + ".drive", "Invalid drive '" + drive + "'. Must be 'voltage' or 'current'");
+            }
+
+            // Voltage terminals bind to boundary attributes; current terminals to domain attributes.
+            const bool is_current = (drive == "current");
+            const int max_attr = is_current ? max_dom : max_bdr;
+
+            if (!t.contains("attribute_ids")) {
+                AddError(prefix + ".attribute_ids", "Missing required field 'attribute_ids'");
+            } else if (!t["attribute_ids"].is_array()) {
+                AddError(prefix + ".attribute_ids", "Attribute ids must be an array");
             } else if (mesh) {
-                for (int attr : src["attributes"]) {
+                for (int attr : t["attribute_ids"]) {
                     if (attr <= 0 || attr > max_attr) {
-                        AddError(prefix + ".attributes", "Source attribute " + std::to_string(attr) +
+                        AddError(prefix + ".attribute_ids", "Terminal attribute " + std::to_string(attr) +
                                 " is out of range [1, " + std::to_string(max_attr) + "]");
                     }
                 }
             }
+        }
+    }
 
-            if (!src.contains("value")) {
-                AddError(prefix + ".value", "Missing required field 'value'");
+    void ValidateScenarios(const json& config, const mfem::Mesh* mesh = nullptr) {
+        if (!config.contains("scenarios")) {
+            return;
+        }
+
+        const auto& scenarios = config["scenarios"];
+        if (!scenarios.is_array()) {
+            AddError("scenarios", "Scenarios must be an array");
+            return;
+        }
+
+        // Build the set of declared terminal names and which are current-driven,
+        // so drives can be cross-checked (catches typo'd terminal references).
+        std::set<std::string> terminal_names;
+        std::set<std::string> current_terminals;
+        if (config.contains("terminals") && config["terminals"].is_array()) {
+            for (const auto& t : config["terminals"]) {
+                std::string name = t.value("name", "");
+                if (!name.empty()) {
+                    terminal_names.insert(name);
+                    if (t.value("drive", "voltage") == "current") {
+                        current_terminals.insert(name);
+                    }
+                }
+            }
+        }
+
+        for (size_t i = 0; i < scenarios.size(); ++i) {
+            const auto& sc = scenarios[i];
+            std::string prefix = "scenarios[" + std::to_string(i) + "]";
+
+            if (!sc.contains("drives")) {
+                continue;
+            }
+            if (!sc["drives"].is_array()) {
+                AddError(prefix + ".drives", "Drives must be an array");
+                continue;
+            }
+
+            for (size_t j = 0; j < sc["drives"].size(); ++j) {
+                const auto& d = sc["drives"][j];
+                std::string dprefix = prefix + ".drives[" + std::to_string(j) + "]";
+
+                if (!d.contains("terminal")) {
+                    AddError(dprefix + ".terminal", "Missing required field 'terminal'");
+                    continue;
+                }
+
+                std::string tname = d["terminal"];
+                if (terminal_names.find(tname) == terminal_names.end()) {
+                    AddError(dprefix + ".terminal", "Unknown terminal '" + tname +
+                            "'. No terminal with that name is declared");
+                }
+
+                if (d.value("floating", false) && current_terminals.count(tname)) {
+                    AddError(dprefix + ".floating", "Terminal '" + tname +
+                            "' is current-driven; 'floating' applies to voltage terminals only");
+                }
             }
         }
     }
@@ -284,7 +353,8 @@ public:
         ValidateMaterials(config, mesh);
         ValidateRegions(config, mesh);
         ValidateBoundaries(config, mesh);
-        ValidateSources(config, mesh);
+        ValidateTerminals(config, mesh);
+        ValidateScenarios(config, mesh);
 
         return errors.empty();
     }

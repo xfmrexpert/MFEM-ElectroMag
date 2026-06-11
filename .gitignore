@@ -81,3 +81,6 @@ results_magnetostatic/*
 results_mqs/*
 examples/simple_capacitor/results_electrostatic/*
 /out/build/x64-Debug
+/examples/simple_capacitor/results_electrostatic_Bottom Plate/Cycle000000
+/examples/simple_capacitor/results_electrostatic_Top Plate/Cycle000000
+/examples/simple_capacitor/results_electrostatic_Top Plate/Cycle000000/data.pvtu

@@ -24,21 +24,27 @@
       }
     }
   ],
-  "sources": [
+  "terminals": [
     {
       "name": "CoilCurrent",
-      "attributes": [2],
-      "type": "CurrentDensity",
-      "value": 166666.67,
-      "comment": "J = N*I / A_coil = 1000 * 1 / 0.006 = 166,667 A/m^2"
+      "drive": "current",
+      "attribute_ids": [2]
     }
   ],
   "boundaries": [
     {
       "name": "FarField",
-      "attributes": [101],
+      "attribute_ids": [101],
       "type": "Dirichlet",
       "value": 0.0
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "energized",
+      "drives": [
+        { "terminal": "CoilCurrent", "value": 166666.67 }
+      ]
     }
   ]
 }

@@ -48,14 +48,18 @@ public:
         prob_config.SolverMaxIter = GetSolverMaxIter();
         prob_config.SolverPrintLevel = GetSolverPrintLevel();
         prob_config.ModelType = GetModelType();
+        prob_config.StudyType = GetStudyType();
+        prob_config.Frequency = GetFrequency();
         prob_config.MeshPath = GetMeshPath();
+        prob_config.OutputParaview = GetOutputParaview();
+        prob_config.OutputGmsh = GetOutputGmsh();
         prob_config.ResultsFile = GetResultsFile();
         prob_config.ExportRefine = GetExportRefine();
-        prob_config.Ports = GetPorts();
         prob_config.Regions = GetRegions();
         prob_config.Materials = GetMaterials();
+        prob_config.Terminals = GetTerminals();
         prob_config.BoundaryConditions = GetBoundaries();
-        prob_config.Sources = GetSources();
+        prob_config.Scenarios = GetScenarios();
         return prob_config;
     }
 
@@ -84,6 +88,26 @@ private:
         return ::ModelType::Planar; // Default
     }
 
+    [[nodiscard]] ::StudyType GetStudyType() const {
+        if (config.contains("simulation") && config["simulation"].is_object()) {
+            const auto& sim = config["simulation"];
+            if (sim.contains("study") && sim["study"].is_string()) {
+                std::string s = sim["study"];
+                if (s == "field")           return ::StudyType::Field;
+                if (s == "coupling_matrix") return ::StudyType::CouplingMatrix;
+            }
+        }
+        return ::StudyType::Field; // Default
+    }
+
+    [[nodiscard]] double GetFrequency() const {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("frequency")) {
+            return config["simulation"]["frequency"];
+        }
+        return 60.0; // Default (MQS only; ignored by ES/MS)
+    }
+
     [[nodiscard]] int GetOrder() const {
         if (config.contains("simulation") && config["simulation"].is_object() &&
             config["simulation"].contains("order")) {
@@ -96,6 +120,24 @@ private:
             return order;
         }
         return 1; // Default
+    }
+
+    [[nodiscard]] bool GetOutputParaview() const {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("output_paraview") &&
+            config["simulation"]["output_paraview"].is_boolean()) {
+            return config["simulation"]["output_paraview"].get<bool>();
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool GetOutputGmsh() const {
+        if (config.contains("simulation") && config["simulation"].is_object() &&
+            config["simulation"].contains("output_gmsh") &&
+            config["simulation"]["output_gmsh"].is_boolean()) {
+            return config["simulation"]["output_gmsh"].get<bool>();
+        }
+        return false;
     }
 
     [[nodiscard]] std::string GetResultsFile() const {
@@ -166,17 +208,29 @@ private:
         return mesh_path;
     }
 
-    std::vector<Port> GetPorts() const {
-        std::vector<Port> ports;
-        if (config.contains("ports")) {
-            for (auto &port : config["ports"]) {
-                if (port.contains("region")) {
-                    int region = port["region"];
-                    ports.push_back({region});
+    std::vector<Terminal> GetTerminals() const {
+        std::vector<Terminal> terminals;
+        if (config.contains("terminals")) {
+            for (auto &t : config["terminals"]) {
+                Terminal terminal;
+                if (t.contains("name")) {
+                    terminal.Name = t["name"];
                 }
+                // "excitation": "voltage" (default) | "current"
+                if (t.contains("excitation") && t["excitation"].is_string()) {
+                    std::string d = t["excitation"];
+                    terminal.Excitation = (d == "current") ? Quantity::Current
+                                                           : Quantity::Voltage;
+                }
+                if (t.contains("attribute_ids")) {
+                    for (int attr : t["attribute_ids"]) {
+                        terminal.AttributeIds.push_back(attr);
+                    }
+                }
+                terminals.push_back(terminal);
             }
         }
-        return ports;
+        return terminals;
     }
 
     std::vector<Region> GetRegions() const {
@@ -222,16 +276,16 @@ private:
     }
 
     // --------------------------------------------------------
-    // Boundary Conditions
+    // Boundary Conditions (closures: far-field, symmetry, axis)
     // --------------------------------------------------------
 
     std::vector<BoundaryCondition> GetBoundaries() const {
-        
+
         std::vector<BoundaryCondition> bcs;
 
         if (config.contains("boundaries")) {
             for (auto &bc : config["boundaries"]) {
-                if (!bc.contains("type") || !bc.contains("value") || !bc.contains("attributes")) {
+                if (!bc.contains("type") || !bc.contains("value") || !bc.contains("attribute_ids")) {
                      continue; // Skip invalid entries, let validator handle reporting
                 }
                 std::string bc_type = bc["type"];
@@ -239,7 +293,7 @@ private:
                 double val = bc["value"];
                 double robin_coeff = bc.value("robin_coefficient", 1.0);
 
-                for (int attr : bc["attributes"]) {
+                for (int attr : bc["attribute_ids"]) {
                     markers.push_back(attr);
                 }
 
@@ -250,27 +304,32 @@ private:
     }
 
     // --------------------------------------------------------
-    // Sources (Current Density J)
+    // Scenarios (one solve each: parameters + per-terminal excitations)
     // --------------------------------------------------------
-    std::vector<Source> GetSources() const {
-        std::vector<Source> sources;
+    std::vector<Scenario> GetScenarios() const {
+        std::vector<Scenario> scenarios;
 
-        if (config.contains("sources")) {
-            for (auto &src : config["sources"]) {
-                Source source;
-                if (src.contains("type") && src["type"] == "CurrentDensity") {
-                    if (src.contains("value")) {
-                        source.CurrentDensity = src["value"];
-                    }
-                    if (src.contains("attributes")) {
-                        for (int attr : src["attributes"]) {
-                            source.Markers.push_back(attr);
-                        }
-                    }
-                    sources.push_back(source);
+        if (config.contains("scenarios")) {
+            for (auto &sc : config["scenarios"]) {
+                Scenario scenario;
+                if (sc.contains("name")) {
+                    scenario.Name = sc["name"];
                 }
+
+                if (sc.contains("excitations")) {
+                    for (auto &d : sc["excitations"]) {
+                        Excitation excitation;
+                        if (d.contains("terminal")) {
+                            excitation.TerminalName = d["terminal"];
+                        }
+                        excitation.Value = d.value("value", 0.0);
+                        excitation.Floating = d.value("floating", false);
+                        scenario.Excitations.push_back(excitation);
+                    }
+                }
+                scenarios.push_back(scenario);
             }
         }
-        return sources;
+        return scenarios;
     }
 };

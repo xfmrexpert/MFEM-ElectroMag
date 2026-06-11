@@ -25,11 +25,15 @@ private:
    std::unique_ptr<mfem::H1_FECollection>    fec;
    std::unique_ptr<mfem::FiniteElementSpace> fespace;
    std::unique_ptr<mfem::GridFunction>       A;        // A_phi (axisym) or A (planar scalar)
+
    std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;  // ν = 1/μ
    std::unique_ptr<mfem::PWConstCoefficient> j_coeff;   // J_phi (axisym) or J (planar scalar src)
 
    std::unique_ptr<mfem::LinearForm> b;
+   std::unique_ptr<mfem::BilinearForm> a;
+
    mfem::Array<int> ess_bdr; // boundary attribute marker (size = bdr_attributes.Max())
+   mfem::Array<int> ess_tdof_list;
 
 public:
    MagnetostaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
@@ -43,81 +47,54 @@ public:
       int order = config.Order;
       const int dim   = mesh.Dimension();
 
+      // Axisymmetric or Planar
       type = config.ModelType;
 
-      // FE space
-      fec     = std::make_unique<mfem::H1_FECollection>(order, dim);
+      // FE spaces
+      fec = std::make_unique<mfem::H1_FECollection>(order, dim);
       fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
 
-      A = std::make_unique<mfem::GridFunction>(fespace.get());
-      *A = 0.0;
-
-      // Materials & sources
-
+      // Materials Properties (Reluctivity)
       std::vector<Material> materials = config.Materials;
-      // Reluctivity
-      mfem::Vector nu_vec(mesh.attributes.Max());
-      nu_vec = 0.0;
-      
-      for (auto& region : config.Regions) {
-         for (auto attribute_id : region.AttributeIds) {
-                if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
-                    auto& material = materials[region.Material];
-                    double nu = 1.0 / (Constants::MU_0 * material.RelPermeability);
-                    nu_vec[attribute_id - 1] = nu;
-                }
-            }
-      }
-      nu_coeff = std::make_unique<mfem::PWConstCoefficient>(nu_vec);
+      mfem::Vector nu_values(mesh.attributes.Max());
+      nu_values = 0.0;
 
-      // Source
-      mfem::Vector j_src(mesh.attributes.Max());
-      j_src = 0.0;
-      
-      for (const auto& src : config.Sources) {
-         for (int attr : src.Markers) {
-               if (attr > 0 && attr <= mesh.attributes.Max()) {
-                  j_src[attr - 1] = src.CurrentDensity;
-               }
-         }
+      for (auto& region : config.Regions) {
+          for (auto attribute_id : region.AttributeIds) {
+              if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
+                  auto& material = materials[region.Material];
+                  nu_values[attribute_id - 1] = 1.0 / (Constants::MU_0 * material.RelPermeability);
+              }
+          }
       }
-      j_coeff = std::make_unique<mfem::PWConstCoefficient>(j_src);
+
+      nu_coeff = std::make_unique<mfem::PWConstCoefficient>(nu_values);
 
       // Boundary Attributes
-      ess_bdr.SetSize(mesh.bdr_attributes.Max());
-      ess_bdr = 0;
-
       std::vector<std::pair<mfem::Array<int>, double>> bcs;
       for (const auto& bc : config.BoundaryConditions) {
-            mfem::Array<int> marker(mesh.bdr_attributes.Max());
-            marker = 0;
-            for (int attr : bc.marker) {
-               if (attr > 0 && attr <= mesh.bdr_attributes.Max()) {
-                  marker[attr - 1] = 1;
-               }
-            }
-            bcs.push_back({marker, bc.value});
+          auto marker = MarkerFromAttrs(bc.AttributeIds);
+          bcs.push_back({ marker, bc.Value });
       }
 
       BoundaryConditionValidator validator(mesh, *fespace);
-      validator.ValidateBoundaryConditions(bcs, /*allow_overlap=*/false);
+      validator.ValidateBoundaryConditions(bcs, /*terminals=*/{}, /*allow_overlap=*/false);
 
       // Apply BC values to A and build essential boundary marker.
-      for (const auto &bc : bcs)
+      ess_bdr.SetSize(mesh.bdr_attributes.Max());
+      ess_bdr = 0;
+      for (const auto& [marker, val] : bcs)
       {
-         const mfem::Array<int> &marker = bc.first;
-         const double val              = bc.second;
+          mfem::ConstantCoefficient val_coeff(val);
+          A->ProjectBdrCoefficient(val_coeff, marker);
 
-         mfem::ConstantCoefficient val_coeff(val);
-         A->ProjectBdrCoefficient(val_coeff, marker);
-
-         // Merge marker -> ess_bdr_
-         MFEM_ASSERT(marker.Size() == ess_bdr.Size(),
-                     "Boundary marker size must match bdr_attributes.Max().");
-         for (int i = 0; i < marker.Size(); i++)
-         {
-            if (marker[i]) { ess_bdr[i] = 1; }
-         }
+          // Merge marker -> ess_bdr_
+          MFEM_ASSERT(marker.Size() == ess_bdr.Size(),
+              "Boundary marker size must match bdr_attributes.Max().");
+          for (int i = 0; i < marker.Size(); i++)
+          {
+              if (marker[i]) { ess_bdr[i] = 1; }
+          }
       }
 
       // Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
@@ -125,90 +102,126 @@ public:
       // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
       if (type == ModelType::Axisymmetric)
       {
-         // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
-         // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
-         // If your mesh already has an "axis" boundary attribute, prefer using that in InputParser instead.
-         MarkAxisBoundaryAttributesGeometric();
-         // After this, ess_bdr includes axis attributes, and A has already been projected
-         // for other BCs. We also project A=0 on the axis here for safety.
-         ProjectAxisZero();
+          // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
+          // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
+          // If your mesh already has an "axis" boundary attribute, prefer using that in InputParser instead.
+          MarkAxisBoundaryAttributesGeometric();
+          // After this, ess_bdr includes axis attributes, and A has already been projected
+          // for other BCs. We also project A=0 on the axis here for safety.
+          ProjectAxisZero();
       }
 
-      // RHS
-      b = std::make_unique<mfem::LinearForm>(fespace.get());
+      // Assemble Stiffness Matrix
+      A = std::make_unique<mfem::GridFunction>(fespace.get());
+      *A = 0.0;
+
+      a = std::make_unique<mfem::BilinearForm>(fespace.get());
 
       if (type == ModelType::Axisymmetric)
       {
-         // Integrates J * v * r  (global 2π omitted consistently)
-         b->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
+          a->AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff));
       }
       else
       {
-         b->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
+          a->AddDomainIntegrator(new mfem::DiffusionIntegrator(*nu_coeff));
       }
-      b->Assemble();
+
+      a->Assemble();
+   }
+
+   void ImprintScenario(const Scenario& sc) {
+       auto j_src = BuildCurrentDensity(sc);
+       j_coeff = std::make_unique<mfem::PWConstCoefficient>(j_src);
+       // RHS
+       b = std::make_unique<mfem::LinearForm>(fespace.get());
+
+       if (type == ModelType::Axisymmetric)
+       {
+           // Integrates J * v * r  (global 2π omitted consistently)
+           b->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
+       }
+       else
+       {
+           b->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
+       }
+       b->Assemble();
    }
 
    void Run() override
    {
-      // Stiffness
-      mfem::BilinearForm a(fespace.get());
-
-      if (type == ModelType::Axisymmetric)
-      {
-         a.AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff));
-      }
-      else
-      {
-         a.AddDomainIntegrator(new mfem::DiffusionIntegrator(*nu_coeff));
-      }
-
-      a.Assemble();
-
-      // Essential DOFs
-      mfem::Array<int> ess_tdof_list;
-      fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
-
-      // Form and solve
-      mfem::OperatorPtr Aop;
-      mfem::Vector X, B;
-
-      a.FormLinearSystem(ess_tdof_list, *A, *b, Aop, X, B);
-
-      if (B.Norml2() < 1e-12 && X.Norml2() < 1e-12)
-      {
-         mfem::out << "WARNING: Linear system RHS is ~zero. "
-                   << "Check that 'sources' in JSON match mesh attributes.\n";
-      }
-
-#ifdef MFEM_USE_SUITESPARSE
-      mfem::UMFPackSolver umf;
-      umf.Control[UMFPACK_PRL] = 1;
-      umf.SetOperator(*Aop);
-      umf.Mult(B, X);
-#else
-      auto *sp = dynamic_cast<mfem::SparseMatrix*>(Aop.Ptr());
-      MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
-
-      mfem::GSSmoother M(*sp);
-      mfem::PCG(*sp, M, B, X,
-                config.SolverPrintLevel,
-                config.SolverMaxIter,
-                config.SolverTolerance,
-                0.0);
-#endif
-
-      a.RecoverFEMSolution(X, *b, *A);
-
-      mfem::out << "\n=== A Statistics ===\n";
-      mfem::out << "  A min:     " << A->Min() << "\n";
-      mfem::out << "  A max:     " << A->Max() << "\n";
-      mfem::out << "  A L2 norm: " << A->Norml2() << "\n";
+       if (config.StudyType == StudyType::CouplingMatrix) {
+           // For coupling matrix, we solve one scenario per terminal with a unit drive
+           for (const auto& term : config.Terminals) {
+               *A = 0.0; // Reset solution for new scenario
+               auto marker = MarkerFromAttrs(term.AttributeIds);
+               mfem::ConstantCoefficient c(1.0); // Unit drive
+               A->ProjectBdrCoefficient(c, marker);
+               SolveSystem();
+               SaveScenario("CouplingMatrix_" + term.Name);
+           }
+       }
+       else {
+           for (const auto& sc : config.Scenarios) {
+               ImprintScenario(sc);
+               SolveSystem();
+               SaveScenario(sc.Name);
+           }
+       }
    }
 
-   void Save() override
+   void SolveSystem() {
+       // Form and solve
+       mfem::OperatorPtr Aop;
+       mfem::Vector X, B;
+
+       a->FormLinearSystem(ess_tdof_list, *A, *b, Aop, X, B);
+
+       if (B.Norml2() < 1e-12 && X.Norml2() < 1e-12)
+       {
+           mfem::out << "WARNING: Linear system RHS is ~zero. "
+               << "Check that 'sources' in JSON match mesh attributes.\n";
+       }
+
+#ifdef MFEM_USE_SUITESPARSE
+       mfem::UMFPackSolver umf;
+       umf.Control[UMFPACK_PRL] = 1;
+       umf.SetOperator(*Aop);
+       umf.Mult(B, X);
+#else
+       auto* sp = dynamic_cast<mfem::SparseMatrix*>(Aop.Ptr());
+       MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
+
+       mfem::GSSmoother M(*sp);
+       mfem::PCG(*sp, M, B, X,
+           config.SolverPrintLevel,
+           config.SolverMaxIter,
+           config.SolverTolerance,
+           0.0);
+#endif
+
+       a->RecoverFEMSolution(X, *b, *A);
+
+       mfem::out << "\n=== A Statistics ===\n";
+       mfem::out << "  A min:     " << A->Min() << "\n";
+       mfem::out << "  A max:     " << A->Max() << "\n";
+       mfem::out << "  A L2 norm: " << A->Norml2() << "\n";
+   }
+
+   void SaveScenario(const std::string& scenario_name) override
    {
-      mfem::ParaViewDataCollection pv("results_magnetostatic", &mesh);
+	   // Placeholder: implement if needed
+	   mfem::out << "SaveScenario() not implemented yet.\n";
+   }
+
+   void SaveStudy() override
+   {
+	   // Placeholder: implement if needed
+	   mfem::out << "SaveStudy() not implemented yet.\n";
+   }
+
+   void WriteParaviewResultsFile(const std::string& scenario_name)
+   {
+      mfem::ParaViewDataCollection pv("results_magnetostatic_" + scenario_name, &mesh);
       pv.SetLevelsOfDetail(1);
       pv.RegisterField("A", A.get());
 
@@ -266,6 +279,12 @@ public:
       mfem::out << "  B_avg: " << Bavg << " T (" << (Bavg * 1e3) << " mT)\n";
    }
 
+   void WriteGmshResultsFile(const std::string& scenario_name)
+   {
+	   // Placeholder: implement if needed
+	   mfem::out << "WriteGmshResultsFile() not implemented yet.\n";
+   }
+
 private:
    // Geometric fallback: find boundary attributes whose boundary elements lie on r=0 and mark them essential.
    // This is intentionally conservative. Best practice is to tag the axis in your mesh and handle it in InputParser.
@@ -313,4 +332,45 @@ private:
       mfem::ConstantCoefficient zero(0.0);
       A->ProjectBdrCoefficient(zero, ess_bdr);
    }
+
+   double CalculateRegionArea(const std::vector<int>& attribute_ids) const {
+	   mfem::Array<int> marker = MarkerFromAttrs(attribute_ids);
+       mfem::LinearForm area_form(fespace.get());
+       mfem::ConstantCoefficient one(1.0);
+
+       area_form.AddDomainIntegrator(new mfem::DomainLFIntegrator(one), marker);
+       area_form.Assemble();
+
+       double region_area = area_form.Sum();
+       return region_area;
+   }
+
+    mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
+        mfem::Vector j_src(mesh.attributes.Max());
+        j_src = 0.0;
+
+        for (const auto& term : config.Terminals) {
+            if (term.Excitation == Quantity::Current) { 
+				double I = 0.0;
+                for (const auto& exc : sc.Excitations) {
+                    if (exc.TerminalName == term.Name) {
+                        I = exc.Value;
+                    }
+                }
+
+                if (I == 0.0) continue;
+
+				const double A = CalculateRegionArea(term.AttributeIds);
+                MFEM_VERIFY(A > 0.0, "Current terminal '" + term.Name + "' has zero cross-section.");
+				const double J = I / A; // Current density = current / area
+
+				for (int attr : term.AttributeIds) {
+					if (attr > 0 && attr <= mesh.attributes.Max()) {
+						j_src[attr - 1] = J;
+					}
+				}
+            }
+        }
+        return j_src;
+    }
 };

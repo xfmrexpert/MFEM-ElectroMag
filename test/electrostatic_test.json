@@ -8,17 +8,17 @@
   "regions": [
     {
       "name": "Oil",
-      "attributes": [1], 
+      "attribute_ids": [1], 
       "material": 1
     },
     {
       "name": "Pressboard",
-      "attributes": [2],
+      "attribute_ids": [2],
       "material": 2
     },
     {
       "name": "Copper",
-      "attributes": [2],
+      "attribute_ids": [2],
       "material": 2
     }
   ],
@@ -36,42 +36,44 @@
       "properties": { "epsilon_r": 4.0 }
     }
   ],
-  "boundaries": [
+  "terminals": [
     {
       "name": "High_Voltage",
-      "attributes": [11, 21, 22],
-      "type": "Dirichlet",
-      "value": 230000.0
+      "drive": "voltage",
+      "attribute_ids": [11, 21, 22]
     },
     {
       "name": "Low_Voltage_GND",
-      "attributes": [12],
-      "type": "Dirichlet",
-      "value": 0.0
+      "drive": "voltage",
+      "attribute_ids": [12]
     },
     {
       "name": "Regulating_Windings_GND",
-      "attributes": [13],
-      "type": "Dirichlet",
-      "value": 0.0
+      "drive": "voltage",
+      "attribute_ids": [13]
     },
     {
       "name": "Static_Rings_GND",
-      "attributes": [14, 23, 24],
-      "type": "Dirichlet",
-      "value": 0.0
+      "drive": "voltage",
+      "attribute_ids": [14, 23, 24]
     },
     {
       "name": "Clamping_Ring_GND",
-      "attributes": [15, 16],
-      "type": "Dirichlet",
-      "value": 0.0
+      "drive": "voltage",
+      "attribute_ids": [15, 16]
     },
     {
       "name": "Tank_Wall",
-      "attributes": [17],
-      "type": "Dirichlet",
-      "value": 0.0
+      "drive": "voltage",
+      "attribute_ids": [17]
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "energized",
+      "drives": [
+        { "terminal": "High_Voltage", "value": 230000.0 }
+      ]
     }
   ]
 }

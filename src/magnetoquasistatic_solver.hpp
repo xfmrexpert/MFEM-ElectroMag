@@ -23,7 +23,7 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     double frequency = 60.0;
     mfem::real_t omega = Constants::TWO_PI * frequency;
 
-    std::vector<Port> ports;
+    std::vector<Terminal> terminals;
 
     // Smart Pointers for MFEM Objects
     // Order matters for destruction: GridFunctions depend on Spaces, Spaces depend on Collections.
@@ -31,9 +31,28 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     std::unique_ptr<mfem::FiniteElementSpace> fespace;
     
     // Complex System objects
+    // Declared before the BlockOperators/BlockVectors below: they hold a
+    // non-owning reference to this offsets array, so it must outlive them
+    // (members destroy in reverse declaration order).
+    std::unique_ptr<mfem::Array<int>> block_offsets;
     std::unique_ptr<mfem::SesquilinearForm> S_AA; 
     std::unique_ptr<mfem::ComplexGridFunction> A; 
     std::unique_ptr<mfem::ComplexLinearForm> b;
+    std::unique_ptr<mfem::ComplexOperator> global_complex_system;
+    std::unique_ptr<mfem::BlockVector> B_Re;
+	std::unique_ptr<mfem::BlockVector> B_Im;
+    std::unique_ptr<mfem::Vector> x_combined;
+	std::unique_ptr<mfem::Vector> b_combined;
+    std::unique_ptr<mfem::Array<mfem::Vector*>> port_forms;
+    std::unique_ptr<mfem::BlockOperator> M_Re;
+    std::unique_ptr<mfem::BlockOperator> M_Im;
+    std::unique_ptr<PortCouplingOperator> C_op;
+    std::unique_ptr<mfem::ScaledOperator> neg_C_op;
+    std::unique_ptr<mfem::TransposeOperator> neg_C_T_op;
+    std::unique_ptr<mfem::DenseMatrix> G_scaled;
+
+    int N_DOFs;
+    int N_Ports;
 
     // Coefficients
     std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;
@@ -41,6 +60,7 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     std::unique_ptr<mfem::PWConstCoefficient> j_coeff;     
     
     mfem::Array<int> ess_bdr;
+    mfem::Array<int> ess_tdof_list;
 
     // Function to build the port vector for a specific port attribute
     mfem::Vector* BuildPortVector(mfem::FiniteElementSpace* fespace, 
@@ -157,17 +177,20 @@ public:
     MagnetoquasistaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
 
     void Setup() override {
-        // Config
+        // Config & solver type
         InputParser parser(config_json);
         config = parser.GetProblemConfig();
         
         int order = config.Order;
+        const int dim = mesh.Dimension();
+
         frequency = config.Frequency;
         omega = Constants::TWO_PI * frequency;
 
+        // Axisymmetric or Planar
         type = config.ModelType;
 
-        // Spaces (make_unique)
+        // FE spaces
         fec = std::make_unique<mfem::H1_FECollection>(order, mesh.Dimension());
         fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
         
@@ -182,12 +205,12 @@ public:
             for (auto attribute_id : region.AttributeIds) {
                 if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
                     auto& material = materials[region.Material];
-                    double nu = 1.0 / (Constants::MU_0 * material.RelPermeability);
-                    nu_vec[attribute_id - 1] = nu;
+                    nu_vec[attribute_id - 1] = 1.0 / (Constants::MU_0 * material.RelPermeability);
                     sigma_vec[attribute_id - 1] = material.Conductivity;
                 }
             }
         }
+
         nu_coeff = std::make_unique<mfem::PWConstCoefficient>(nu_vec);
 
         // Imag Part: Omega * Sigma
@@ -195,70 +218,45 @@ public:
         omega_sigma_vec *= omega;
         omega_sigma_coeff = std::make_unique<mfem::PWConstCoefficient>(omega_sigma_vec);
 
-        // Ports
-        // ports member variable is redundant if config maps ports, but kept for compatibility
-        ports = config.Ports;
-
-        // Source
-        mfem::Vector j_src(mesh.attributes.Max());
-        j_src = 0.0;
-        
-        for (const auto& src : config.Sources) {
-            for (int attr : src.Markers) {
-                if (attr > 0 && attr <= mesh.attributes.Max()) {
-                    j_src[attr - 1] = src.CurrentDensity;
-                }
-            }
-        }
-        j_coeff = std::make_unique<mfem::PWConstCoefficient>(j_src);
-
         // Boundary Attributes
-        ess_bdr.SetSize(mesh.bdr_attributes.Max());
-        ess_bdr = 0;
-
         std::vector<std::pair<mfem::Array<int>, double>> bcs;
         for (const auto& bc : config.BoundaryConditions) {
-             mfem::Array<int> marker(mesh.bdr_attributes.Max());
-             marker = 0;
-             for (int attr : bc.marker) {
-                 if (attr > 0 && attr <= mesh.bdr_attributes.Max()) {
-                     marker[attr - 1] = 1;
-                 }
-             }
-             bcs.push_back({marker, bc.value});
+            mfem::Array<int> marker(mesh.bdr_attributes.Max());
+            marker = MarkerFromAttrs(bc.AttributeIds);
+            bcs.push_back({ marker, bc.Value });
         }
-        
+
         // Validate that BCs don't create physical conflicts
         BoundaryConditionValidator validator(mesh, *fespace);
-        validator.ValidateBoundaryConditions(bcs, false);  // Strict mode - reject conflicts
+        validator.ValidateBoundaryConditions(bcs, /*terminals=*/{}, false);  // Strict mode - reject conflicts
 
+        ess_bdr.SetSize(mesh.bdr_attributes.Max());
+        ess_bdr = 0;
         // Mark essential boundaries (only those with zero BC in this formulation)
         for (const auto& [marker, val] : bcs) {
             if (val == 0.0) {
-                 for(int i=0; i<marker.Size(); i++) if(marker[i]) ess_bdr[i] = 1;
+                for (int i = 0; i < marker.Size(); i++) if (marker[i]) ess_bdr[i] = 1;
             }
         }
 
         // Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
-      // Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
-      // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
-      if (type == ModelType::Axisymmetric)
-      {
-         // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
-         // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
-         // If your mesh already has an "axis" boundary attribute, prefer using that in InputParser instead.
-         MarkAxisBoundaryAttributesGeometric();
-      }
-    }
+        // Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
+        // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
+        if (type == ModelType::Axisymmetric)
+        {
+            // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
+            // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
+            // If your mesh already has an "axis" boundary attribute, prefer using that in InputParser instead.
+            MarkAxisBoundaryAttributesGeometric();
+        }
 
-    void Run() override {
         // Setup Complex Billinear Form
         S_AA = std::make_unique<mfem::SesquilinearForm>(fespace.get(), mfem::ComplexOperator::HERMITIAN);
 
         if (type == ModelType::Axisymmetric) {
             // Real Part: Curl-Curl (1/mu) with r weight
             S_AA->AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff), nullptr);
-            
+
             // Imag Part: Mass (sigma * omega) with r weight
             S_AA->AddDomainIntegrator(nullptr, new AxisymmetricMassIntegrator(*omega_sigma_coeff));
         }
@@ -271,110 +269,148 @@ public:
             // Imag Part: Standard Mass (sigma * omega)
             S_AA->AddDomainIntegrator(nullptr, new mfem::MassIntegrator(*omega_sigma_coeff));
         }
-        
+
         S_AA->Assemble();
         S_AA->Finalize();
 
-        mfem::BilinearForm &K = S_AA->real();
-        mfem::BilinearForm &M_sigma = S_AA->imag();
+        mfem::BilinearForm& K = S_AA->real();
+        mfem::BilinearForm& M_sigma = S_AA->imag();
 
-        int N_DOFs = fespace->GetTrueVSize();
-        int N_Ports = ports.size();
+        N_DOFs = fespace->GetTrueVSize();
+        N_Ports = config.Terminals.size();
 
-        mfem::Array<int> block_offsets(3);
-        block_offsets[0] = 0;
-        block_offsets[1] = N_DOFs;
-        block_offsets[2] = N_DOFs + N_Ports;
+        block_offsets = std::make_unique<mfem::Array<int>>(3);
+        (*block_offsets)[0] = 0;
+        (*block_offsets)[1] = N_DOFs;
+        (*block_offsets)[2] = N_DOFs + N_Ports;
 
-        mfem::Array<mfem::Vector*> port_forms(N_Ports);
+        port_forms = std::make_unique<mfem::Array<mfem::Vector*>>(N_Ports);
 
-        mfem::DenseMatrix G_scaled(N_Ports, N_Ports);
-        G_scaled = 0.0;
+        G_scaled = std::make_unique<mfem::DenseMatrix>(N_Ports, N_Ports);
+        *G_scaled = 0.0;
 
         // Generate the forms
         for (int i = 0; i < N_Ports; ++i)
         {
-            Port port = config.Ports[i];
-            Region region = config.Regions[port.Region];
-            std::vector<int> attribute_ids = region.AttributeIds;
-            Material material = config.Materials[region.Material];
-            double conductivity = material.Conductivity;
+            Terminal term = config.Terminals[i];
+            std::vector<int> attribute_ids = term.AttributeIds;
+            //Material material = config.Materials[region.Material];
+            //double conductivity = material.Conductivity;
+			double conductivity = 0.0;
             // BuildPortVector is the function defined in the previous step
-            port_forms[i] = BuildPortVector(fespace.get(), attribute_ids, conductivity);
-            G_scaled(i, i) = -1.0 / (omega * ComputePortConductance(attribute_ids, conductivity));
+            (*port_forms)[i] = BuildPortVector(fespace.get(), attribute_ids, conductivity);
+            (*G_scaled)(i, i) = -1.0 / (omega * ComputePortConductance(attribute_ids, conductivity));
         }
 
-        PortCouplingOperator C_op(N_DOFs, N_Ports, port_forms);
-        
-        mfem::ScaledOperator neg_C_op(&C_op, -1.0);
-        mfem::TransposeOperator neg_C_T_op(&neg_C_op);
+        C_op = std::make_unique<PortCouplingOperator>(N_DOFs, N_Ports, (*port_forms));
 
-        mfem::BlockOperator M_Re(block_offsets);
-        M_Re.SetBlock(0, 0, &K.SpMat());
-        M_Re.SetBlock(0, 1, &neg_C_op);
-        M_Re.SetBlock(1, 0, &neg_C_T_op);
+        neg_C_op = std::make_unique<mfem::ScaledOperator>(C_op.get(), -1.0);
+        neg_C_T_op = std::make_unique<mfem::TransposeOperator>(neg_C_op.get());
+
+        M_Re = std::make_unique<mfem::BlockOperator>(*block_offsets);
+        M_Re->SetBlock(0, 0, &K.SpMat());
+        M_Re->SetBlock(0, 1, neg_C_op.get());
+        M_Re->SetBlock(1, 0, neg_C_T_op.get());
         // M_Re Block (1, 1) is 0
-        
-        mfem::BlockOperator M_Im(block_offsets);
-        M_Im.SetBlock(0, 0, &M_sigma.SpMat());
-        M_Im.SetBlock(1, 1, &G_scaled);
 
-        mfem::ComplexOperator global_complex_system(&M_Re, &M_Im, false, false);
+        M_Im = std::make_unique<mfem::BlockOperator>(*block_offsets);
+        M_Im->SetBlock(0, 0, &M_sigma.SpMat());
+        M_Im->SetBlock(1, 1, G_scaled.get());
+
+        global_complex_system = std::make_unique<mfem::ComplexOperator>(M_Re.get(), M_Im.get(), false, false);
 
         // Setup the complex RHS blocks
-        mfem::BlockVector B_Re(block_offsets); B_Re = 0.0;
-        mfem::BlockVector B_Im(block_offsets); B_Im = 0.0;
+        B_Re = std::make_unique<mfem::BlockVector>(*block_offsets);
+        B_Im = std::make_unique<mfem::BlockVector>(*block_offsets);
+
+        // Grid Function (for solution recovery later)
+        A = std::make_unique<mfem::ComplexGridFunction>(fespace.get());
+    }
+
+    void ImprintScenario(const Scenario& sc) {
+        *A = 0.0;
+        *B_Re = 0.0;
+        *B_Im = 0.0;
+
+        // Source
+        mfem::Vector j_src(mesh.attributes.Max());
+        j_src = 0.0;
+
+        for (const auto& term : config.Terminals) {
+            //for (int attr : src.Markers) {
+            //    if (attr > 0 && attr <= mesh.attributes.Max()) {
+            //        j_src[attr - 1] = src.CurrentDensity;
+            //    }
+            //}
+        }
+        j_coeff = std::make_unique<mfem::PWConstCoefficient>(j_src);
 
         // Assemble the source term (J is assumed real)
-        mfem::LinearForm *b_source = new mfem::LinearForm(fespace.get());
+        mfem::LinearForm* b_source = new mfem::LinearForm(fespace.get());
         if (type == ModelType::Axisymmetric) {
-             b_source->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
-        } else {
-             b_source->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
+            b_source->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
+        }
+        else {
+            b_source->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
         }
         b_source->Assemble();
 
         // Add source to Real part of Mesh RHS (Block 0)
-        B_Re.GetBlock(0) += *b_source;
+        B_Re->GetBlock(0) += *b_source;
         delete b_source;
 
         // Set the imaginary RHS for the active port 'k'
         if (N_Ports > 0)
         {
-            B_Im.GetBlock(1)(0) = -1.0 / omega;
+            B_Im->GetBlock(1)(0) = -1.0 / omega;
         }
 
         // Construct the full RHS vector and Initial Guess
         // System size is 2 * (N_DOFs + N_Ports)
         int total_size = 2 * (N_DOFs + N_Ports);
-        mfem::Vector b_combined(total_size);
-        mfem::Vector x_combined(total_size);
-        
-        x_combined = 0.0; // Initial guess
-        
+        b_combined = std::make_unique<mfem::Vector>(total_size);
+        x_combined = std::make_unique<mfem::Vector>(total_size);
+
+        *x_combined = 0.0; // Initial guess
+
         // Copy parts to combined RHS
         // convention: [Re_Mesh, Re_Port, Im_Mesh, Im_Port]
         // This assumes ComplexOperator expects [Re_Block, Im_Block] where Block is the full coupled vector
-        for(int i=0; i<B_Re.Size(); i++) b_combined(i) = B_Re(i);
-        for(int i=0; i<B_Im.Size(); i++) b_combined(B_Re.Size() + i) = B_Im(i);
+        for (int i = 0; i < B_Re->Size(); i++) (*b_combined)(i) = (*B_Re)(i);
+        for (int i = 0; i < B_Im->Size(); i++) (*b_combined)(B_Re->Size() + i) = (*B_Im)(i);
 
-        // Grid Function (for solution recovery later)
-        A = std::make_unique<mfem::ComplexGridFunction>(fespace.get());
-        *A = 0.0;
-        
-        // Boundaries
-        // Convert BC markers to DOF list
-        mfem::Array<int> ess_tdof_list;
-        fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
+    }
 
+    void Run() override {
+        if (config.StudyType == StudyType::CouplingMatrix) {
+            // For coupling matrix, we solve one scenario per terminal with a unit drive
+            for (const auto& term : config.Terminals) {
+                //*x = 0.0; // Reset solution for new scenario
+                //auto marker = MarkerFromAttrs(term.AttributeIds);
+                //mfem::ConstantCoefficient c(1.0); // Unit drive
+                //x->ProjectBdrCoefficient(c, marker);
+                SolveSystem();
+                SaveScenario("CouplingMatrix_" + term.Name);
+            }
+        }
+        else {
+            for (const auto& sc : config.Scenarios) {
+                ImprintScenario(sc);
+                SolveSystem();
+                SaveScenario(sc.Name);
+            }
+        }
+    }
+
+    void SolveSystem() {
         // Solve
         mfem::OperatorHandle A_op;
         mfem::Vector B_vec, X_vec;
-        
-        mfem::Operator *A_op_ptr;
-        
-        global_complex_system.FormLinearSystem(ess_tdof_list, x_combined, b_combined, A_op_ptr, X_vec, B_vec);
-        bool own_A = (A_op_ptr != &global_complex_system);
+
+        mfem::Operator* A_op_ptr;
+
+        global_complex_system->FormLinearSystem(ess_tdof_list, *x_combined, *b_combined, A_op_ptr, X_vec, B_vec);
+        bool own_A = (A_op_ptr != global_complex_system.get());
         A_op.Reset(A_op_ptr, own_A);
 
 #ifdef MFEM_USE_SUITESPARSE
@@ -396,29 +432,51 @@ public:
         // Extract Solution manually
         // System solution X_vec is ordered: [Re_Mesh, Re_Port, Im_Mesh, Im_Port]
         // Copy mesh parts to GridFunction A
-        
+
         // Real Part
         for (int i = 0; i < N_DOFs; i++) {
-             A->real()(i) = X_vec(i);
+            A->real()(i) = X_vec(i);
         }
-        
+
         // Imag Part (starts after Re_Mesh + Re_Port_Re)
         // Wait, Block offsets for Re part: [0, N_DOFs, N_DOFs+N_Ports]
         // So Im part starts at (N_DOFs + N_Ports)
-        int offset_imag = N_DOFs + N_Ports;
-        for (int i = 0; i < N_DOFs; i++) {
-             A->imag()(i) = X_vec(offset_imag + i);
-        }
+		int offset_imag = N_DOFs + N_Ports;
+		for (int i = 0; i < N_DOFs; i++) {
+			A->imag()(i) = X_vec(offset_imag + i);
+		}
+	}
 
-        // Cleanup port vectors
-        for (int i = 0; i < port_forms.Size(); i++)
-        {
-             delete port_forms[i];
-        }
-    }
+	void SaveScenario(const std::string& scenario_name) override {
+		if (config.OutputParaview) {
+			WriteParaviewResultsFile(scenario_name);
+		}
+	}
 
-    void Save() override {
-        mfem::ParaViewDataCollection paraview("results_mqs", &mesh);
+	void SaveStudy() override {}
+
+	double TerminalConductivity(const Terminal& term) {
+		// For simplicity, use the conductivity of the first material region associated with the terminal's attributes
+		for (int attr : term.AttributeIds) {
+			if (attr > 0 && attr <= mesh.attributes.Max()) {
+				int region_id = -1;
+				for (size_t i = 0; i < config.Regions.size(); i++) {
+					if (std::find(config.Regions[i].AttributeIds.begin(), config.Regions[i].AttributeIds.end(), attr) != config.Regions[i].AttributeIds.end()) {
+						region_id = i;
+						break;
+					}
+				}
+				if (region_id != -1) {
+					int material_id = config.Regions[region_id].Material;
+					return config.Materials[material_id].Conductivity;
+				}
+			}
+		}
+		return 0.0; // Default to non-conductive if no match found
+	}
+
+    void WriteParaviewResultsFile(const std::string& scenario_name) {
+        mfem::ParaViewDataCollection paraview("results_mqs_" + scenario_name, &mesh);
         
         paraview.RegisterField("A_Real", &A->real());
         paraview.RegisterField("A_Imag", &A->imag());
