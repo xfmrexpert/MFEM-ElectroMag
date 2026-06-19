@@ -5,21 +5,28 @@
 
 #include <vector>
 #include <string>
-#include "enums.hpp"      // ModelType
+#include "enums.hpp"      // PhysicsType, GeometryType
 #include "constants.hpp"  // Constants::DEFAULT_SOLVER_*
 
-// What deliverable a run produces.
+// What computation a run performs.
 //   Field          - solve the authored Scenarios as-is and save fields.
 //   CouplingMatrix - auto-generate unit scenarios (drive i = 1, rest = 0) from
 //                    Terminals to assemble a C (electrostatic) or L
 //                    (magnetostatic) matrix. Authored Scenarios are ignored.
-enum class StudyType { Field, CouplingMatrix };
+enum class AnalysisType { Field, CouplingMatrix };
 
 // The across/through quantity a terminal imposes. Room to grow: Charge, Flux.
 enum class Quantity { Voltage, Current };
 
+enum class EntityDim { Boundary, Domain };
+
+struct EntityGroup {
+	EntityDim Dim;              // boundary or domain
+	std::vector<int> AttributeIds;   // mesh attribute ids (boundary or domain, depending on context)
+};
+
 struct Region {
-	std::vector<int> AttributeIds;   // mesh domain (element) attribute ids
+	std::string EntityGroupName;   // mesh domain (element) group name (validated)
 	int Material = -1;               // index into ProblemConfig::Materials
 };
 
@@ -27,9 +34,8 @@ struct Region {
 //   Excitation == Voltage -> AttributeIds are BOUNDARY attrs (essential BC)
 //   Excitation == Current -> AttributeIds are DOMAIN   attrs (RHS source)
 struct Terminal {
-    std::string Name;
     Quantity Excitation = Quantity::Voltage;
-	std::vector<int> AttributeIds;
+	std::string EntityGroupName;   // mesh boundary (essential BC) or domain (RHS source) group name (validated)
 };
 
 // One scenario's setting of one terminal.
@@ -49,28 +55,41 @@ struct Material {
 // axis regularity). Terminals are NOT modeled here.
 struct BoundaryCondition {
 	std::string Type;                // "Dirichlet", "Neumann", "Robin"
-	std::vector<int> AttributeIds;   // mesh boundary attribute ids
+	std::string EntityGroupName;     // mesh boundary group name (validated)
 	double Value = 0.0;
 	double RobinCoeff = 0.0;         // Robin: alpha*u + beta*du/dn = value
 
-	BoundaryCondition(const std::string& t, const std::vector<int>& m,
+	BoundaryCondition(const std::string& t, const std::string& g,
 					  double v, double rc = 0.0)
-		: Type(t), AttributeIds(m), Value(v), RobinCoeff(rc) {}
+		: Type(t), EntityGroupName(g), Value(v), RobinCoeff(rc) {}
 };
 
 // One solve: a parameter point (Frequency, ...) plus per-terminal excitations.
 // A terminal omitted from Excitations defaults to zero of its quantity
 // (grounded for Voltage, open for Current).
 struct Scenario {
-	std::string Name;
 	std::vector<Excitation> Excitations;
+};
+
+// Adaptive mesh refinement (AMR) controls. Parsed from the optional
+// "simulation.amr" block. When Enabled is false (the default, and the case when
+// the block is absent) the solver performs the legacy single solve and emits
+// byte-identical output to the pre-AMR release.
+struct AmrSettings {
+	bool   Enabled       = false;    // Master switch.
+	int    MaxIterations = 5;        // Max refine -> re-solve iterations.
+	long   MaxDofs       = 2000000;  // Stop once global DOFs exceed this (<=0 disables).
+	double ErrorFraction = 0.7;      // Bulk (Dorfler) marking fraction in (0, 1].
+	double ErrorTolerance = 0.0;     // Absolute stop threshold on global error (<=0 ignores).
+	bool   Conforming    = true;     // Require conforming output (always true for now).
 };
 
 struct ProblemConfig {
 	int Order = 1;
-	::ModelType ModelType = ::ModelType::Planar;
-	::StudyType StudyType = ::StudyType::Field;
-	double Frequency = 60.0;     // MQS only; constant across the study (ignored by ES/MS)
+	::PhysicsType  PhysicsType  = ::PhysicsType::Electrostatic;
+	::GeometryType GeometryType = ::GeometryType::Planar;
+	::AnalysisType AnalysisType = ::AnalysisType::Field;
+	double Frequency = 60.0;     // MQS only; constant across the analysis (ignored by ES/MS)
 
 	double SolverTolerance  = Constants::DEFAULT_SOLVER_TOLERANCE;
 	int    SolverMaxIter    = Constants::DEFAULT_SOLVER_MAX_ITER;
@@ -79,11 +98,13 @@ struct ProblemConfig {
 	std::string MeshPath;
 	bool OutputParaview = false;
 	bool OutputGmsh = false;
-	std::string ResultsFile;       // Optional Gmsh MSH 2.2 results path (empty = derive from config)
+	std::string ResultsPath;       // Optional Gmsh MSH 2.2 results path (empty = derive from config)
 	int ExportRefine = -1;         // Refinement factor for export mesh (<0 = default to Order)
+	AmrSettings Amr;               // Adaptive mesh refinement controls (disabled by default)
+	std::unordered_map<std::string, EntityGroup> EntityGroups;
 	std::vector<Region> Regions;
 	std::vector<Material> Materials;
-	std::vector<Terminal> Terminals;
+	std::map<std::string, Terminal> Terminals;
 	std::vector<BoundaryCondition> BoundaryConditions;
-	std::vector<Scenario> Scenarios;
+	std::unordered_map<std::string, Scenario> Scenarios;
 };

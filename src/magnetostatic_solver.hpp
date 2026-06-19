@@ -19,7 +19,7 @@
 class MagnetostaticSolver : public PhysicsSolver
 {
 private:
-   ModelType type = ModelType::Axisymmetric;
+   GeometryType geometry = GeometryType::Axisymmetric;
 
    // Resources (order of declaration = order of destruction)
    std::unique_ptr<mfem::H1_FECollection>    fec;
@@ -48,7 +48,7 @@ public:
       const int dim   = mesh.Dimension();
 
       // Axisymmetric or Planar
-      type = config.ModelType;
+      geometry = config.GeometryType;
 
       // FE spaces
       fec = std::make_unique<mfem::H1_FECollection>(order, dim);
@@ -60,7 +60,9 @@ public:
       nu_values = 0.0;
 
       for (auto& region : config.Regions) {
-          for (auto attribute_id : region.AttributeIds) {
+		  const std::string& group_name = region.EntityGroupName;
+		  const EntityGroup& group = config.EntityGroups.at(group_name);
+          for (auto attribute_id : group.AttributeIds) {
               if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
                   auto& material = materials[region.Material];
                   nu_values[attribute_id - 1] = 1.0 / (Constants::MU_0 * material.RelPermeability);
@@ -73,7 +75,9 @@ public:
       // Boundary Attributes
       std::vector<std::pair<mfem::Array<int>, double>> bcs;
       for (const auto& bc : config.BoundaryConditions) {
-          auto marker = MarkerFromAttrs(bc.AttributeIds);
+		  const std::string& group_name = bc.EntityGroupName;
+		  const EntityGroup& group = config.EntityGroups.at(group_name);
+          auto marker = MarkerFromAttrs(group.AttributeIds);
           bcs.push_back({ marker, bc.Value });
       }
 
@@ -100,7 +104,7 @@ public:
       // Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
       // Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
       // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
-      if (type == ModelType::Axisymmetric)
+      if (geometry == GeometryType::Axisymmetric)
       {
           // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
           // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
@@ -117,7 +121,7 @@ public:
 
       a = std::make_unique<mfem::BilinearForm>(fespace.get());
 
-      if (type == ModelType::Axisymmetric)
+      if (geometry == GeometryType::Axisymmetric)
       {
           a->AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff));
       }
@@ -135,7 +139,7 @@ public:
        // RHS
        b = std::make_unique<mfem::LinearForm>(fespace.get());
 
-       if (type == ModelType::Axisymmetric)
+       if (geometry == GeometryType::Axisymmetric)
        {
            // Integrates J * v * r  (global 2π omitted consistently)
            b->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
@@ -149,22 +153,24 @@ public:
 
    void Run() override
    {
-       if (config.StudyType == StudyType::CouplingMatrix) {
+       if (config.AnalysisType == AnalysisType::CouplingMatrix) {
            // For coupling matrix, we solve one scenario per terminal with a unit drive
-           for (const auto& term : config.Terminals) {
+           for (const auto& [term_name, term] : config.Terminals) {
                *A = 0.0; // Reset solution for new scenario
-               auto marker = MarkerFromAttrs(term.AttributeIds);
+               const std::string& group_name = term.EntityGroupName;
+               const EntityGroup& group = config.EntityGroups.at(group_name);
+               auto marker = MarkerFromAttrs(group.AttributeIds);
                mfem::ConstantCoefficient c(1.0); // Unit drive
                A->ProjectBdrCoefficient(c, marker);
                SolveSystem();
-               SaveScenario("CouplingMatrix_" + term.Name);
+               SaveScenario("CouplingMatrix_" + term_name);
            }
        }
        else {
-           for (const auto& sc : config.Scenarios) {
+           for (const auto& [sc_name, sc] : config.Scenarios) {
                ImprintScenario(sc);
                SolveSystem();
-               SaveScenario(sc.Name);
+               SaveScenario(sc_name);
            }
        }
    }
@@ -213,10 +219,10 @@ public:
 	   mfem::out << "SaveScenario() not implemented yet.\n";
    }
 
-   void SaveStudy() override
+   void SaveAnalysis() override
    {
 	   // Placeholder: implement if needed
-	   mfem::out << "SaveStudy() not implemented yet.\n";
+	   mfem::out << "SaveAnalysis() not implemented yet.\n";
    }
 
    void WriteParaviewResultsFile(const std::string& scenario_name)
@@ -237,7 +243,7 @@ public:
       mfem::GridFunction B_gf(&fes_l2);
       B_gf = 0.0;
 
-      if (type == ModelType::Axisymmetric)
+      if (geometry == GeometryType::Axisymmetric)
       {
          // B_r = -∂A/∂z, B_z = ∂A/∂r + A/r
          MagneticFieldCoefficient B_coeff(A.get());
@@ -349,22 +355,23 @@ private:
         mfem::Vector j_src(mesh.attributes.Max());
         j_src = 0.0;
 
-        for (const auto& term : config.Terminals) {
+        for (const auto& [term_name, term] : config.Terminals) {
             if (term.Excitation == Quantity::Current) { 
 				double I = 0.0;
                 for (const auto& exc : sc.Excitations) {
-                    if (exc.TerminalName == term.Name) {
+                    if (exc.TerminalName == term_name) {
                         I = exc.Value;
                     }
                 }
 
                 if (I == 0.0) continue;
-
-				const double A = CalculateRegionArea(term.AttributeIds);
-                MFEM_VERIFY(A > 0.0, "Current terminal '" + term.Name + "' has zero cross-section.");
+				const std::string& group_name = term.EntityGroupName;
+				const EntityGroup& group = config.EntityGroups.at(group_name);
+				const double A = CalculateRegionArea(group.AttributeIds);
+                MFEM_VERIFY(A > 0.0, "Current terminal '" + term_name + "' has zero cross-section.");
 				const double J = I / A; // Current density = current / area
 
-				for (int attr : term.AttributeIds) {
+				for (int attr : group.AttributeIds) {
 					if (attr > 0 && attr <= mesh.attributes.Max()) {
 						j_src[attr - 1] = J;
 					}

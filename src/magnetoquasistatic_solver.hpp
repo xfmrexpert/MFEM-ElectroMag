@@ -18,7 +18,7 @@
 #include "axisymmetric_conductance_coefficient.hpp"
 
 class MagnetoquasistaticSolver : public PhysicsSolver {
-    ModelType type = ModelType::Axisymmetric; // Default initialization
+    GeometryType geometry = GeometryType::Axisymmetric; // Default initialization
 
     double frequency = 60.0;
     mfem::real_t omega = Constants::TWO_PI * frequency;
@@ -111,7 +111,7 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
 
         // Define the appropriate coefficient
         mfem::Coefficient* base_coeff = nullptr;
-        if (type == ModelType::Axisymmetric)
+        if (geometry == GeometryType::Axisymmetric)
         {
             base_coeff = new AxisymmetricConductanceCoeff(sigma);
         }
@@ -188,7 +188,7 @@ public:
         omega = Constants::TWO_PI * frequency;
 
         // Axisymmetric or Planar
-        type = config.ModelType;
+        geometry = config.GeometryType;
 
         // FE spaces
         fec = std::make_unique<mfem::H1_FECollection>(order, mesh.Dimension());
@@ -202,7 +202,10 @@ public:
         nu_vec = 0.0; sigma_vec = 0.0;
         
         for (auto& region : config.Regions) {
-            for (auto attribute_id : region.AttributeIds) {
+            const std::string& group_name = region.EntityGroupName;
+            const EntityGroup& group = config.EntityGroups.at(group_name);
+
+            for (auto attribute_id : group.AttributeIds) {
                 if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
                     auto& material = materials[region.Material];
                     nu_vec[attribute_id - 1] = 1.0 / (Constants::MU_0 * material.RelPermeability);
@@ -221,8 +224,10 @@ public:
         // Boundary Attributes
         std::vector<std::pair<mfem::Array<int>, double>> bcs;
         for (const auto& bc : config.BoundaryConditions) {
+			const std::string& group_name = bc.EntityGroupName;
+			const EntityGroup& group = config.EntityGroups.at(group_name);
             mfem::Array<int> marker(mesh.bdr_attributes.Max());
-            marker = MarkerFromAttrs(bc.AttributeIds);
+            marker = MarkerFromAttrs(group.AttributeIds);
             bcs.push_back({ marker, bc.Value });
         }
 
@@ -242,7 +247,7 @@ public:
         // Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
         // Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
         // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
-        if (type == ModelType::Axisymmetric)
+        if (geometry == GeometryType::Axisymmetric)
         {
             // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
             // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
@@ -253,7 +258,7 @@ public:
         // Setup Complex Billinear Form
         S_AA = std::make_unique<mfem::SesquilinearForm>(fespace.get(), mfem::ComplexOperator::HERMITIAN);
 
-        if (type == ModelType::Axisymmetric) {
+        if (geometry == GeometryType::Axisymmetric) {
             // Real Part: Curl-Curl (1/mu) with r weight
             S_AA->AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff), nullptr);
 
@@ -289,18 +294,21 @@ public:
         G_scaled = std::make_unique<mfem::DenseMatrix>(N_Ports, N_Ports);
         *G_scaled = 0.0;
 
-        // Generate the forms
-        for (int i = 0; i < N_Ports; ++i)
-        {
-            Terminal term = config.Terminals[i];
-            std::vector<int> attribute_ids = term.AttributeIds;
-            //Material material = config.Materials[region.Material];
-            //double conductivity = material.Conductivity;
+		// Generate the forms
+		int i = 0;
+		for (const auto& [term_name, term] : config.Terminals)
+		{
+			const std::string& group_name = term.EntityGroupName;
+			const EntityGroup& group = config.EntityGroups.at(group_name);
+			std::vector<int> attribute_ids = group.AttributeIds;
+			//Material material = config.Materials[region.Material];
+			//double conductivity = material.Conductivity;
 			double conductivity = 0.0;
-            // BuildPortVector is the function defined in the previous step
-            (*port_forms)[i] = BuildPortVector(fespace.get(), attribute_ids, conductivity);
-            (*G_scaled)(i, i) = -1.0 / (omega * ComputePortConductance(attribute_ids, conductivity));
-        }
+			// BuildPortVector is the function defined in the previous step
+			(*port_forms)[i] = BuildPortVector(fespace.get(), attribute_ids, conductivity);
+			(*G_scaled)(i, i) = -1.0 / (omega * ComputePortConductance(attribute_ids, conductivity));
+			++i;
+		}
 
         C_op = std::make_unique<PortCouplingOperator>(N_DOFs, N_Ports, (*port_forms));
 
@@ -347,7 +355,7 @@ public:
 
         // Assemble the source term (J is assumed real)
         mfem::LinearForm* b_source = new mfem::LinearForm(fespace.get());
-        if (type == ModelType::Axisymmetric) {
+        if (geometry == GeometryType::Axisymmetric) {
             b_source->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
         }
         else {
@@ -382,22 +390,22 @@ public:
     }
 
     void Run() override {
-        if (config.StudyType == StudyType::CouplingMatrix) {
+        if (config.AnalysisType == AnalysisType::CouplingMatrix) {
             // For coupling matrix, we solve one scenario per terminal with a unit drive
-            for (const auto& term : config.Terminals) {
+            for (const auto& [term_name, term] : config.Terminals) {
                 //*x = 0.0; // Reset solution for new scenario
                 //auto marker = MarkerFromAttrs(term.AttributeIds);
                 //mfem::ConstantCoefficient c(1.0); // Unit drive
                 //x->ProjectBdrCoefficient(c, marker);
                 SolveSystem();
-                SaveScenario("CouplingMatrix_" + term.Name);
+                SaveScenario("CouplingMatrix_" + term_name);
             }
         }
         else {
-            for (const auto& sc : config.Scenarios) {
+            for (const auto& [sc_name, sc] : config.Scenarios) {
                 ImprintScenario(sc);
                 SolveSystem();
-                SaveScenario(sc.Name);
+                SaveScenario(sc_name);
             }
         }
     }
@@ -453,15 +461,20 @@ public:
 		}
 	}
 
-	void SaveStudy() override {}
+	void SaveAnalysis() override {}
 
 	double TerminalConductivity(const Terminal& term) {
 		// For simplicity, use the conductivity of the first material region associated with the terminal's attributes
-		for (int attr : term.AttributeIds) {
+		const std::string& group_name = term.EntityGroupName;
+		const EntityGroup& group = config.EntityGroups.at(group_name);
+		for (int attr : group.AttributeIds) {
 			if (attr > 0 && attr <= mesh.attributes.Max()) {
 				int region_id = -1;
 				for (size_t i = 0; i < config.Regions.size(); i++) {
-					if (std::find(config.Regions[i].AttributeIds.begin(), config.Regions[i].AttributeIds.end(), attr) != config.Regions[i].AttributeIds.end()) {
+					auto eg_it = config.EntityGroups.find(config.Regions[i].EntityGroupName);
+					if (eg_it == config.EntityGroups.end()) continue;
+					const auto& region_attrs = eg_it->second.AttributeIds;
+					if (std::find(region_attrs.begin(), region_attrs.end(), attr) != region_attrs.end()) {
 						region_id = i;
 						break;
 					}
@@ -486,7 +499,7 @@ public:
         mfem::GridFunction B_real(&fespace_vec);
         mfem::GridFunction B_imag(&fespace_vec); 
         
-        if (type == ModelType::Axisymmetric) {
+        if (geometry == GeometryType::Axisymmetric) {
             // Axisymmetric B = Curl(A_phi) = (-dA/dz, 1/r*d(rA)/dr)
             MagneticFieldCoefficient B_real_coeff(&A->real());
             MagneticFieldCoefficient B_imag_coeff(&A->imag());

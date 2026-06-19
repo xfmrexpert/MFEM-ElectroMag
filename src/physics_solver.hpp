@@ -29,7 +29,7 @@ public:
     virtual void Setup() = 0;
     virtual void Run() = 0;
     virtual void SaveScenario(const std::string& scenario_name) = 0;
-    virtual void SaveStudy() = 0;
+    virtual void SaveAnalysis() = 0;
 
     mfem::Array<int> MarkerFromAttrs(const std::vector<int>& attrs) const {
         mfem::Array<int> m(mesh.bdr_attributes.Max());
@@ -43,10 +43,13 @@ public:
     // attr id (1-based) -> material index (0-based); -1 if no region claims it.
     std::vector<int> BuildAttrToMaterial() const {
         std::vector<int> m(mesh.attributes.Max() + 1, -1);
-        for (const auto& region : config.Regions)
-            for (int a : region.AttributeIds)
+        for (const auto& region : config.Regions) {
+			const std::string& group_name = region.EntityGroupName;
+			const EntityGroup& group = config.EntityGroups.at(group_name);
+            for (int a : group.AttributeIds)
                 if (a > 0 && a <= mesh.attributes.Max())
                     m[a] = region.Material;
+        }
         return m;
     }
 };

@@ -163,14 +163,13 @@ int main(int argc, char *argv[]) {
         validator.ValidateOrThrow(parser.config, &mesh);
 
         // 5. Factory Logic - Create Solver
-        std::string type = parser.config["simulation"]["type"];
-        auto solver = SolverFactory::Instance().Create(type, mesh, parser.config);
+        auto solver = SolverFactory::Instance().Create(config.PhysicsType, mesh, parser.config);
 
         // 6. Execution
         solver->Setup();
         solver->Run();
         // Save is now called inside of Run()
-        solver->SaveStudy();
+        solver->SaveAnalysis();
 
         return 0;
     }

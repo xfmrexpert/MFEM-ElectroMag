@@ -83,6 +83,14 @@ FetchContent_MakeAvailable(mfem)
 add_executable(mfem-electromag src/main.cpp)
 target_link_libraries(mfem-electromag PRIVATE mfem)
 
+# nlohmann/json diagnostics: include the JSON pointer path (JSON_DIAGNOSTICS)
+# and byte positions (JSON_DIAGNOSTIC_POSITIONS) in exception messages so
+# config errors (e.g. type_error.302) point at the offending field/line.
+# Must be defined for every TU that includes json.hpp; the ABI tag depends on
+# them, so keep them consistent across all targets that link together.
+set(JSON_DIAGNOSTIC_DEFS JSON_DIAGNOSTICS=1 JSON_DIAGNOSTIC_POSITIONS=1)
+target_compile_definitions(mfem-electromag PRIVATE ${JSON_DIAGNOSTIC_DEFS})
+
 # OpenMP support
 if(USE_OPENMP)
     find_package(OpenMP)
@@ -129,6 +137,7 @@ if(BUILD_TESTING)
     )
 
     target_link_libraries(mfem_tests PRIVATE mfem Catch2::Catch2WithMain)
+    target_compile_definitions(mfem_tests PRIVATE ${JSON_DIAGNOSTIC_DEFS})
 
     # Register tests with CTest
     list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)

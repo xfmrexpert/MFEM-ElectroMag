@@ -1,9 +1,9 @@
 {
   "simulation": {
-    "type": "electrostatics",
+    "physics": "electrostatics",
     "mesh": "capacitor_from_sl.mesh",
     "order": 2,
-    "axisymmetric": true,
+    "geometry": "axisymmetric",
     "solver_tolerance": 1e-12,
     "solver_max_iter": 2000,
     "solver_print_level": 1,
@@ -38,12 +38,12 @@
   "terminals": [
     {
       "name": "TopPlate",
-      "drive": "voltage",
+      "excitation": "voltage",
       "attribute_ids": [1]
     },
     {
       "name": "BottomPlate",
-      "drive": "voltage",
+      "excitation": "voltage",
       "attribute_ids": [2]
     }
   ],

@@ -7,16 +7,19 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <unordered_map>
+#include <vector>
 #include "mfem.hpp"
 #include "physics_solver.hpp"
 #include "axisymmetric_diffusion_integrator.hpp"
 #include "input_parser.hpp"
 #include "boundary_validation.hpp"
 #include "gmsh_results_writer.hpp"
+#include "amr_support.hpp"
 
 class ElectrostaticSolver : public PhysicsSolver {
-	ModelType type = ModelType::Axisymmetric;
+	GeometryType geometry = GeometryType::Axisymmetric;
 
 	// Primary Spaces
 	std::unique_ptr<mfem::H1_FECollection> fec;
@@ -31,10 +34,12 @@ class ElectrostaticSolver : public PhysicsSolver {
 	std::unique_ptr<mfem::SparseMatrix> K0;
 	std::unique_ptr<mfem::DenseMatrix> C; // Coupling Matrix for terminals
 
-	// Cached constrained system + factorization. The matrix is identical for every
-	// solve (same bilinear form and essential DOFs), so we factor once and reuse it
-	// for all scenarios / coupling columns. A_op must outlive `umf` because the
-	// UMFPack solver keeps a pointer to the matrix it factored.
+	// Cached constrained system + factorization for the CURRENT mesh. The matrix
+	// is identical for every solve on a given mesh (same bilinear form and
+	// essential DOFs), so it is factored once per mesh in BuildOperators() and
+	// reused for all scenarios / coupling columns. AMR refinement rebuilds these
+	// via BuildOperators(). A_op must outlive `umf` because the UMFPack solver
+	// keeps a pointer to the matrix it factored.
 	mfem::OperatorPtr A_op;
 #ifdef MFEM_USE_SUITESPARSE
 	std::unique_ptr<mfem::UMFPackSolver> umf;
@@ -43,6 +48,18 @@ class ElectrostaticSolver : public PhysicsSolver {
 	mfem::Array<int> ess_bdr;
 	mfem::Array<int> ess_tdof_list;
 	std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
+
+public:
+	// One AMR iteration's diagnostics, recorded during RunAdaptive(). Exposed for
+	// tests (convergence / conformity assertions) and console logging.
+	struct AmrIterationInfo {
+		long   true_dofs;     // global true DOFs on that iteration's mesh
+		double global_error;  // sqrt(sum_k eta_k^2), combined over scenarios
+		double peak_absE;     // max |E| sampled over the mesh
+	};
+
+private:
+	std::vector<AmrIterationInfo> amr_history;
 
 public:
 	ElectrostaticSolver(mfem::Mesh& m, const json& c) : PhysicsSolver(m, c) {}
@@ -56,20 +73,23 @@ public:
 		const int dim = mesh.Dimension();
 
 		// Axisymmetric or Planar
-		type = config.ModelType;
+		geometry = config.GeometryType;
 
-		// FE spaces
+		// FE collection. Depends only on (order, dim), NOT on the mesh, so it is
+		// refinement-invariant and built once here; BuildOperators() reuses it.
 		fec = std::make_unique<mfem::H1_FECollection>(order, dim);
-		fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
-		x = std::make_unique<mfem::GridFunction>(fespace.get());
 
-		// Material Properties (Permittivity)
+		// Material Properties (Permittivity). epsilon_coeff is a PWConstCoefficient
+		// keyed by mesh DOMAIN attribute. AMR refinement subdivides elements but
+		// preserves their attributes, so this mapping is refinement-invariant.
 		std::vector<Material> materials = config.Materials;
 		mfem::Vector epsilon_values(mesh.attributes.Max());
 		epsilon_values = 0.0;
 
 		for (auto& region : config.Regions) {
-			for (auto attribute_id : region.AttributeIds) {
+			const std::string& group_name = region.EntityGroupName;
+			const EntityGroup& group = config.EntityGroups.at(group_name);
+			for (auto attribute_id : group.AttributeIds) {
 				if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
 					auto& material = materials[region.Material];
 					epsilon_values[attribute_id - 1] = material.RelPermittivity * Constants::EPSILON_0;
@@ -79,20 +99,23 @@ public:
 
 		epsilon_coeff = std::make_unique<mfem::PWConstCoefficient>(epsilon_values);
 
-		// Boundary Attributes
+		// Boundary Attributes. Markers are keyed by mesh BOUNDARY attribute, which
+		// refinement preserves, so bcs / terminal_markers / ess_bdr are all
+		// refinement-invariant and built once here.
 		std::vector<std::pair<mfem::Array<int>, double>> bcs;
 		for (const auto& bc : config.BoundaryConditions) {
-			auto marker = MarkerFromAttrs(bc.AttributeIds);
+			const std::string& group_name = bc.EntityGroupName;
+			const EntityGroup& group = config.EntityGroups.at(group_name);
+			auto marker = MarkerFromAttrs(group.AttributeIds);
 			bcs.push_back({ marker, bc.Value });
 		}
 
 		terminal_markers = std::unordered_map<std::string, mfem::Array<int>>();
-		for (const auto& term : config.Terminals) {
-			terminal_markers[term.Name] = MarkerFromAttrs(term.AttributeIds);
+		for (const auto& [term_name, term] : config.Terminals) {
+			const std::string& group_name = term.EntityGroupName;
+			const EntityGroup& group = config.EntityGroups.at(group_name);
+			terminal_markers[term_name] = MarkerFromAttrs(group.AttributeIds);
 		}
-
-		BoundaryConditionValidator validator(mesh, *fespace);
-		validator.ValidateBoundaryConditions(bcs, terminal_markers, /*allow_overlap=*/false);
 
 		ess_bdr.SetSize(mesh.bdr_attributes.Max());
 		ess_bdr = 0;
@@ -107,46 +130,176 @@ public:
 			}
 		}
 
+		// Build the FE space and everything bound to it for the starting mesh.
+		BuildOperators();
+
+		// Validate boundary conditions once. The check is over the (refinement-
+		// invariant) mesh topology / attributes; it merely needs an FE space for
+		// DOF queries, so running it after the first BuildOperators() is correct.
+		BoundaryConditionValidator validator(mesh, *fespace);
+		validator.ValidateBoundaryConditions(bcs, terminal_markers, /*allow_overlap=*/false);
+	}
+
+	// (Re)build the FE space and every object bound to it for the CURRENT mesh.
+	// Called once from Setup() and again after each AMR refinement. The
+	// refinement-invariant data (fec, epsilon_coeff, ess_bdr, terminal_markers)
+	// persists across calls and is reused.
+	//
+	// When SuiteSparse is available the matrix is factored here; within a single
+	// mesh that factorization is reused for every scenario / coupling column
+	// (the bilinear form and essential-DOF set do not change between solves).
+	// AMR refinement invalidates the mesh, so this is re-run to rebuild and
+	// re-factor on the new mesh.
+	void BuildOperators() {
+		fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
+		x = std::make_unique<mfem::GridFunction>(fespace.get());
+		*x = 0.0;
+
 		// Assemble Stiffness Matrix
 		a = std::make_unique<mfem::BilinearForm>(fespace.get());
-
-		if (type == ModelType::Axisymmetric) {
-			// Solves: Div( r * eps * Grad(V) ) = 0
-			// Integrator handles 'r' weight and 'epsilon'
-			a->AddDomainIntegrator(new AxisymmetricDiffusionIntegrator(*epsilon_coeff));
-		}
-		else {
-			// Solves: Div( eps * Grad(V) ) = 0
-			// Standard Cartesian Laplacian
-			a->AddDomainIntegrator(new mfem::DiffusionIntegrator(*epsilon_coeff));
-		}
-
+		a->AddDomainIntegrator(MakeDiffusionIntegrator()); // a takes ownership
 		a->Assemble();
 
+		// Snapshot the UNCONSTRAINED stiffness matrix (used for charge Q = K0*x)
+		// before FormSystemMatrix eliminates the essential DOFs from a's SpMat.
 		K0 = std::make_unique<mfem::SparseMatrix>(a->SpMat());
 
 		// Linear Form (RHS)
 		b = std::make_unique<mfem::LinearForm>(fespace.get());
-		*b = 0.0;
 
 		fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
+
+		// Form the constrained system operator. The eliminated-column part
+		// (mat_e, used to build each scenario's RHS) is bound to A_op, which must
+		// outlive `umf` because the UMFPack solver keeps a pointer to the matrix
+		// it factored.
+		a->FormSystemMatrix(ess_tdof_list, A_op);
+#ifdef MFEM_USE_SUITESPARSE
+		umf = std::make_unique<mfem::UMFPackSolver>();
+		umf->Control[UMFPACK_PRL] = 1;
+		umf->SetOperator(*A_op); // factor; reused for every scenario's RHS on this mesh
+#endif
 	}
+
+	// Create the domain diffusion integrator matching the active geometry. Used
+	// both by the solve (owned by `a`) and the AMR error estimator (a separate,
+	// independently-owned instance), so the estimated error is consistent with
+	// the assembled operator - axisymmetric (2*pi*r, eps) or planar (eps).
+	mfem::BilinearFormIntegrator* MakeDiffusionIntegrator() const {
+		if (geometry == GeometryType::Axisymmetric) {
+			// Solves: Div( r * eps * Grad(V) ) = 0; integrator handles 'r' and 'eps'.
+			return new AxisymmetricDiffusionIntegrator(*epsilon_coeff);
+		}
+		// Solves: Div( eps * Grad(V) ) = 0; standard Cartesian Laplacian.
+		return new mfem::DiffusionIntegrator(*epsilon_coeff);
+	}
+
+	// Estimate per-element error on the CURRENT mesh, folding every scenario /
+	// coupling column into a single indicator via the element-wise maximum
+	//     eta_k = max over solves s of eta_k(s),
+	// so one shared mesh is refined for all scenarios (spec: identical
+	// $Nodes/$Elements across every <scenario>.results.msh).
+	//
+	// Uses the serial recovery-based ZienkiewiczZhuEstimator (the L2 variant is
+	// MPI-only). A dedicated integrator instance (separate from `a`'s) and an H1
+	// vector flux space are constructed here per call; SetFluxAveraging(1) keeps
+	// the recovered flux from smoothing across material-attribute interfaces so
+	// per-region permittivity discontinuities are respected. SetWithCoeff(true)
+	// makes the flux eps*grad(V), consistent with the integrator's energy norm.
+	//
+	// @param combined  Output: per-element max error indicator (sized to NE).
+	// @return Global error sqrt(sum_k combined_k^2).
+	double EstimateCombinedError(mfem::Vector& combined) {
+		const int ne = mesh.GetNE();
+		combined.SetSize(ne);
+		combined = 0.0;
+
+		const int sdim = mesh.SpaceDimension();
+		std::unique_ptr<mfem::BilinearFormIntegrator> flux_integ(MakeDiffusionIntegrator());
+		mfem::FiniteElementSpace flux_fes(&mesh, fec.get(), sdim);
+		mfem::ZienkiewiczZhuEstimator estimator(*flux_integ, *x, flux_fes);
+		estimator.SetWithCoeff(true);     // flux = eps * grad(V)
+		estimator.SetFluxAveraging(1);    // do not average across attribute interfaces
+
+		auto fold_current_solution = [&]() {
+			estimator.Reset(); // force recompute: same mesh, new solution in *x
+			const mfem::Vector& errs = estimator.GetLocalErrors();
+			for (int k = 0; k < ne; ++k) {
+				if (errs(k) > combined(k)) { combined(k) = errs(k); }
+			}
+		};
+
+		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
+			// One unit excitation per terminal (drive i = 1 V, rest = 0).
+			mfem::ConstantCoefficient one(1.0);
+			for (const auto& [term_name, marker] : terminal_markers) {
+				*x = 0.0;
+				x->ProjectBdrCoefficient(one, terminal_markers.at(term_name));
+				*b = 0.0;
+				SolveSystem();
+				fold_current_solution();
+			}
+		}
+		else {
+			for (const auto& [sc_name, sc] : config.Scenarios) {
+				ImprintScenario(sc);
+				SolveSystem();
+				fold_current_solution();
+			}
+		}
+
+		double sum_sq = 0.0;
+		for (int k = 0; k < ne; ++k) { sum_sq += combined(k) * combined(k); }
+		return std::sqrt(sum_sq);
+	}
+
+	// Peak field magnitude |E| = |grad(V)| over the current solution *x, sampled
+	// at element nodes. Used as an AMR convergence diagnostic (peak |E| at a
+	// conductor corner should settle as refinement resolves the singularity).
+	// Reflects whichever solution currently lives in *x (the last one solved).
+	double ComputePeakFieldMagnitude() const {
+		if (!x) { return 0.0; }
+		double peak = 0.0;
+		mfem::Vector grad;
+		for (int e = 0; e < fespace->GetNE(); ++e) {
+			const mfem::FiniteElement* fe = fespace->GetFE(e);
+			mfem::ElementTransformation* T = fespace->GetElementTransformation(e);
+			const mfem::IntegrationRule& nodes = fe->GetNodes();
+			for (int i = 0; i < nodes.GetNPoints(); ++i) {
+				const mfem::IntegrationPoint& ip = nodes.IntPoint(i);
+				T->SetIntPoint(&ip);
+				x->GetGradient(*T, grad); // grad(V); |E| = |grad(V)|
+				const double mag = grad.Norml2();
+				if (mag > peak) { peak = mag; }
+			}
+		}
+		return peak;
+	}
+
+	// AMR per-iteration diagnostics from the most recent RunAdaptive(). Empty when
+	// AMR is disabled. Consumed by the regression tests and useful for logging.
+	const std::vector<AmrIterationInfo>& GetAmrHistory() const { return amr_history; }
 
 	void ImprintScenario(const Scenario& sc) {
 		*x = 0.0; // Reset solution for new scenario
+		*b = 0.0; // Reset RHS for new scenario
 		for (const auto& bc : config.BoundaryConditions) {
 			if (bc.Value != 0.0) {
-				auto marker = MarkerFromAttrs(bc.AttributeIds);
+				const std::string& group_name = bc.EntityGroupName;
+				const EntityGroup& group = config.EntityGroups.at(group_name);
+				auto marker = MarkerFromAttrs(group.AttributeIds);
 				mfem::ConstantCoefficient c(bc.Value);
 				x->ProjectBdrCoefficient(c, marker);
 			}
 		}
-		for (const auto& term : config.Terminals) {
+		for (const auto& [term_name, term] : config.Terminals) {
 			if (term.Excitation == Quantity::Voltage) {
 				for (const auto& exc : sc.Excitations) {
 					if (!exc.Floating) {
-						if (term.Name == exc.TerminalName) {
-							auto marker = MarkerFromAttrs(term.AttributeIds);
+						if (term_name == exc.TerminalName) {
+							const std::string& group_name = term.EntityGroupName;
+							const EntityGroup& group = config.EntityGroups.at(group_name);
+							auto marker = MarkerFromAttrs(group.AttributeIds);
 							mfem::ConstantCoefficient c(exc.Value);
 							x->ProjectBdrCoefficient(c, marker);
 						}
@@ -155,67 +308,140 @@ public:
 			}
 			else
 			{
-				std::cerr << "Excitation type not supported in ElectrostaticSolver. Skipping terminal " << term.Name << ".\n";
+				std::cerr << "Excitation type not supported in ElectrostaticSolver. Skipping terminal " << term_name << ".\n";
 				continue;
 			}
 		}
 	}
 
 	void Run() override {
-		if (config.StudyType == StudyType::CouplingMatrix) {
-			const int num_terminals = config.Terminals.size();
+		if (config.Amr.Enabled) {
+			RunAdaptive();
+		}
+		else {
+			RunFixed();
+		}
+	}
+
+	// Solve + save on the CURRENT mesh/operators. This is the legacy Run() body:
+	// CouplingMatrix assembles C from unit terminal excitations; Field solves and
+	// saves every authored scenario. AMR calls this once more on the final mesh.
+	void RunFixed() {
+		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
+			const int num_terminals = static_cast<int>(config.Terminals.size());
+
+			// Positional view over the (name-sorted) terminal map. C is inherently
+			// positional, so snapshot the order once and index that.
+			std::vector<const std::pair<const std::string, Terminal>*> terms;
+			terms.reserve(config.Terminals.size());
+			for (const auto& kv : config.Terminals) terms.push_back(&kv);
+
 			C = std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
 			*C = 0.0;
-			mfem::ConstantCoefficient one(1.0); // Unit drive on terminal i
+			mfem::ConstantCoefficient one(1.0);
 			mfem::Vector Q(fespace->GetVSize());
-			// Axisymmetric integrators omit the global 2*pi (charge is integrated per
-			// radian), so scale to physical Coulombs. Planar 2D is per-unit-depth.
-			const double charge_scale = (type == ModelType::Axisymmetric) ? Constants::TWO_PI : 1.0;
-			// One solve per conductor: a 1 V drive on terminal i yields the full
-			// i-th column of C. The constrained matrix is identical for every drive,
-			// so SolveSystem() factors it once and only back-substitutes here.
-			for (int i = 0; i < num_terminals; ++i) {
-				const auto& term_i = config.Terminals[i];
-				*x = 0.0;
-				x->ProjectBdrCoefficient(one, terminal_markers[term_i.Name]);
-				*b = 0.0;
-				SolveSystem(); // factor-once + back-substitute; recovers full *x
+			const double charge_scale = (geometry == GeometryType::Axisymmetric) ? Constants::TWO_PI : 1.0;
 
-				K0->Mult(*x, Q); // nodal charges Q = K0 * V (K0 is the pre-BC matrix)
+			for (int i = 0; i < num_terminals; ++i) {
+				const std::string& term_name = terms[i]->first;
+				*x = 0.0;
+				x->ProjectBdrCoefficient(one, terminal_markers[term_name]);
+				*b = 0.0;
+				SolveSystem();
+
+				K0->Mult(*x, Q);
 
 				for (int k = 0; k < num_terminals; ++k) {
-					const auto& term_k = config.Terminals[k];
-					mfem::Array<int> vdofs_k; // marker array of size ndofs
-					fespace->GetEssentialVDofs(terminal_markers[term_k.Name], vdofs_k);
+					const std::string& term_name_k = terms[k]->first;
+					mfem::Array<int> vdofs_k;
+					fespace->GetEssentialVDofs(terminal_markers[term_name_k], vdofs_k);
 					double Qk = 0.0;
-					// Loop through all dofs and sum the charges corresponding to the vdofs of terminal k.
 					for (int n = 0; n < vdofs_k.Size(); ++n) {
 						if (vdofs_k[n]) Qk += Q(n);
 					}
-					// Drive is exactly 1 V, so C(k,i) = Q_k / V_i = Q_k (scaled).
 					(*C)(k, i) = charge_scale * Qk;
 				}
 			}
 		}
 		else {
-			for (const auto& sc : config.Scenarios) {
+			for (const auto& [sc_name, sc] : config.Scenarios) {
 				ImprintScenario(sc);
 				SolveSystem();
-				SaveScenario(sc.Name);
+				SaveScenario(sc_name);
 			}
 		}
 	}
 
+	// h-adaptive loop: estimate combined (max-over-scenarios) error on the current
+	// mesh, stop on iteration / DOF / error-tolerance caps, otherwise bulk-mark
+	// (Dorfler) and refine conformingly, rebuild operators, and repeat. A final
+	// RunFixed() on the converged mesh produces the saved fields / C matrix so the
+	// exported results correspond exactly to the exported (refined) mesh.
+	void RunAdaptive() {
+		const AmrSettings& amr = config.Amr;
+		amr_history.clear();
+
+		const int max_it = std::max(1, amr.MaxIterations);
+		for (int it = 0; it < max_it; ++it) {
+			const long cdofs = fespace->GetTrueVSize();
+
+			mfem::Vector errors;
+			const double global_err = EstimateCombinedError(errors);
+			const double peak_absE = ComputePeakFieldMagnitude();
+
+			amr_history.push_back({ cdofs, global_err, peak_absE });
+
+			std::cout << "AMR iteration " << it
+				<< ": elements=" << mesh.GetNE()
+				<< ", true_dofs=" << cdofs
+				<< ", global_error=" << std::scientific << std::setprecision(6) << global_err
+				<< ", peak|E|=" << peak_absE << std::endl;
+
+			// Stopping criteria (any one stops): error tolerance, DOF budget, or
+			// this being the last permitted iteration.
+			if (amr.ErrorTolerance > 0.0 && global_err < amr.ErrorTolerance) {
+				std::cout << "AMR: global error below tolerance. Stop." << std::endl;
+				break;
+			}
+			if (amr.MaxDofs > 0 && cdofs > amr.MaxDofs) {
+				std::cout << "AMR: reached the maximum number of DOFs. Stop." << std::endl;
+				break;
+			}
+			if (it + 1 >= max_it) {
+				std::cout << "AMR: reached the maximum number of iterations. Stop." << std::endl;
+				break;
+			}
+
+			// Mark and refine conformingly (throws if the mesh cannot refine
+			// without hanging nodes), then rebuild the FE space / operators.
+			mfem::Array<int> marked;
+			amr::MarkElementsDorfler(errors, amr.ErrorFraction, marked);
+			if (marked.Size() == 0) {
+				std::cout << "AMR: no elements marked for refinement. Stop." << std::endl;
+				break;
+			}
+			amr::RefineConforming(mesh, marked);
+			BuildOperators();
+		}
+
+		// Authoritative final solve on the final mesh: produces the saved fields
+		// (Field) or the C matrix (CouplingMatrix) on the exported mesh.
+		RunFixed();
+	}
+
 	void SolveSystem() {
+		// The system matrix and its essential-DOF elimination (mat_e) were built for
+		// the current mesh in BuildOperators(), along with the cached UMFPack
+		// factorization. FormLinearSystem here re-derives ONLY this scenario's
+		// eliminated RHS from the freshly imprinted x/b (b was zeroed in
+		// ImprintScenario, so no previous scenario's load survives in it); it reuses
+		// the same already-eliminated operator, so A_op still refers to exactly what
+		// umf factored. Each scenario is therefore solved independently, and AMR
+		// re-runs BuildOperators() after refinement to refactor on the new mesh.
 		mfem::Vector B, X;
 		a->FormLinearSystem(ess_tdof_list, *x, *b, A_op, X, B);
 #ifdef MFEM_USE_SUITESPARSE
-		if (!umf) {
-			umf = std::make_unique<mfem::UMFPackSolver>();
-			umf->Control[UMFPACK_PRL] = 1;
-			umf->SetOperator(*A_op); // factor once; reused for every subsequent RHS
-		}
-		umf->Mult(B, X);
+		umf->Mult(B, X); // reuse the factorization built for this mesh in BuildOperators()
 #else
 		auto* sp = dynamic_cast<mfem::SparseMatrix*>(A_op.Ptr());
 		MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
@@ -235,8 +461,8 @@ public:
 		}
 	}
 
-	void SaveStudy() override {
-		if (config.StudyType == StudyType::CouplingMatrix) {
+	void SaveAnalysis() override {
+		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
 			WriteCouplingMatrix();
 		}
 	}
@@ -254,17 +480,20 @@ private:
 		}
 
 		const int n = C->Height();
-		const auto& terminals = config.Terminals;
+
+		std::vector<const std::pair<const std::string, Terminal>*> terms;
+		terms.reserve(config.Terminals.size());
+		for (const auto& kv : config.Terminals) terms.push_back(&kv);
 
 		// Console summary.
 		std::cout << "\n=== Capacitance Matrix [F] ===\n";
 		std::cout << std::setw(18) << " ";
 		for (int j = 0; j < n; ++j) {
-			std::cout << std::setw(18) << terminals[j].Name;
+			std::cout << std::setw(18) << terms[j]->first;
 		}
 		std::cout << "\n";
 		for (int k = 0; k < n; ++k) {
-			std::cout << std::setw(18) << terminals[k].Name;
+			std::cout << std::setw(18) << terms[k]->first;
 			for (int i = 0; i < n; ++i) {
 				std::cout << std::setw(18) << std::scientific << std::setprecision(6) << (*C)(k, i);
 			}
@@ -283,11 +512,11 @@ private:
 		}
 
 		ofs << "Terminal";
-		for (int j = 0; j < n; ++j) { ofs << "," << terminals[j].Name; }
+		for (int j = 0; j < n; ++j) { ofs << "," << terms[j]->first; }
 		ofs << "\n";
 		ofs << std::scientific << std::setprecision(12);
 		for (int k = 0; k < n; ++k) {
-			ofs << terminals[k].Name;
+			ofs << terms[k]->first;
 			for (int i = 0; i < n; ++i) { ofs << "," << (*C)(k, i); }
 			ofs << "\n";
 		}
@@ -337,6 +566,16 @@ private:
 		fs::path out_path = mesh_dir / (scenario_name + ".results.msh");
 
 		// Refinement factor: explicit override > Order (>=1).
+		//
+		// This is a VISUALIZATION sub-sampling factor (p-detail): each base element
+		// is split ref_factor times per dimension so a high-Order (curved) solution
+		// renders smoothly on the linear export mesh. It depends only on the
+		// (refinement-invariant) polynomial Order, NOT on the mesh, so it composes
+		// orthogonally with AMR: AMR performs h-refinement (more base elements) while
+		// this performs p-sub-sampling (sub-vertices per element). AMR does not
+		// compound ref_factor, so the export element count is the AMR element count
+		// times ref_factor^dim - i.e. for the common Order==1 case ref_factor==1 and
+		// the export mesh equals the AMR mesh exactly.
 		int ref_factor = (config.ExportRefine > 0) ? config.ExportRefine
 			: std::max(1, config.Order);
 

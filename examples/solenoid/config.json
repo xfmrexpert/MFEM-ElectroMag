@@ -1,9 +1,9 @@
 {
   "simulation": {
-    "type": "magnetostatics",
+    "physics": "magnetostatics",
     "mesh": "solenoid_fixed.msh",
     "order": 2,
-    "axisymmetric": true,
+    "geometry": "axisymmetric",
     "solver_tolerance": 1e-12,
     "solver_max_iter": 2000,
     "solver_print_level": 1
@@ -27,7 +27,7 @@
   "terminals": [
     {
       "name": "CoilCurrent",
-      "drive": "current",
+      "excitation": "current",
       "attribute_ids": [2]
     }
   ],
@@ -42,7 +42,7 @@
   "scenarios": [
     {
       "name": "energized",
-      "drives": [
+      "excitations": [
         { "terminal": "CoilCurrent", "value": 166666.67 }
       ]
     }

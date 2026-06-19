@@ -1,9 +1,9 @@
 {
   "simulation": {
-    "type": "electrostatics",
+    "physics": "electrostatics",
     "mesh": "electrostatic_test.msh",
     "order": 2,
-    "axisymmetric": true
+    "geometry": "axisymmetric"
   },
   "regions": [
     {
@@ -39,39 +39,39 @@
   "terminals": [
     {
       "name": "High_Voltage",
-      "drive": "voltage",
+      "excitation": "voltage",
       "attribute_ids": [11, 21, 22]
     },
     {
       "name": "Low_Voltage_GND",
-      "drive": "voltage",
+      "excitation": "voltage",
       "attribute_ids": [12]
     },
     {
       "name": "Regulating_Windings_GND",
-      "drive": "voltage",
+      "excitation": "voltage",
       "attribute_ids": [13]
     },
     {
       "name": "Static_Rings_GND",
-      "drive": "voltage",
+      "excitation": "voltage",
       "attribute_ids": [14, 23, 24]
     },
     {
       "name": "Clamping_Ring_GND",
-      "drive": "voltage",
+      "excitation": "voltage",
       "attribute_ids": [15, 16]
     },
     {
       "name": "Tank_Wall",
-      "drive": "voltage",
+      "excitation": "voltage",
       "attribute_ids": [17]
     }
   ],
   "scenarios": [
     {
       "name": "energized",
-      "drives": [
+      "excitations": [
         { "terminal": "High_Voltage", "value": 230000.0 }
       ]
     }

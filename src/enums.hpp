@@ -4,7 +4,7 @@
 #pragma once
 
 /**
- * @brief Physics simulation types
+ * @brief Physics formulation selected by "simulation.physics"
  */
 enum class PhysicsType {
     Electrostatic,
@@ -22,9 +22,19 @@ enum class BoundaryType {
 };
 
 /**
- * @brief Solver model types (geometry)
+ * @brief Coordinate assumption / weak form ("simulation.geometry")
  */
-enum class ModelType {
+enum class GeometryType {
     Axisymmetric,
     Planar
 };
+
+/// PhysicsType -> canonical JSON string (used by the factory and diagnostics).
+inline const char* ToString(PhysicsType p) {
+    switch (p) {
+        case PhysicsType::Electrostatic:      return "electrostatics";
+        case PhysicsType::Magnetostatic:      return "magnetostatics";
+        case PhysicsType::Magnetoquasistatic: return "magnetoquasistatics";
+    }
+    return "unknown";
+}

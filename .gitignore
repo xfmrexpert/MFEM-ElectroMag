@@ -4,6 +4,8 @@
 /build/
 /bin/
 /lib/
+# Visual Studio CMakePresets output (out/build/<preset>, out/install/<preset>)
+/out/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -80,7 +82,6 @@ pyvenv.cfg
 results_magnetostatic/*
 results_mqs/*
 examples/simple_capacitor/results_electrostatic/*
-/out/build/x64-Debug
 /examples/simple_capacitor/results_electrostatic_Bottom Plate/Cycle000000
 /examples/simple_capacitor/results_electrostatic_Top Plate/Cycle000000
 /examples/simple_capacitor/results_electrostatic_Top Plate/Cycle000000/data.pvtu

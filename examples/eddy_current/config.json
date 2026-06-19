@@ -1,9 +1,9 @@
 {
   "simulation": {
-    "type": "magnetoquasistatics",
+    "physics": "magnetoquasistatics",
     "mesh": "eddy_current.mesh",
     "order": 2,
-    "model_type": "axisymmetric",
+    "geometry": "axisymmetric",
     "frequency": 60.0,
     "solver_tolerance": 1e-6,
     "solver_max_iter": 3000,
@@ -52,7 +52,7 @@
   "terminals": [
     {
       "name": "ExcitationCoil",
-      "drive": "current",
+      "excitation": "current",
       "attribute_ids": [3]
     }
   ],
@@ -67,7 +67,7 @@
   "scenarios": [
     {
       "name": "60Hz",
-      "drives": [
+      "excitations": [
         { "terminal": "ExcitationCoil", "value": 100000.0 }
       ]
     }

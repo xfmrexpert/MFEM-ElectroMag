@@ -1,9 +1,9 @@
 {
   "simulation": {
-    "type": "magnetoquasistatics",
+    "physics": "magnetoquasistatics",
     "mesh": "test_loop.msh",
     "order": 2,
-    "axisymmetric": true,
+    "geometry": "axisymmetric",
     "frequency": 60.0
   },
   "regions": [
@@ -39,14 +39,14 @@
   "terminals": [
     {
       "name": "Loop_Current",
-      "drive": "current",
+      "excitation": "current",
       "attribute_ids": [2]
     }
   ],
   "scenarios": [
     {
       "name": "60Hz",
-      "drives": [
+      "excitations": [
         { "terminal": "Loop_Current", "value": 1.0e7 }
       ]
     }
