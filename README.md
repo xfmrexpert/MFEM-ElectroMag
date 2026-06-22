@@ -29,7 +29,6 @@ A finite element solver for electromagnetic problems using MFEM (Modular Finite 
 
 ### Optional
 
-- **SuiteSparse**: For direct sparse solvers (recommended for better performance)
 - **HYPRE**: For advanced preconditioners and solvers
 - **METIS**: For mesh partitioning
 - **OpenMP**: For parallel assembly (usually included with compiler)
@@ -44,9 +43,6 @@ A finite element solver for electromagnetic problems using MFEM (Modular Finite 
 # Install dependencies
 sudo apt-get update
 sudo apt-get install -y cmake g++ git
-
-# Optional: Install SuiteSparse for better solver performance
-sudo apt-get install -y libsuitesparse-dev
 
 # Clone the repository
 git clone https://github.com/xfmrexpert/MFEM-ElectroMag.git
@@ -64,9 +60,6 @@ make -j$(nproc)
 ```bash
 # Install dependencies using Homebrew
 brew install cmake git
-
-# Optional: Install SuiteSparse
-brew install suite-sparse
 
 # Clone the repository
 git clone https://github.com/xfmrexpert/MFEM-ElectroMag.git
@@ -125,7 +118,7 @@ MFEM will be automatically downloaded and configured. To enable optional MFEM fe
 
 ```bash
 # In the build directory
-cmake .. -DMFEM_USE_SUITESPARSE=ON -DMFEM_USE_METIS=ON
+cmake .. -DMFEM_USE_METIS=ON
 make -j
 ```
 

@@ -188,12 +188,6 @@ public:
                << "Check that 'sources' in JSON match mesh attributes.\n";
        }
 
-#ifdef MFEM_USE_SUITESPARSE
-       mfem::UMFPackSolver umf;
-       umf.Control[UMFPACK_PRL] = 1;
-       umf.SetOperator(*Aop);
-       umf.Mult(B, X);
-#else
        auto* sp = dynamic_cast<mfem::SparseMatrix*>(Aop.Ptr());
        MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
 
@@ -203,7 +197,6 @@ public:
            config.SolverMaxIter,
            config.SolverTolerance,
            0.0);
-#endif
 
        a->RecoverFEMSolution(X, *b, *A);
 

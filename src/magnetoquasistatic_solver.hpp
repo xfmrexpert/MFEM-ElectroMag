@@ -421,13 +421,6 @@ public:
         bool own_A = (A_op_ptr != global_complex_system.get());
         A_op.Reset(A_op_ptr, own_A);
 
-#ifdef MFEM_USE_SUITESPARSE
-        // Direct Complex Solver
-        mfem::ComplexUMFPackSolver solver;
-        solver.Control[UMFPACK_PRL] = 1;
-        solver.SetOperator(*A_op.Ptr());
-        solver.Mult(B_vec, X_vec);
-#else
         // Iterative Complex Solver
         mfem::GMRESSolver gmres;
         gmres.SetOperator(*A_op.Ptr());
@@ -435,7 +428,6 @@ public:
         gmres.SetRelTol(config.SolverTolerance);
         gmres.SetMaxIter(config.SolverMaxIter);
         gmres.Mult(B_vec, X_vec);
-#endif
 
         // Extract Solution manually
         // System solution X_vec is ordered: [Re_Mesh, Re_Port, Im_Mesh, Im_Port]

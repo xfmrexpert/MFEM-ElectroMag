@@ -34,16 +34,12 @@ class ElectrostaticSolver : public PhysicsSolver {
 	std::unique_ptr<mfem::SparseMatrix> K0;
 	std::unique_ptr<mfem::DenseMatrix> C; // Coupling Matrix for terminals
 
-	// Cached constrained system + factorization for the CURRENT mesh. The matrix
-	// is identical for every solve on a given mesh (same bilinear form and
-	// essential DOFs), so it is factored once per mesh in BuildOperators() and
-	// reused for all scenarios / coupling columns. AMR refinement rebuilds these
-	// via BuildOperators(). A_op must outlive `umf` because the UMFPack solver
-	// keeps a pointer to the matrix it factored.
+	// Cached constrained system for the CURRENT mesh. The matrix is identical
+	// for every solve on a given mesh (same bilinear form and essential DOFs),
+	// so it is assembled once per mesh in BuildOperators() and reused for all
+	// scenarios / coupling columns. AMR refinement rebuilds it via
+	// BuildOperators().
 	mfem::OperatorPtr A_op;
-#ifdef MFEM_USE_SUITESPARSE
-	std::unique_ptr<mfem::UMFPackSolver> umf;
-#endif
 
 	mfem::Array<int> ess_bdr;
 	mfem::Array<int> ess_tdof_list;
@@ -145,11 +141,10 @@ public:
 	// refinement-invariant data (fec, epsilon_coeff, ess_bdr, terminal_markers)
 	// persists across calls and is reused.
 	//
-	// When SuiteSparse is available the matrix is factored here; within a single
-	// mesh that factorization is reused for every scenario / coupling column
-	// (the bilinear form and essential-DOF set do not change between solves).
-	// AMR refinement invalidates the mesh, so this is re-run to rebuild and
-	// re-factor on the new mesh.
+	// The constrained system matrix is assembled here; within a single mesh that
+	// matrix is reused for every scenario / coupling column (the bilinear form
+	// and essential-DOF set do not change between solves). AMR refinement
+	// invalidates the mesh, so this is re-run to rebuild on the new mesh.
 	void BuildOperators() {
 		fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
 		x = std::make_unique<mfem::GridFunction>(fespace.get());
@@ -170,15 +165,9 @@ public:
 		fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
 
 		// Form the constrained system operator. The eliminated-column part
-		// (mat_e, used to build each scenario's RHS) is bound to A_op, which must
-		// outlive `umf` because the UMFPack solver keeps a pointer to the matrix
-		// it factored.
+		// (mat_e, used to build each scenario's RHS) is bound to A_op, which is
+		// reused for every scenario's solve on this mesh.
 		a->FormSystemMatrix(ess_tdof_list, A_op);
-#ifdef MFEM_USE_SUITESPARSE
-		umf = std::make_unique<mfem::UMFPackSolver>();
-		umf->Control[UMFPACK_PRL] = 1;
-		umf->SetOperator(*A_op); // factor; reused for every scenario's RHS on this mesh
-#endif
 	}
 
 	// Create the domain diffusion integrator matching the active geometry. Used
@@ -431,24 +420,19 @@ public:
 
 	void SolveSystem() {
 		// The system matrix and its essential-DOF elimination (mat_e) were built for
-		// the current mesh in BuildOperators(), along with the cached UMFPack
-		// factorization. FormLinearSystem here re-derives ONLY this scenario's
-		// eliminated RHS from the freshly imprinted x/b (b was zeroed in
-		// ImprintScenario, so no previous scenario's load survives in it); it reuses
-		// the same already-eliminated operator, so A_op still refers to exactly what
-		// umf factored. Each scenario is therefore solved independently, and AMR
-		// re-runs BuildOperators() after refinement to refactor on the new mesh.
+		// the current mesh in BuildOperators(). FormLinearSystem here re-derives ONLY
+		// this scenario's eliminated RHS from the freshly imprinted x/b (b was zeroed
+		// in ImprintScenario, so no previous scenario's load survives in it); it
+		// reuses the same already-eliminated operator. Each scenario is therefore
+		// solved independently, and AMR re-runs BuildOperators() after refinement to
+		// rebuild on the new mesh.
 		mfem::Vector B, X;
 		a->FormLinearSystem(ess_tdof_list, *x, *b, A_op, X, B);
-#ifdef MFEM_USE_SUITESPARSE
-		umf->Mult(B, X); // reuse the factorization built for this mesh in BuildOperators()
-#else
 		auto* sp = dynamic_cast<mfem::SparseMatrix*>(A_op.Ptr());
 		MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
 		mfem::GSSmoother M(*sp);
 		mfem::PCG(*A_op, M, B, X, config.SolverPrintLevel,
 			config.SolverMaxIter, config.SolverTolerance, 0.0);
-#endif
 		a->RecoverFEMSolution(X, *b, *x);
 	}
 
