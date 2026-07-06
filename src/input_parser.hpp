@@ -364,6 +364,11 @@ private:
                     terminal.Excitation = (d == "current") ? Quantity::Current
                                                            : Quantity::Voltage;
                 }
+				if (t.contains("conductor_type") && t["conductor_type"].is_string()) {
+					std::string c = t["conductor_type"];
+					terminal.Conductor = (c == "stranded") ? ConductorType::Stranded
+						: ConductorType::Massive;
+				}
                 if (t.contains("entity_group")) {
                     terminal.EntityGroupName = t["entity_group"];
                 }

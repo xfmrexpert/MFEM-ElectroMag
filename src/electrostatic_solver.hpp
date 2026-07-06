@@ -3,8 +3,6 @@
 
 #pragma once
 #include <memory>
-#include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -19,15 +17,12 @@
 #include "amr_support.hpp"
 
 class ElectrostaticSolver : public PhysicsSolver {
-	GeometryType geometry = GeometryType::Axisymmetric;
-
 	// Primary Spaces
-	std::unique_ptr<mfem::H1_FECollection> fec;
-	std::unique_ptr<mfem::FiniteElementSpace> fespace;
 	std::unique_ptr<mfem::GridFunction> x; // Electric Potential (V)
 
 	// Physics
 	std::unique_ptr<mfem::PWConstCoefficient> epsilon_coeff;
+
 	std::unique_ptr<mfem::LinearForm> b;
 	std::unique_ptr<mfem::BilinearForm> a;
 
@@ -37,12 +32,9 @@ class ElectrostaticSolver : public PhysicsSolver {
 	// Cached constrained system for the CURRENT mesh. The matrix is identical
 	// for every solve on a given mesh (same bilinear form and essential DOFs),
 	// so it is assembled once per mesh in BuildOperators() and reused for all
-	// scenarios / coupling columns. AMR refinement rebuilds it via
-	// BuildOperators().
+	// scenarios / coupling columns. AMR refinement rebuilds it via BuildOperators().
 	mfem::OperatorPtr A_op;
 
-	mfem::Array<int> ess_bdr;
-	mfem::Array<int> ess_tdof_list;
 	std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
 
 public:
@@ -78,53 +70,21 @@ public:
 		// Material Properties (Permittivity). epsilon_coeff is a PWConstCoefficient
 		// keyed by mesh DOMAIN attribute. AMR refinement subdivides elements but
 		// preserves their attributes, so this mapping is refinement-invariant.
-		std::vector<Material> materials = config.Materials;
-		mfem::Vector epsilon_values(mesh.attributes.Max());
-		epsilon_values = 0.0;
+				// Material Properties (Permittivity), keyed by mesh DOMAIN attribute.
+				epsilon_coeff = MaterialCoefficient(0.0, [](const Material& m) {
+					return m.RelPermittivity * Constants::EPSILON_0; });
 
-		for (auto& region : config.Regions) {
-			const std::string& group_name = region.EntityGroupName;
-			const EntityGroup& group = config.EntityGroups.at(group_name);
-			for (auto attribute_id : group.AttributeIds) {
-				if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
-					auto& material = materials[region.Material];
-					epsilon_values[attribute_id - 1] = material.RelPermittivity * Constants::EPSILON_0;
-				}
-			}
-		}
+		// Closures + voltage terminals are all essential (Dirichlet).
+		auto bcs = BuildClosureBcs();
 
-		epsilon_coeff = std::make_unique<mfem::PWConstCoefficient>(epsilon_values);
+		terminal_markers.clear();
+		for (const auto& [term_name, term] : config.Terminals)
+			terminal_markers[term_name] = MarkerFromGroup(term.EntityGroupName);
 
-		// Boundary Attributes. Markers are keyed by mesh BOUNDARY attribute, which
-		// refinement preserves, so bcs / terminal_markers / ess_bdr are all
-		// refinement-invariant and built once here.
-		std::vector<std::pair<mfem::Array<int>, double>> bcs;
-		for (const auto& bc : config.BoundaryConditions) {
-			const std::string& group_name = bc.EntityGroupName;
-			const EntityGroup& group = config.EntityGroups.at(group_name);
-			auto marker = MarkerFromAttrs(group.AttributeIds);
-			bcs.push_back({ marker, bc.Value });
-		}
-
-		terminal_markers = std::unordered_map<std::string, mfem::Array<int>>();
-		for (const auto& [term_name, term] : config.Terminals) {
-			const std::string& group_name = term.EntityGroupName;
-			const EntityGroup& group = config.EntityGroups.at(group_name);
-			terminal_markers[term_name] = MarkerFromAttrs(group.AttributeIds);
-		}
-
-		ess_bdr.SetSize(mesh.bdr_attributes.Max());
-		ess_bdr = 0;
-		for (const auto& [marker, val] : bcs) { // closures
-			for (int i = 0; i < marker.Size(); ++i) {
-				if (marker[i]) ess_bdr[i] = 1;
-			}
-		}
-		for (const auto& [name, marker] : terminal_markers) { // voltage terminals
-			for (int i = 0; i < marker.Size(); ++i) {
-				if (marker[i]) ess_bdr[i] = 1;
-			}
-		}
+		std::vector<mfem::Array<int>> ess_markers;
+		for (const auto& [marker, val] : bcs) ess_markers.push_back(marker);
+		for (const auto& [name, marker] : terminal_markers) ess_markers.push_back(marker);
+		ess_bdr = EssentialBdrFrom(ess_markers);
 
 		// Build the FE space and everything bound to it for the starting mesh.
 		BuildOperators();
@@ -147,12 +107,13 @@ public:
 	// invalidates the mesh, so this is re-run to rebuild on the new mesh.
 	void BuildOperators() {
 		fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
+		
 		x = std::make_unique<mfem::GridFunction>(fespace.get());
 		*x = 0.0;
 
 		// Assemble Stiffness Matrix
 		a = std::make_unique<mfem::BilinearForm>(fespace.get());
-		a->AddDomainIntegrator(MakeDiffusionIntegrator()); // a takes ownership
+		a->AddDomainIntegrator(MakeStiffnessIntegrator()); // a takes ownership
 		a->Assemble();
 
 		// Snapshot the UNCONSTRAINED stiffness matrix (used for charge Q = K0*x)
@@ -171,10 +132,10 @@ public:
 	}
 
 	// Create the domain diffusion integrator matching the active geometry. Used
-	// both by the solve (owned by `a`) and the AMR error estimator (a separate,
+	// both by the solve (owned by 'a') and the AMR error estimator (a separate,
 	// independently-owned instance), so the estimated error is consistent with
 	// the assembled operator - axisymmetric (2*pi*r, eps) or planar (eps).
-	mfem::BilinearFormIntegrator* MakeDiffusionIntegrator() const {
+	mfem::BilinearFormIntegrator* MakeStiffnessIntegrator() const {
 		if (geometry == GeometryType::Axisymmetric) {
 			// Solves: Div( r * eps * Grad(V) ) = 0; integrator handles 'r' and 'eps'.
 			return new AxisymmetricDiffusionIntegrator(*epsilon_coeff);
@@ -190,7 +151,7 @@ public:
 	// $Nodes/$Elements across every <scenario>.results.msh).
 	//
 	// Uses the serial recovery-based ZienkiewiczZhuEstimator (the L2 variant is
-	// MPI-only). A dedicated integrator instance (separate from `a`'s) and an H1
+	// MPI-only). A dedicated integrator instance (separate from a's) and an H1
 	// vector flux space are constructed here per call; SetFluxAveraging(1) keeps
 	// the recovered flux from smoothing across material-attribute interfaces so
 	// per-region permittivity discontinuities are respected. SetWithCoeff(true)
@@ -204,7 +165,7 @@ public:
 		combined = 0.0;
 
 		const int sdim = mesh.SpaceDimension();
-		std::unique_ptr<mfem::BilinearFormIntegrator> flux_integ(MakeDiffusionIntegrator());
+		std::unique_ptr<mfem::BilinearFormIntegrator> flux_integ(MakeStiffnessIntegrator());
 		mfem::FiniteElementSpace flux_fes(&mesh, fec.get(), sdim);
 		mfem::ZienkiewiczZhuEstimator estimator(*flux_integ, *x, flux_fes);
 		estimator.SetWithCoeff(true);     // flux = eps * grad(V)
@@ -218,23 +179,14 @@ public:
 			}
 		};
 
-		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
-			// One unit excitation per terminal (drive i = 1 V, rest = 0).
-			mfem::ConstantCoefficient one(1.0);
-			for (const auto& [term_name, marker] : terminal_markers) {
-				*x = 0.0;
-				x->ProjectBdrCoefficient(one, terminal_markers.at(term_name));
-				*b = 0.0;
-				SolveSystem();
-				fold_current_solution();
-			}
-		}
-		else {
-			for (const auto& [sc_name, sc] : config.Scenarios) {
-				ImprintScenario(sc);
-				SolveSystem();
-				fold_current_solution();
-			}
+		// Same scenario set as the real solves (authored scenarios for Field, or
+		// the synthetic per-terminal unit drives for CouplingMatrix), so the AMR
+		// indicator reflects exactly what will be exported. ImprintScenario keeps
+		// the driving identical to RunFixed (no bespoke projection here).
+		for (const auto& [sc_name, sc] : BuildSolveScenarios()) {
+			ImprintScenario(sc);
+			SolveSystem();
+			fold_current_solution();
 		}
 
 		double sum_sq = 0.0;
@@ -272,11 +224,10 @@ public:
 	void ImprintScenario(const Scenario& sc) {
 		*x = 0.0; // Reset solution for new scenario
 		*b = 0.0; // Reset RHS for new scenario
+		
 		for (const auto& bc : config.BoundaryConditions) {
 			if (bc.Value != 0.0) {
-				const std::string& group_name = bc.EntityGroupName;
-				const EntityGroup& group = config.EntityGroups.at(group_name);
-				auto marker = MarkerFromAttrs(group.AttributeIds);
+				auto marker = MarkerFromGroup(bc.EntityGroupName);
 				mfem::ConstantCoefficient c(bc.Value);
 				x->ProjectBdrCoefficient(c, marker);
 			}
@@ -286,9 +237,7 @@ public:
 				for (const auto& exc : sc.Excitations) {
 					if (!exc.Floating) {
 						if (term_name == exc.TerminalName) {
-							const std::string& group_name = term.EntityGroupName;
-							const EntityGroup& group = config.EntityGroups.at(group_name);
-							auto marker = MarkerFromAttrs(group.AttributeIds);
+							auto marker = MarkerFromGroup(term.EntityGroupName);
 							mfem::ConstantCoefficient c(exc.Value);
 							x->ProjectBdrCoefficient(c, marker);
 						}
@@ -312,52 +261,25 @@ public:
 		}
 	}
 
-	// Solve + save on the CURRENT mesh/operators. This is the legacy Run() body:
-	// CouplingMatrix assembles C from unit terminal excitations; Field solves and
-	// saves every authored scenario. AMR calls this once more on the final mesh.
+	// Solve + save on the CURRENT mesh/operators. Both analysis types flow through
+	// ONE imprint -> solve loop over BuildSolveScenarios(); only the intrinsic
+	// post-solve action differs: CouplingMatrix gathers an induced-charge column
+	// into C, Field saves the scenario's fields. AMR calls this once more on the
+	// converged mesh so the exported C / fields match the exported mesh.
 	void RunFixed() {
-		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
-			const int num_terminals = static_cast<int>(config.Terminals.size());
-
-			// Positional view over the (name-sorted) terminal map. C is inherently
-			// positional, so snapshot the order once and index that.
-			std::vector<const std::pair<const std::string, Terminal>*> terms;
-			terms.reserve(config.Terminals.size());
-			for (const auto& kv : config.Terminals) terms.push_back(&kv);
-
-			C = std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
+		const bool coupling = (config.AnalysisType == AnalysisType::CouplingMatrix);
+		if (coupling) {
+			const int n = static_cast<int>(config.Terminals.size());
+			C = std::make_unique<mfem::DenseMatrix>(n, n);
 			*C = 0.0;
-			mfem::ConstantCoefficient one(1.0);
-			mfem::Vector Q(fespace->GetVSize());
-			const double charge_scale = (geometry == GeometryType::Axisymmetric) ? Constants::TWO_PI : 1.0;
-
-			for (int i = 0; i < num_terminals; ++i) {
-				const std::string& term_name = terms[i]->first;
-				*x = 0.0;
-				x->ProjectBdrCoefficient(one, terminal_markers[term_name]);
-				*b = 0.0;
-				SolveSystem();
-
-				K0->Mult(*x, Q);
-
-				for (int k = 0; k < num_terminals; ++k) {
-					const std::string& term_name_k = terms[k]->first;
-					mfem::Array<int> vdofs_k;
-					fespace->GetEssentialVDofs(terminal_markers[term_name_k], vdofs_k);
-					double Qk = 0.0;
-					for (int n = 0; n < vdofs_k.Size(); ++n) {
-						if (vdofs_k[n]) Qk += Q(n);
-					}
-					(*C)(k, i) = charge_scale * Qk;
-				}
-			}
 		}
-		else {
-			for (const auto& [sc_name, sc] : config.Scenarios) {
-				ImprintScenario(sc);
-				SolveSystem();
-				SaveScenario(sc_name);
-			}
+
+		int col = 0;
+		for (const auto& [name, sc] : BuildSolveScenarios()) {
+			ImprintScenario(sc);
+			SolveSystem();
+			if (coupling) { GatherChargeColumn(col++); }
+			else          { SaveScenario(name); }
 		}
 	}
 
@@ -436,13 +358,19 @@ public:
 		a->RecoverFEMSolution(X, *b, *x);
 	}
 
-	void SaveScenario(const std::string& scenario_name) override {
-		if (config.OutputParaview) {
-			WriteParaviewResultsFile(scenario_name);
-		}
-		if (config.OutputGmsh) {
-			WriteGmshResultsFile(scenario_name);
-		}
+	// Post-solve field recovery: the potential V, the field E = -grad(V), and the
+	// per-region permittivity. Serialization is handled by the base class.
+	FieldExportSet CollectExportFields() const override {
+		FieldExportSet fields;
+		fields.AddPrimaryScalar("V", *x);
+
+		auto grad = std::make_unique<mfem::GradientGridFunctionCoefficient>(x.get());
+		auto& grad_ref = fields.Own(std::move(grad));
+		fields.AddVector("E",
+			std::make_unique<mfem::ScalarVectorProductCoefficient>(-1.0, grad_ref));
+
+		fields.AddScalar("Permittivity", *epsilon_coeff);
+		return fields;
 	}
 
 	void SaveAnalysis() override {
@@ -452,6 +380,33 @@ public:
 	}
 
 private:
+	// CouplingMatrix post-solve action for one column: with the just-solved
+	// potential in *x (terminal `col` driven at 1 V, the rest grounded by the
+	// synthesized scenario), gather the induced charge Q = K0 * x onto every
+	// conductor's boundary DOFs and write column `col` of C. Off-diagonals are
+	// negative, diagonals positive; 2*pi scaling accounts for the axisymmetric
+	// measure omitted in the integrators. Terminal order matches
+	// BuildSolveScenarios() / WriteCouplingMatrix() (config.Terminals order).
+	void GatherChargeColumn(int col) {
+		std::vector<const std::pair<const std::string, Terminal>*> terms;
+		terms.reserve(config.Terminals.size());
+		for (const auto& kv : config.Terminals) terms.push_back(&kv);
+
+		mfem::Vector Q(fespace->GetVSize());
+		K0->Mult(*x, Q);
+
+		const double charge_scale = (geometry == GeometryType::Axisymmetric) ? Constants::TWO_PI : 1.0;
+		for (int k = 0; k < static_cast<int>(terms.size()); ++k) {
+			mfem::Array<int> vdofs_k;
+			fespace->GetEssentialVDofs(terminal_markers[terms[k]->first], vdofs_k);
+			double Qk = 0.0;
+			for (int n = 0; n < vdofs_k.Size(); ++n) {
+				if (vdofs_k[n]) Qk += Q(n);
+			}
+			(*C)(k, col) = charge_scale * Qk;
+		}
+	}
+
 	// Writes the computed Maxwell (short-circuit) capacitance matrix.
 	// C(k,i) is the charge induced on conductor k when conductor i is held at
 	// 1 V and all other conductors at 0 V. The matrix is symmetric; diagonals
@@ -463,143 +418,6 @@ private:
 			return;
 		}
 
-		const int n = C->Height();
-
-		std::vector<const std::pair<const std::string, Terminal>*> terms;
-		terms.reserve(config.Terminals.size());
-		for (const auto& kv : config.Terminals) terms.push_back(&kv);
-
-		// Console summary.
-		std::cout << "\n=== Capacitance Matrix [F] ===\n";
-		std::cout << std::setw(18) << " ";
-		for (int j = 0; j < n; ++j) {
-			std::cout << std::setw(18) << terms[j]->first;
-		}
-		std::cout << "\n";
-		for (int k = 0; k < n; ++k) {
-			std::cout << std::setw(18) << terms[k]->first;
-			for (int i = 0; i < n; ++i) {
-				std::cout << std::setw(18) << std::scientific << std::setprecision(6) << (*C)(k, i);
-			}
-			std::cout << "\n";
-		}
-
-		// CSV next to the mesh (same path convention as the Gmsh/ParaView writers).
-		namespace fs = std::filesystem;
-		fs::path mesh_dir = fs::path(config.MeshPath).parent_path();
-		fs::path out_path = mesh_dir / "capacitance_matrix.csv";
-
-		std::ofstream ofs(out_path);
-		if (!ofs) {
-			std::cerr << "WriteCouplingMatrix: failed to open " << out_path.string() << "\n";
-			return;
-		}
-
-		ofs << "Terminal";
-		for (int j = 0; j < n; ++j) { ofs << "," << terms[j]->first; }
-		ofs << "\n";
-		ofs << std::scientific << std::setprecision(12);
-		for (int k = 0; k < n; ++k) {
-			ofs << terms[k]->first;
-			for (int i = 0; i < n; ++i) { ofs << "," << (*C)(k, i); }
-			ofs << "\n";
-		}
-
-		std::cout << "Wrote " << out_path.string() << std::endl;
-	}
-
-	void WriteParaviewResultsFile(const std::string& scenario_name) {
-		// Paraview output (should we make an option?)
-		mfem::ParaViewDataCollection paraview(("results_electrostatic_" + scenario_name).c_str(), &mesh);
-		paraview.SetLevelsOfDetail(1);
-		paraview.RegisterField("V", x.get());
-
-		// Electric Field: E = -Grad(V)
-		mfem::L2_FECollection fec_l2(fec->GetOrder() - 1, mesh.Dimension());
-
-		// Electric Field Vector Space
-		mfem::FiniteElementSpace fespace_l2_vec(&mesh, &fec_l2, mesh.Dimension());
-		mfem::GridFunction E(&fespace_l2_vec);
-
-		mfem::GradientGridFunctionCoefficient grad_x(x.get());
-		E.ProjectCoefficient(grad_x);
-		E *= -1.0;  // E = -Grad(V)
-
-		paraview.RegisterField("E", &E);
-
-		// Permittivity
-		mfem::FiniteElementSpace fespace_l2_scalar(&mesh, &fec_l2);
-		mfem::GridFunction eps_gf(&fespace_l2_scalar);
-		eps_gf.ProjectCoefficient(*epsilon_coeff);
-		paraview.RegisterField("Permittivity", &eps_gf);
-
-		paraview.SetCycle(0);
-		paraview.SetTime(0.0);
-		paraview.Save();
-	}
-
-	void WriteGmshResultsFile(const std::string& scenario_name) {
-		namespace fs = std::filesystem;
-
-		// Resolve output path: explicit override > derive from mesh path.
-		// A relative override is resolved against the mesh's directory rather
-		// than the process CWD, so the results land next to the input mesh
-		// regardless of where the executable was launched from (VS launches
-		// from out\build\<cfg>\, CTest from the build dir, etc.).
-		fs::path mesh_dir = fs::path(config.MeshPath).parent_path();
-		fs::path out_path = mesh_dir / (scenario_name + ".results.msh");
-
-		// Refinement factor: explicit override > Order (>=1).
-		//
-		// This is a VISUALIZATION sub-sampling factor (p-detail): each base element
-		// is split ref_factor times per dimension so a high-Order (curved) solution
-		// renders smoothly on the linear export mesh. It depends only on the
-		// (refinement-invariant) polynomial Order, NOT on the mesh, so it composes
-		// orthogonally with AMR: AMR performs h-refinement (more base elements) while
-		// this performs p-sub-sampling (sub-vertices per element). AMR does not
-		// compound ref_factor, so the export element count is the AMR element count
-		// times ref_factor^dim - i.e. for the common Order==1 case ref_factor==1 and
-		// the export mesh equals the AMR mesh exactly.
-		int ref_factor = (config.ExportRefine > 0) ? config.ExportRefine
-			: std::max(1, config.Order);
-
-		// Build refined export mesh. The ClosedUniform basis matches the
-		// ParaView export path and gives uniformly distributed sub-vertices.
-		mfem::Mesh export_mesh(&mesh, ref_factor, mfem::BasisType::ClosedUniform);
-
-		const int dim = export_mesh.Dimension();
-		const int sdim = export_mesh.SpaceDimension();
-
-		// Linear H1 for V on the refined mesh (one DOF per vertex).
-		mfem::H1_FECollection fec_h1_lin(1, dim);
-		mfem::FiniteElementSpace fes_V(&export_mesh, &fec_h1_lin);
-		mfem::GridFunction V_h(&fes_V);
-		{
-			mfem::GridFunctionCoefficient phi_coeff(x.get());
-			V_h.ProjectCoefficient(phi_coeff);
-		}
-
-		// Linear L2 vector space for E.
-		mfem::L2_FECollection fec_l2_lin(1, dim);
-		mfem::FiniteElementSpace fes_E(&export_mesh, &fec_l2_lin, sdim);
-		mfem::GridFunction E_h(&fes_E);
-		{
-			mfem::GradientGridFunctionCoefficient grad_phi(x.get());
-			mfem::ScalarVectorProductCoefficient minus_grad(-1.0, grad_phi);
-			E_h.ProjectCoefficient(minus_grad);
-		}
-
-		std::vector<gmsh_results::View> views;
-		views.push_back(gmsh_results::MakeScalarNodeView("V", V_h));
-		views.push_back(gmsh_results::MakeVectorElementNodeView("E", E_h));
-		views.push_back(gmsh_results::MakeMagnitudeElementNodeView("|E|", E_h));
-
-		// TODO: per-surface tangential field views "Et_<surface>" from
-		// creep-surface boundary attributes (FaceElementTransformations +
-		// E - (E.n) n). The C# loader simply ignores missing keys.
-
-		gmsh_results::WriteGmshResults(out_path.string(), export_mesh, fes_E, views);
-
-		std::cout << "Wrote " << out_path.string() << std::endl;
+		SaveCouplingMatrix(*C, "Capacitance Matrix [F]", "capacitance_matrix.csv");
 	}
 };

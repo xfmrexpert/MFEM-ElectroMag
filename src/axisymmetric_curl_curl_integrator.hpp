@@ -116,6 +116,23 @@ public:
       }
    }
 
+   void ComputeElementFlux(const mfem::FiniteElement& el,
+	   mfem::ElementTransformation& Trans,
+       mfem::Vector& u, const mfem::FiniteElement& flux_elem,
+	   mfem::Vector& flux, bool with_coef,
+       const mfem::IntegrationRule* ir) override {
+	   MFEM_ASSERT(false, "ComputeElementFlux is not implemented for AxisymmetricCurlCurlIntegrator.");
+   }
+
+   double ComputeFluxEnergy(const mfem::FiniteElement& fluxelem,
+       mfem::ElementTransformation& Trans,
+       mfem::Vector& flux, mfem::Vector* d_energy) override {
+	   MFEM_ASSERT(false, "ComputeFluxEnergy is not implemented for AxisymmetricCurlCurlIntegrator.");
+	   return 0.0;
+   }
+
+
+
 private:
    mfem::Coefficient *nu_;
 };

@@ -15,353 +15,411 @@
 #include "input_parser.hpp"
 #include "boundary_validation.hpp"
 #include "constants.hpp"
+#include "gmsh_results_writer.hpp"
 
 class MagnetostaticSolver : public PhysicsSolver
 {
 private:
-   GeometryType geometry = GeometryType::Axisymmetric;
+	// Resources (order of declaration = order of destruction)
+	std::unique_ptr<mfem::GridFunction>       A;        // A_phi (axisym) or A_z (planar scalar)
 
-   // Resources (order of declaration = order of destruction)
-   std::unique_ptr<mfem::H1_FECollection>    fec;
-   std::unique_ptr<mfem::FiniteElementSpace> fespace;
-   std::unique_ptr<mfem::GridFunction>       A;        // A_phi (axisym) or A (planar scalar)
+	std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;  // nu=1/mu (reluctivity)
+	std::unique_ptr<mfem::PWConstCoefficient> j_coeff;   // J_phi (axisym) or J (planar scalar src)
 
-   std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;  // ν = 1/μ
-   std::unique_ptr<mfem::PWConstCoefficient> j_coeff;   // J_phi (axisym) or J (planar scalar src)
+	std::unique_ptr<mfem::LinearForm> b;
+	std::unique_ptr<mfem::BilinearForm> a;
 
-   std::unique_ptr<mfem::LinearForm> b;
-   std::unique_ptr<mfem::BilinearForm> a;
-
-   mfem::Array<int> ess_bdr; // boundary attribute marker (size = bdr_attributes.Max())
-   mfem::Array<int> ess_tdof_list;
+	// Cached constrained system for the CURRENT mesh. The matrix is identical
+	// for every solve on a given mesh (same bilinear form and essential DOFs),
+	// so it is assembled once per mesh in BuildOperators() and reused for all
+	// scenarios / coupling columns. AMR refinement rebuilds it via
+	// BuildOperators().
+	mfem::OperatorPtr A_op;
 
 public:
-   MagnetostaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
+	// One AMR iteration's diagnostics, recorded during RunAdaptive(). Exposed for
+	// tests (convergence / conformity assertions) and console logging.
+	struct AmrIterationInfo {
+		long   true_dofs;     // global true DOFs on that iteration's mesh
+		double global_error;  // sqrt(sum_k eta_k^2), combined over scenarios
+		double peak_absB;     // max |B| sampled over the mesh
+	};
+private:
+	std::vector<AmrIterationInfo> amr_history;
 
-   void Setup() override
-   {
-      // Config & solver type
-      InputParser parser(config_json);
-      config = parser.GetProblemConfig();
-        
-      int order = config.Order;
-      const int dim   = mesh.Dimension();
+public:
+	MagnetostaticSolver(mfem::Mesh& m, const json& c) : PhysicsSolver(m, c) {}
 
-      // Axisymmetric or Planar
-      geometry = config.GeometryType;
+	void Setup() override
+	{
+		// Config & solver type
+		InputParser parser(config_json);
+		config = parser.GetProblemConfig();
 
-      // FE spaces
-      fec = std::make_unique<mfem::H1_FECollection>(order, dim);
-      fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
+		int order = config.Order;
+		const int dim = mesh.Dimension();
 
-      // Materials Properties (Reluctivity)
-      std::vector<Material> materials = config.Materials;
-      mfem::Vector nu_values(mesh.attributes.Max());
-      nu_values = 0.0;
+		// Axisymmetric or Planar
+		geometry = config.GeometryType;
 
-      for (auto& region : config.Regions) {
-		  const std::string& group_name = region.EntityGroupName;
-		  const EntityGroup& group = config.EntityGroups.at(group_name);
-          for (auto attribute_id : group.AttributeIds) {
-              if (attribute_id > 0 && attribute_id <= mesh.attributes.Max()) {
-                  auto& material = materials[region.Material];
-                  nu_values[attribute_id - 1] = 1.0 / (Constants::MU_0 * material.RelPermeability);
-              }
-          }
-      }
+		// FE spaces
+		fec = std::make_unique<mfem::H1_FECollection>(order, dim);
 
-      nu_coeff = std::make_unique<mfem::PWConstCoefficient>(nu_values);
+		// Material Properties (Reluctivity nu = 1/mu), keyed by mesh DOMAIN attribute.
+		nu_coeff = MaterialCoefficient(1.0 / Constants::MU_0, [](const Material& m) {
+			return 1.0 / (Constants::MU_0 * m.RelPermeability); });
 
-      // Boundary Attributes
-      std::vector<std::pair<mfem::Array<int>, double>> bcs;
-      for (const auto& bc : config.BoundaryConditions) {
-		  const std::string& group_name = bc.EntityGroupName;
-		  const EntityGroup& group = config.EntityGroups.at(group_name);
-          auto marker = MarkerFromAttrs(group.AttributeIds);
-          bcs.push_back({ marker, bc.Value });
-      }
+		// All closures essential; values lifted from *A by FormLinearSystem.
+		auto bcs = BuildClosureBcs();
 
-      BoundaryConditionValidator validator(mesh, *fespace);
-      validator.ValidateBoundaryConditions(bcs, /*terminals=*/{}, /*allow_overlap=*/false);
+		std::vector<mfem::Array<int>> ess_markers;
+		for (const auto& [marker, val] : bcs) ess_markers.push_back(marker);
+		ess_bdr = EssentialBdrFrom(ess_markers);
 
-      // Apply BC values to A and build essential boundary marker.
-      ess_bdr.SetSize(mesh.bdr_attributes.Max());
-      ess_bdr = 0;
-      for (const auto& [marker, val] : bcs)
-      {
-          mfem::ConstantCoefficient val_coeff(val);
-          A->ProjectBdrCoefficient(val_coeff, marker);
+		// Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
+		// Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
+		// If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
+		if (geometry == GeometryType::Axisymmetric)
+		{
+			// Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
+			// that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
+			// If your mesh already has an "axis" boundary attribute, prefer using that instead.
+			MarkAxisBoundaryAttributesGeometric();
+		}
 
-          // Merge marker -> ess_bdr_
-          MFEM_ASSERT(marker.Size() == ess_bdr.Size(),
-              "Boundary marker size must match bdr_attributes.Max().");
-          for (int i = 0; i < marker.Size(); i++)
-          {
-              if (marker[i]) { ess_bdr[i] = 1; }
-          }
-      }
+		// Build the FE space and everything bound to it for the starting mesh.
+		BuildOperators();
 
-      // Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
-      // Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
-      // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
-      if (geometry == GeometryType::Axisymmetric)
-      {
-          // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
-          // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
-          // If your mesh already has an "axis" boundary attribute, prefer using that in InputParser instead.
-          MarkAxisBoundaryAttributesGeometric();
-          // After this, ess_bdr includes axis attributes, and A has already been projected
-          // for other BCs. We also project A=0 on the axis here for safety.
-          ProjectAxisZero();
-      }
+		BoundaryConditionValidator validator(mesh, *fespace);
+		validator.ValidateBoundaryConditions(bcs, /*terminals=*/{}, /*allow_overlap=*/false);
 
-      // Assemble Stiffness Matrix
-      A = std::make_unique<mfem::GridFunction>(fespace.get());
-      *A = 0.0;
+	}
 
-      a = std::make_unique<mfem::BilinearForm>(fespace.get());
+	void BuildOperators() {
+		fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
 
-      if (geometry == GeometryType::Axisymmetric)
-      {
-          a->AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff));
-      }
-      else
-      {
-          a->AddDomainIntegrator(new mfem::DiffusionIntegrator(*nu_coeff));
-      }
+		A = std::make_unique<mfem::GridFunction>(fespace.get());
+		*A = 0.0;
 
-      a->Assemble();
-   }
+		a = std::make_unique<mfem::BilinearForm>(fespace.get());
+		a->AddDomainIntegrator(MakeStiffnessIntegrator()); // a takes ownership
+		a->Assemble();
 
-   void ImprintScenario(const Scenario& sc) {
-       auto j_src = BuildCurrentDensity(sc);
-       j_coeff = std::make_unique<mfem::PWConstCoefficient>(j_src);
-       // RHS
-       b = std::make_unique<mfem::LinearForm>(fespace.get());
+		fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
 
-       if (geometry == GeometryType::Axisymmetric)
-       {
-           // Integrates J * v * r  (global 2π omitted consistently)
-           b->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
-       }
-       else
-       {
-           b->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
-       }
-       b->Assemble();
-   }
+		// Form the constrained system operator. The eliminated-column part
+		// (mat_e, used to build each scenario's RHS) is bound to A_op, which is
+		// reused for every scenario's solve on this mesh.
+		a->FormSystemMatrix(ess_tdof_list, A_op);
+	}
 
-   void Run() override
-   {
-       if (config.AnalysisType == AnalysisType::CouplingMatrix) {
-           // For coupling matrix, we solve one scenario per terminal with a unit drive
-           for (const auto& [term_name, term] : config.Terminals) {
-               *A = 0.0; // Reset solution for new scenario
-               const std::string& group_name = term.EntityGroupName;
-               const EntityGroup& group = config.EntityGroups.at(group_name);
-               auto marker = MarkerFromAttrs(group.AttributeIds);
-               mfem::ConstantCoefficient c(1.0); // Unit drive
-               A->ProjectBdrCoefficient(c, marker);
-               SolveSystem();
-               SaveScenario("CouplingMatrix_" + term_name);
-           }
-       }
-       else {
-           for (const auto& [sc_name, sc] : config.Scenarios) {
-               ImprintScenario(sc);
-               SolveSystem();
-               SaveScenario(sc_name);
-           }
-       }
-   }
+	// Build the domain stiffness integrator matching the active geometry:
+	// axisymmetric curl-curl (curl (nu curl A) with the 2*pi*r measure / A * nu/r^2 term) or
+	// planar diffusion (nu * grad A * grad nu). A fresh instance is returned each call so the
+	// solve (owned by 'a') and AMR error estimator can own separate copies.
+	mfem::BilinearFormIntegrator* MakeStiffnessIntegrator() const {
+		if (geometry == GeometryType::Axisymmetric)
+		{
+			return new AxisymmetricCurlCurlIntegrator(*nu_coeff);
+		}
+		else
+		{
+			return new mfem::DiffusionIntegrator(*nu_coeff);
+		}
+	}
 
-   void SolveSystem() {
-       // Form and solve
-       mfem::OperatorPtr Aop;
-       mfem::Vector X, B;
+	// Estimate per-element error on the CURRENT mesh, folding every scenario /
+	// coupling column into a single indicator via the element-wise maximum
+	//     eta_k = max over solves s of eta_k(s),
+	// so one shared mesh is refined for all scenarios (spec: identical
+	// $Nodes/$Elements across every <scenario>.results.msh).
+	//
+	// Uses the serial recovery-based ZienkiewiczZhuEstimator (the L2 variant is
+	// MPI-only). A dedicated integrator instance (separate from a's) and an H1
+	// vector flux space are constructed here per call; SetFluxAveraging(1) keeps
+	// the recovered flux from smoothing across material-attribute interfaces so
+	// per-region reluctivity discontinuities are respected. SetWithCoeff(true)
+	// makes the flux nu*grad(A) (planar) / the curl-curl flux (axisym),
+	// consistent with the integrator's energy norm.
+	//
+	// @param combined  Output: per-element max error indicator (sized to NE).
+	// @return Global error sqrt(sum_k combined_k^2).
+	double EstimateCombinedError(mfem::Vector& combined) {
+		const int ne = mesh.GetNE();
+		combined.SetSize(ne);
+		combined = 0.0;
 
-       a->FormLinearSystem(ess_tdof_list, *A, *b, Aop, X, B);
+		const int sdim = mesh.SpaceDimension();
+		std::unique_ptr<mfem::BilinearFormIntegrator> flux_integ(MakeStiffnessIntegrator());
+		mfem::FiniteElementSpace flux_fes(&mesh, fec.get(), sdim);
+		mfem::ZienkiewiczZhuEstimator estimator(*flux_integ, *A, flux_fes);
+		estimator.SetWithCoeff(true);     // flux = nu * grad(A)
+		estimator.SetFluxAveraging(1);    // do not average across attribute interfaces
 
-       if (B.Norml2() < 1e-12 && X.Norml2() < 1e-12)
-       {
-           mfem::out << "WARNING: Linear system RHS is ~zero. "
-               << "Check that 'sources' in JSON match mesh attributes.\n";
-       }
+		auto fold_current_solution = [&]() {
+			estimator.Reset(); // force recompute: same mesh, new solution in *A
+			const mfem::Vector& errs = estimator.GetLocalErrors();
+			for (int k = 0; k < ne; ++k) {
+				if (errs(k) > combined(k)) { combined(k) = errs(k); }
+			}
+			};
 
-       auto* sp = dynamic_cast<mfem::SparseMatrix*>(Aop.Ptr());
-       MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
+		// Same scenario set as the real solves (authored scenarios for Field, or
+		// the synthetic per-terminal unit drives for CouplingMatrix), so the AMR
+		// indicator reflects exactly what will be exported.
+		for (const auto& [sc_name, sc] : BuildSolveScenarios()) {
+			ImprintScenario(sc);
+			SolveSystem();
+			fold_current_solution();
+		}
 
-       mfem::GSSmoother M(*sp);
-       mfem::PCG(*sp, M, B, X,
-           config.SolverPrintLevel,
-           config.SolverMaxIter,
-           config.SolverTolerance,
-           0.0);
+		double sum_sq = 0.0;
+		for (int k = 0; k < ne; ++k) { sum_sq += combined(k) * combined(k); }
+		return std::sqrt(sum_sq);
+	}
 
-       a->RecoverFEMSolution(X, *b, *A);
+	// Peak flux density |B| over the current solution *A, sampled at element
+	// nodes. AMR convergence diagnostic: the peak near a conductor corner or
+	// high-permeability edge should settle as refinement resolves it.
+	//
+	// Planar: B = (dA/dy, -dA/dx), so |B| == |grad(A)| exactly.
+	// Axisymmetric: B_r=-dA/dz, B_z=A/r+dA/dr, so the A/r term matters; reuse
+	// MagneticFieldCoefficient (same B reconstruction as the exporters, incl.
+	// the r->0 limit). Reflects whichever solution currently lives in *A.
+	double ComputePeakFieldMagnitude() const {
+		if (!A) { return 0.0; }
 
-       mfem::out << "\n=== A Statistics ===\n";
-       mfem::out << "  A min:     " << A->Min() << "\n";
-       mfem::out << "  A max:     " << A->Max() << "\n";
-       mfem::out << "  A L2 norm: " << A->Norml2() << "\n";
-   }
+		MagneticFieldCoefficient B_axi(A.get());
+		const bool axi = (geometry == GeometryType::Axisymmetric);
 
-   void SaveScenario(const std::string& scenario_name) override
-   {
-	   // Placeholder: implement if needed
-	   mfem::out << "SaveScenario() not implemented yet.\n";
-   }
+		double peak = 0.0;
+		mfem::Vector B;
+		for (int e = 0; e < fespace->GetNE(); ++e) {
+			const mfem::FiniteElement* fe = fespace->GetFE(e);
+			mfem::ElementTransformation* T = fespace->GetElementTransformation(e);
+			const mfem::IntegrationRule& nodes = fe->GetNodes();
+			for (int i = 0; i < nodes.GetNPoints(); ++i) {
+				const mfem::IntegrationPoint& ip = nodes.IntPoint(i);
+				T->SetIntPoint(&ip);
+				if (axi) { B_axi.Eval(B, *T, ip); }  // true |B| incl. A/r term
+				else { A->GetGradient(*T, B); }   // |B| == |grad(A)| (planar)
+				const double mag = B.Norml2();
+				if (mag > peak) { peak = mag; }
+			}
+		}
+		return peak;
+	}
 
-   void SaveAnalysis() override
-   {
-	   // Placeholder: implement if needed
-	   mfem::out << "SaveAnalysis() not implemented yet.\n";
-   }
+	// AMR per-iteration diagnostics from the most recent RunAdaptive(). Empty when
+	// AMR is disabled. Consumed by the regression tests and useful for logging.
+	const std::vector<AmrIterationInfo>& GetAmrHistory() const { return amr_history; }
 
-   void WriteParaviewResultsFile(const std::string& scenario_name)
-   {
-      mfem::ParaViewDataCollection pv("results_magnetostatic_" + scenario_name, &mesh);
-      pv.SetLevelsOfDetail(1);
-      pv.RegisterField("A", A.get());
+	void ImprintScenario(const Scenario& sc) {
+		*A = 0.0; // Reset solution for new scenario
 
-      // Vector B field in (r,z) (axisym) or (x,y) (planar): vdim = 2 for 2D problems.
-      const int dim = mesh.Dimension();
-      MFEM_ASSERT(dim == 2, "Save() currently assumes a 2D mesh (axisymmetric r-z or planar x-y).");
+		// Re-apply non-zero essential (closure) BC values on this mesh's A.
+		// ess_tdof values are lifted into the RHS by FormLinearSystem at solve time,
+		// so they must be set AFTER the *A = 0.0 reset, every scenario.
+		for (const auto& bc : config.BoundaryConditions) {
+			if (bc.Value != 0.0) {
+				const EntityGroup& group = config.EntityGroups.at(bc.EntityGroupName);
+				auto marker = MarkerFromAttrs(group.AttributeIds);
+				mfem::ConstantCoefficient c(bc.Value);
+				A->ProjectBdrCoefficient(c, marker);
+			}
+		}
+		// Axis stays at A=0 (already zero from the reset; no projection needed).
 
-      const int h1_order = fec->GetOrder();
-      const int l2_order = std::max(0, h1_order - 1);
+		auto j_src = BuildCurrentDensity(sc);
+		j_coeff = std::make_unique<mfem::PWConstCoefficient>(j_src);
+		// RHS
+		b = std::make_unique<mfem::LinearForm>(fespace.get());
 
-      mfem::L2_FECollection fec_l2(l2_order, dim);
-      mfem::FiniteElementSpace fes_l2(&mesh, &fec_l2, /*vdim=*/2);
-      mfem::GridFunction B_gf(&fes_l2);
-      B_gf = 0.0;
+		if (geometry == GeometryType::Axisymmetric)
+		{
+			// Integrates J * v * r  (global 2π omitted consistently)
+			b->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
+		}
+		else
+		{
+			b->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
+		}
+		b->Assemble();
+	}
 
-      if (geometry == GeometryType::Axisymmetric)
-      {
-         // B_r = -∂A/∂z, B_z = ∂A/∂r + A/r
-         MagneticFieldCoefficient B_coeff(A.get());
-         B_gf.ProjectCoefficient(B_coeff);
-      }
-      else
-      {
-         // WARNING: MFEM's CurlGridFunctionCoefficient is not the usual "rotated gradient"
-         // for a scalar potential in 2D. If your planar case is A_z and B = curl(A_z k),
-         // then B = (∂A/∂y, -∂A/∂x). Implement that explicitly if needed.
-         //
-         // Placeholder: keep your original approach but you should verify it.
-         mfem::CurlGridFunctionCoefficient B_coeff(A.get());
-         B_gf.ProjectCoefficient(B_coeff);
-      }
+	void Run() override {
+		if (config.Amr.Enabled) {
+			RunAdaptive();
+		}
+		else {
+			RunFixed();
+		}
+	}
 
-      pv.RegisterField("B", &B_gf);
-      pv.SetCycle(0);
-      pv.SetTime(0.0);
-      pv.Save();
+	// Solve + save on the CURRENT mesh/operators. Both analysis types flow through
+	// ONE imprint -> solve -> save loop over BuildSolveScenarios() (authored
+	// scenarios for Field; synthetic per-terminal unit-current drives for
+	// CouplingMatrix). AMR calls this once more on the converged mesh so the
+	// exported fields match the exported mesh.
+	void RunFixed()
+	{
+		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
+			// CouplingMatrix synthesizes a unit-current scenario per terminal, so
+			// every terminal must be current-driven for the drive to be meaningful.
+			for (const auto& [term_name, term] : config.Terminals) {
+				MFEM_VERIFY(term.Excitation == Quantity::Current,
+					"CouplingMatrix terminal '" + term_name +
+					"' must be a Current terminal for the magnetostatic solver.");
+			}
+		}
 
-      // Stats
-      double Bmax = 0.0, Bsum = 0.0;
-      int n = 0;
-      for (int i = 0; i < B_gf.Size(); i += 2)
-      {
-         const double b0 = B_gf(i);
-         const double b1 = B_gf(i + 1);
-         const double mag = std::sqrt(b0*b0 + b1*b1);
-         Bmax = std::max(Bmax, mag);
-         Bsum += mag;
-         n++;
-      }
+		for (const auto& [sc_name, sc] : BuildSolveScenarios()) {
+			ImprintScenario(sc);
+			SolveSystem();
+			SaveScenario(sc_name);
+		}
+	}
 
-      const double Bavg = (n > 0) ? (Bsum / n) : 0.0;
+	// h-adaptive loop: estimate combined (max-over-scenarios) error on the current
+	// mesh, stop on iteration / DOF / error-tolerance caps, otherwise bulk-mark
+	// (Dorfler) and refine conformingly, rebuild operators, and repeat. A final
+	// RunFixed() on the converged mesh produces the saved fields / C matrix so the
+	// exported results correspond exactly to the exported (refined) mesh.
+	void RunAdaptive() {
+		const AmrSettings& amr = config.Amr;
+		amr_history.clear();
 
-      mfem::out << "\n=== B-field Statistics ===\n";
-      mfem::out << "  B_max: " << Bmax << " T (" << (Bmax * 1e3) << " mT)\n";
-      mfem::out << "  B_avg: " << Bavg << " T (" << (Bavg * 1e3) << " mT)\n";
-   }
+		const int max_it = std::max(1, amr.MaxIterations);
+		for (int it = 0; it < max_it; ++it) {
+			const long cdofs = fespace->GetTrueVSize();
 
-   void WriteGmshResultsFile(const std::string& scenario_name)
-   {
-	   // Placeholder: implement if needed
-	   mfem::out << "WriteGmshResultsFile() not implemented yet.\n";
-   }
+			mfem::Vector errors;
+			const double global_err = EstimateCombinedError(errors);
+			const double peak_absB = ComputePeakFieldMagnitude();
+
+			amr_history.push_back({ cdofs, global_err, peak_absB });
+
+			std::cout << "AMR iteration " << it
+				<< ": elements=" << mesh.GetNE()
+				<< ", true_dofs=" << cdofs
+				<< ", global_error=" << std::scientific << std::setprecision(6) << global_err
+				<< ", peak|B|=" << peak_absB << std::endl;
+
+			// Stopping criteria (any one stops): error tolerance, DOF budget, or
+			// this being the last permitted iteration.
+			if (amr.ErrorTolerance > 0.0 && global_err < amr.ErrorTolerance) {
+				std::cout << "AMR: global error below tolerance. Stop." << std::endl;
+				break;
+			}
+			if (amr.MaxDofs > 0 && cdofs > amr.MaxDofs) {
+				std::cout << "AMR: reached the maximum number of DOFs. Stop." << std::endl;
+				break;
+			}
+			if (it + 1 >= max_it) {
+				std::cout << "AMR: reached the maximum number of iterations. Stop." << std::endl;
+				break;
+			}
+
+			// Mark and refine conformingly (throws if the mesh cannot refine
+			// without hanging nodes), then rebuild the FE space / operators.
+			mfem::Array<int> marked;
+			amr::MarkElementsDorfler(errors, amr.ErrorFraction, marked);
+			if (marked.Size() == 0) {
+				std::cout << "AMR: no elements marked for refinement. Stop." << std::endl;
+				break;
+			}
+			amr::RefineConforming(mesh, marked);
+			BuildOperators();
+		}
+
+		// Authoritative final solve on the final mesh: produces the saved fields
+		// (Field) or the C matrix (CouplingMatrix) on the exported mesh.
+		RunFixed();
+	}
+
+	void SolveSystem() {
+		// Form and solve
+		mfem::OperatorPtr Aop;
+		mfem::Vector X, B;
+
+		a->FormLinearSystem(ess_tdof_list, *A, *b, Aop, X, B);
+
+		if (B.Norml2() < 1e-12 && X.Norml2() < 1e-12)
+		{
+			mfem::out << "WARNING: Linear system RHS is ~zero. "
+				<< "Check that 'sources' in JSON match mesh attributes.\n";
+		}
+
+		auto* sp = dynamic_cast<mfem::SparseMatrix*>(Aop.Ptr());
+		MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
+
+		mfem::GSSmoother M(*sp);
+		mfem::PCG(*sp, M, B, X,
+			config.SolverPrintLevel,
+			config.SolverMaxIter,
+			config.SolverTolerance,
+			0.0);
+
+		a->RecoverFEMSolution(X, *b, *A);
+
+		mfem::out << "\n=== A Statistics ===\n";
+		mfem::out << "  A min:     " << A->Min() << "\n";
+		mfem::out << "  A max:     " << A->Max() << "\n";
+		mfem::out << "  A L2 norm: " << A->Norml2() << "\n";
+	}
+
+	// Post-solve field recovery: the vector potential A and the flux density B.
+	// B = curl(A): the axisymmetric form (B_r = -dA/dz, B_z = dA/dr + A/r) needs
+	// MagneticFieldCoefficient; the planar form is the standard curl of A_z.
+	// Serialization is handled by the base class.
+	FieldExportSet CollectExportFields() const override
+	{
+		FieldExportSet fields;
+		fields.AddPrimaryScalar("A", *A);
+
+		if (geometry == GeometryType::Axisymmetric) {
+			fields.AddVector("B", std::make_unique<MagneticFieldCoefficient>(A.get()));
+		}
+		else {
+			fields.AddVector("B", std::make_unique<mfem::CurlGridFunctionCoefficient>(A.get()));
+		}
+		return fields;
+	}
+
+	void SaveAnalysis() override
+	{
+		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
+			WriteCouplingMatrix();
+		}
+	}
+
+	void WriteCouplingMatrix() {
+		// Placeholder: once the inductance matrix is assembled, write it via the
+		// shared helper, e.g.:
+		//   SaveCouplingMatrix(L, "Inductance Matrix [H]", "inductance_matrix.csv");
+		mfem::out << "WriteCouplingMatrix() not implemented yet.\n";
+	}
 
 private:
-   // Geometric fallback: find boundary attributes whose boundary elements lie on r=0 and mark them essential.
-   // This is intentionally conservative. Best practice is to tag the axis in your mesh and handle it in InputParser.
-   void MarkAxisBoundaryAttributesGeometric()
-   {
-      const double tol = Constants::AXIS_TOLERANCE;
-      if (!mesh.bdr_attributes.Size()) { return; }
 
-      mfem::Array<int> axis_attr(mesh.bdr_attributes.Max());
-      axis_attr = 0;
+	mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
+		mfem::Vector j_src(mesh.attributes.Max());
+		j_src = 0.0;
 
-      for (int be = 0; be < mesh.GetNBE(); be++)
-      {
-         mfem::Element *bEl = mesh.GetBdrElement(be);
-         const int attr = bEl->GetAttribute();
-         mfem::Array<int> v;
-         bEl->GetVertices(v);
-
-         bool on_axis = true;
-         for (int i = 0; i < v.Size(); i++)
-         {
-            const double *vx = mesh.GetVertex(v[i]);
-            if (std::abs(vx[0]) > tol) { on_axis = false; break; }
-         }
-
-         if (on_axis)
-         {
-            axis_attr[attr - 1] = 1; // attributes are 1-based
-         }
-      }
-
-      // Merge axis boundary attributes into ess_bdr
-      for (int i = 0; i < axis_attr.Size(); i++)
-      {
-         if (axis_attr[i]) { ess_bdr[i] = 1; }
-      }
-   }
-
-   void ProjectAxisZero()
-   {
-      if (!mesh.bdr_attributes.Size()) { return; }
-
-      // Build a marker from ess_bdr that contains ONLY axis attributes (geometric fallback marks them)
-      // Here we just project 0 on all essential boundaries again (cheap & safe).
-      mfem::ConstantCoefficient zero(0.0);
-      A->ProjectBdrCoefficient(zero, ess_bdr);
-   }
-
-   double CalculateRegionArea(const std::vector<int>& attribute_ids) const {
-	   mfem::Array<int> marker = MarkerFromAttrs(attribute_ids);
-       mfem::LinearForm area_form(fespace.get());
-       mfem::ConstantCoefficient one(1.0);
-
-       area_form.AddDomainIntegrator(new mfem::DomainLFIntegrator(one), marker);
-       area_form.Assemble();
-
-       double region_area = area_form.Sum();
-       return region_area;
-   }
-
-    mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
-        mfem::Vector j_src(mesh.attributes.Max());
-        j_src = 0.0;
-
-        for (const auto& [term_name, term] : config.Terminals) {
-            if (term.Excitation == Quantity::Current) { 
+		for (const auto& [term_name, term] : config.Terminals) {
+			if (term.Excitation == Quantity::Current) {
 				double I = 0.0;
-                for (const auto& exc : sc.Excitations) {
-                    if (exc.TerminalName == term_name) {
-                        I = exc.Value;
-                    }
-                }
+				for (const auto& exc : sc.Excitations) {
+					if (exc.TerminalName == term_name) {
+						I = exc.Value;
+					}
+				}
 
-                if (I == 0.0) continue;
+				if (I == 0.0) continue;
 				const std::string& group_name = term.EntityGroupName;
 				const EntityGroup& group = config.EntityGroups.at(group_name);
 				const double A = CalculateRegionArea(group.AttributeIds);
-                MFEM_VERIFY(A > 0.0, "Current terminal '" + term_name + "' has zero cross-section.");
+				MFEM_VERIFY(A > 0.0, "Current terminal '" + term_name + "' has zero cross-section.");
 				const double J = I / A; // Current density = current / area
 
 				for (int attr : group.AttributeIds) {
@@ -369,8 +427,8 @@ private:
 						j_src[attr - 1] = J;
 					}
 				}
-            }
-        }
-        return j_src;
-    }
+			}
+		}
+		return j_src;
+	}
 };

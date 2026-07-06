@@ -261,6 +261,23 @@ inline View MakeVectorElementNodeView(const std::string& name,
     return v;
 }
 
+/// Convenience: ElementNodeData scalar view sampling a scalar GridFunction.
+/// Used for derived scalar coefficients projected onto the export mesh.
+inline View MakeScalarElementNodeView(const std::string& name,
+                                      mfem::GridFunction& scalar_gf) {
+    View v;
+    v.name = name;
+    v.kind = View::Kind::ElementNodeData;
+    v.num_components = 1;
+    v.elem_node_eval = [&scalar_gf](int elem_id,
+                                    const mfem::IntegrationPoint& ip,
+                                    mfem::ElementTransformation& T,
+                                    double* out) {
+        out[0] = scalar_gf.GetValue(T, ip);
+    };
+    return v;
+}
+
 /// Convenience: ElementNodeData scalar view containing |vec_gf|.
 inline View MakeMagnitudeElementNodeView(const std::string& name,
                                          mfem::GridFunction& vec_gf) {

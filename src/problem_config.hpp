@@ -20,6 +20,8 @@ enum class Quantity { Voltage, Current };
 
 enum class EntityDim { Boundary, Domain };
 
+enum class ConductorType { Massive, Stranded };
+
 struct EntityGroup {
 	EntityDim Dim;              // boundary or domain
 	std::vector<int> AttributeIds;   // mesh attribute ids (boundary or domain, depending on context)
@@ -35,6 +37,7 @@ struct Region {
 //   Excitation == Current -> AttributeIds are DOMAIN   attrs (RHS source)
 struct Terminal {
     Quantity Excitation = Quantity::Voltage;
+    ConductorType Conductor = ConductorType::Massive;
 	std::string EntityGroupName;   // mesh boundary (essential BC) or domain (RHS source) group name (validated)
 };
 
