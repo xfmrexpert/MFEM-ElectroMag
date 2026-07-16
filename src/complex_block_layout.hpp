@@ -6,10 +6,10 @@
 #include "mfem.hpp"
 
 // -----------------------------------------------------------------------------
-// Helpers for the packed real vector used to solve a complex, port-coupled
-// block system. ComplexOperator stores the real part first, then the imaginary
-// part, so a system with N_DOFs field unknowns and N_Ports port unknowns is
-// solved as ONE real vector laid out:
+// Authoritative packed-vector convention for a complex primary field with
+// auxiliary port unknowns. MFEM ComplexOperator stores all real unknowns first
+// and all imaginary unknowns second. Within each half, the primary/mesh block
+// precedes the auxiliary/port block, so the ONE real solver vector is laid out:
 //
 //     [ Re_Mesh (N_DOFs) | Re_Port (N_Ports) | Im_Mesh (N_DOFs) | Im_Port (N_Ports) ]
 //       \------------- half size = N_DOFs + N_Ports -------------/

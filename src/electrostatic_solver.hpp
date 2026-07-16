@@ -63,16 +63,15 @@ public:
 		// Axisymmetric or Planar
 		geometry = config.GeometryType;
 
-		// FE collection. Depends only on (order, dim), NOT on the mesh, so it is
-		// refinement-invariant and built once here; BuildOperators() reuses it.
+		// FE collection
 		fec = std::make_unique<mfem::H1_FECollection>(order, dim);
 
 		// Material Properties (Permittivity). epsilon_coeff is a PWConstCoefficient
 		// keyed by mesh DOMAIN attribute. AMR refinement subdivides elements but
 		// preserves their attributes, so this mapping is refinement-invariant.
-				// Material Properties (Permittivity), keyed by mesh DOMAIN attribute.
-				epsilon_coeff = MaterialCoefficient(0.0, [](const Material& m) {
-					return m.RelPermittivity * Constants::EPSILON_0; });
+	
+		epsilon_coeff = MaterialCoefficient(0.0, [](const Material& m) {
+			return m.RelPermittivity * Constants::EPSILON_0; });
 
 		// Closures + voltage terminals are all essential (Dirichlet).
 		auto bcs = BuildClosureBcs();

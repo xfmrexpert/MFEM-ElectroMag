@@ -21,10 +21,10 @@ class MagnetostaticSolver : public PhysicsSolver
 {
 private:
 	// Resources (order of declaration = order of destruction)
-	std::unique_ptr<mfem::GridFunction>       A;        // A_phi (axisym) or A_z (planar scalar)
+	std::unique_ptr<mfem::GridFunction> A; // A_phi (axisym) or A_z (planar scalar)
 
-	std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;  // nu=1/mu (reluctivity)
-	std::unique_ptr<mfem::PWConstCoefficient> j_coeff;   // J_phi (axisym) or J (planar scalar src)
+	std::unique_ptr<mfem::PWConstCoefficient> nu_coeff; // nu=1/mu (reluctivity)
+	std::unique_ptr<mfem::PWConstCoefficient> j_coeff; // J_phi (axisym) or J (planar scalar src)
 
 	std::unique_ptr<mfem::LinearForm> b;
 	std::unique_ptr<mfem::BilinearForm> a;
@@ -35,6 +35,8 @@ private:
 	// scenarios / coupling columns. AMR refinement rebuilds it via
 	// BuildOperators().
 	mfem::OperatorPtr A_op;
+
+	std::unique_ptr<mfem::DenseMatrix> L; // Inductance matrix (coupling matrix) for the current mesh
 
 public:
 	// One AMR iteration's diagnostics, recorded during RunAdaptive(). Exposed for
@@ -62,7 +64,7 @@ public:
 		// Axisymmetric or Planar
 		geometry = config.GeometryType;
 
-		// FE spaces
+		// FE collection
 		fec = std::make_unique<mfem::H1_FECollection>(order, dim);
 
 		// Material Properties (Reluctivity nu = 1/mu), keyed by mesh DOMAIN attribute.
@@ -264,12 +266,14 @@ public:
 	void RunFixed()
 	{
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
+			L = std::make_unique<mfem::DenseMatrix>(config.Terminals.size());
 			// CouplingMatrix synthesizes a unit-current scenario per terminal, so
 			// every terminal must be current-driven for the drive to be meaningful.
 			for (const auto& [term_name, term] : config.Terminals) {
 				MFEM_VERIFY(term.Excitation == Quantity::Current,
 					"CouplingMatrix terminal '" + term_name +
 					"' must be a Current terminal for the magnetostatic solver.");
+
 			}
 		}
 
@@ -277,6 +281,20 @@ public:
 			ImprintScenario(sc);
 			SolveSystem();
 			SaveScenario(sc_name);
+			if (config.AnalysisType == AnalysisType::CouplingMatrix) {
+				// Each scenario is a unit-current drive on one terminal, so the
+				// solution's flux linkage / inductance is the corresponding column
+				// of the coupling matrix.
+				const int col = std::distance(config.Terminals.begin(),
+					config.Terminals.find(sc.Excitations[0].TerminalName));
+				for (int row = 0; row < L->Height(); ++row) {
+					const std::string& row_term = std::next(config.Terminals.begin(), row)->first;
+					(*L)(row, col) = ComputeFluxLinkage(row_term, sc);
+				}
+			}
+		}
+		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
+			WriteCouplingMatrix();
 		}
 	}
 
@@ -394,13 +412,27 @@ public:
 	}
 
 	void WriteCouplingMatrix() {
-		// Placeholder: once the inductance matrix is assembled, write it via the
-		// shared helper, e.g.:
-		//   SaveCouplingMatrix(L, "Inductance Matrix [H]", "inductance_matrix.csv");
-		mfem::out << "WriteCouplingMatrix() not implemented yet.\n";
+		if (!L) {
+			std::cerr << "WriteCouplingMatrix: coupling matrix not computed.\n";
+			return;
+		}
+
+		SaveCouplingMatrix(*L, "Inductance Matrix [H]", "inductance_matrix.csv");
 	}
 
 private:
+
+	double ComputeFluxLinkage(const std::string& terminal_name, const Scenario& sc) const
+	{
+		const mfem::Vector unit_source = BuildCurrentDensity(sc);
+
+		const double geometry_scale =
+			geometry == GeometryType::Axisymmetric
+			? Constants::TWO_PI
+			: 1.0;
+
+		return geometry_scale * (unit_source * *A);
+	}
 
 	mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
 		mfem::Vector j_src(mesh.attributes.Max());
@@ -430,5 +462,15 @@ private:
 			}
 		}
 		return j_src;
+	}
+
+	void AssembleCurrentLoad(const Scenario& sc)
+	{
+
+	}
+
+	void AssembleCurrentLoad(const std::string& terminal_name)
+	{
+		
 	}
 };

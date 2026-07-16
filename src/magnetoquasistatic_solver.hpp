@@ -15,7 +15,7 @@
 #include "constants.hpp"
 #include "boundary_validation.hpp"
 #include "problem_config.hpp"
-#include "port_coupled_system.hpp"
+#include "mqs_massive_port_operator.hpp"
 #include "complex_block_layout.hpp"
 #include "axisymmetric_conductance_coefficient.hpp"
 #include "gmsh_results_writer.hpp"
@@ -24,24 +24,20 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     double frequency = 60.0;
     mfem::real_t omega = Constants::TWO_PI * frequency;
     
-	// Complex System objects. S_AA owns the real/imag field matrices that the
-	// port-coupled block system references, so it is declared before 'system'
-	// and outlives it (members destroy in reverse declaration order).
+    // Complex system objects. S_AA owns the real/imag field matrices referenced
+    // by port_operator, so it is declared first and outlives that operator.
 	std::unique_ptr<mfem::SesquilinearForm> S_AA;
 	std::unique_ptr<mfem::ComplexGridFunction> A;
-	std::unique_ptr<PortCoupledComplexSystem> system;
+    std::unique_ptr<MqsMassivePortOperator> port_operator;
 	std::unique_ptr<mfem::Vector> x_combined;
 	std::unique_ptr<mfem::Vector> b_combined;
-
-    int N_DOFs;
-    int N_Ports;
 
     // Coefficients
     std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;
     std::unique_ptr<mfem::PWConstCoefficient> omega_sigma_coeff;
     std::unique_ptr<mfem::PWConstCoefficient> j_coeff;     
     
-    mfem::Array<int> ess_mesh_tdofs;   // scalar-space essential mesh true DOFs, in [0, N_DOFs)
+    mfem::Array<int> ess_mesh_tdofs;   // scalar-space essential mesh true DOFs
     std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
 
     // Material property pickers for MaterialVector, named instead of inlined as
@@ -131,7 +127,7 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     // essential DOFs to whatever it finds there, so without this the projected
     // non-zero closures would be forced back to zero.
     void LiftEssentialInto(mfem::Vector& x_packed) const {
-        ComplexPortVectorView x(x_packed, N_DOFs, N_Ports);
+        auto x = port_operator->View(x_packed);
         for (int k = 0; k < ess_mesh_tdofs.Size(); ++k) {
             const int d = ess_mesh_tdofs[k];
             x.ReMesh(d) = A->real()(d);
@@ -140,10 +136,11 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     }
 
     // Copy the mesh (field) DOFs out of the solved monolithic vector back into
-    // the complex grid function, discarding the port unknowns.
+    // the complex grid function. Port recovery will be added with coupling
+    // matrix extraction; this phase preserves the existing field-only behavior.
     void UnpackComplexSolution(const mfem::Vector& x_packed) {
-        ConstComplexPortVectorView x(x_packed, N_DOFs, N_Ports);
-        for (int i = 0; i < N_DOFs; ++i) {
+        auto x = port_operator->View(x_packed);
+        for (int i = 0; i < port_operator->Layout().NDofs(); ++i) {
             A->real()(i) = x.ReMesh(i);
             A->imag()(i) = x.ImMesh(i);
         }
@@ -237,18 +234,18 @@ public:
         mfem::BilinearForm& K = S_AA->real();
         mfem::BilinearForm& M_sigma = S_AA->imag();
 
-        N_DOFs = fespace->GetTrueVSize();
+        const int n_dofs = fespace->GetTrueVSize();
 
         // N_Ports = massive terminals only
-        N_Ports = 0;
+        int n_ports = 0;
         for (const auto& [name, term] : config.Terminals)
-            if (term.Conductor == ConductorType::Massive) ++N_Ports;
+            if (term.Conductor == ConductorType::Massive) ++n_ports;
 
         // One load vector + self-admittance diagonal entry per massive port.
         std::vector<std::unique_ptr<mfem::Vector>> port_loads;
         std::vector<mfem::real_t> g_scaled_diag;
-        port_loads.reserve(N_Ports);
-        g_scaled_diag.reserve(N_Ports);
+        port_loads.reserve(n_ports);
+        g_scaled_diag.reserve(n_ports);
         for (const auto& [term_name, term] : config.Terminals) {
             if (term.Conductor != ConductorType::Massive) continue;   // skip stranded
             const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
@@ -262,13 +259,14 @@ public:
 
         // Hand the field matrices and port data to the block-system owner, which
         // assembles the complex saddle-point operator and owns all the wiring.
-        system = std::make_unique<PortCoupledComplexSystem>(N_DOFs, K.SpMat(), M_sigma.SpMat(), std::move(port_loads), g_scaled_diag);
+        port_operator = std::make_unique<MqsMassivePortOperator>(
+            n_dofs, K.SpMat(), M_sigma.SpMat(), std::move(port_loads), g_scaled_diag);
 
         fespace->GetEssentialTrueDofs(ess_bdr, ess_mesh_tdofs);   // indices in [0, N_DOFs)
 
         // Each scalar essential DOF constrains both its real and imaginary copy
         // in the packed [Re|Im] layout (half-size = N_DOFs + N_Ports).
-        ess_tdof_list = ComplexEssentialTDofs(ess_mesh_tdofs, N_DOFs + N_Ports);
+        ess_tdof_list = port_operator->MakeEssentialTDofs(ess_mesh_tdofs);
 
         // Grid Function (for solution recovery later)
         A = std::make_unique<mfem::ComplexGridFunction>(fespace.get());
@@ -294,10 +292,10 @@ public:
         // The monolithic real/imag solver vectors (size 2*(N_DOFs+N_Ports)) are
         // laid out [Re_Mesh, Re_Port, Im_Mesh, Im_Port]; assemble the RHS
         // directly into that layout through a typed view rather than raw indices.
-        b_combined = std::make_unique<mfem::Vector>(system->FullSize());
-        x_combined = std::make_unique<mfem::Vector>(system->FullSize());
+        b_combined = std::make_unique<mfem::Vector>(port_operator->Layout().FullSize());
+        x_combined = std::make_unique<mfem::Vector>(port_operator->Layout().FullSize());
         *b_combined = 0.0;
-        ComplexPortVectorView b(*b_combined, N_DOFs, N_Ports);
+        auto b = port_operator->View(*b_combined);
 
         // Source
         auto j_src = BuildCurrentDensity(sc);
@@ -313,7 +311,9 @@ public:
         }
         b_source.Assemble();
         const mfem::real_t* b_source_data = b_source.GetData();   // bypass LinearForm::operator()
-        for (int d = 0; d < N_DOFs; ++d) { b.ReMesh(d) += b_source_data[d]; }
+        for (int d = 0; d < port_operator->Layout().NDofs(); ++d) {
+            b.ReMesh(d) += b_source_data[d];
+        }
 
         // Drive the active port(s) via the imaginary port block Im_Port.
         int p = 0;
@@ -358,7 +358,7 @@ public:
 
         mfem::Operator* A_op_ptr;
 
-        mfem::ComplexOperator& complex_system = system->GetOperator();
+        mfem::ComplexOperator& complex_system = port_operator->Operator();
         complex_system.FormLinearSystem(ess_tdof_list, *x_combined, *b_combined, A_op_ptr, X_vec, B_vec);
         bool own_A = (A_op_ptr != &complex_system);
         A_op.Reset(A_op_ptr, own_A);
