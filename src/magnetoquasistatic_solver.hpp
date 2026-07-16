@@ -27,7 +27,9 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     // Complex system objects. S_AA owns the real/imag field matrices referenced
     // by port_operator, so it is declared first and outlives that operator.
 	std::unique_ptr<mfem::SesquilinearForm> S_AA;
-	std::unique_ptr<mfem::ComplexGridFunction> A;
+	std::unique_ptr<mfem::ComplexGridFunction> A; // Complex field solution
+	std::unique_ptr<mfem::Vector> Re_port_values; // Real part of port voltages
+	std::unique_ptr<mfem::Vector> Im_port_values; // Imag part of port voltages
     std::unique_ptr<MqsMassivePortOperator> port_operator;
 	std::unique_ptr<mfem::Vector> x_combined;
 	std::unique_ptr<mfem::Vector> b_combined;
@@ -39,6 +41,8 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     
     mfem::Array<int> ess_mesh_tdofs;   // scalar-space essential mesh true DOFs
     std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
+
+	std::unique_ptr<mfem::ComplexDenseMatrix> coupling_matrix; // Coupling matrix for port interactions
 
     // Material property pickers for MaterialVector, named instead of inlined as
     // lambdas so the Setup() coefficient construction reads at a glance.
@@ -135,16 +139,22 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
         }
     }
 
-    // Copy the mesh (field) DOFs out of the solved monolithic vector back into
-    // the complex grid function. Port recovery will be added with coupling
-    // matrix extraction; this phase preserves the existing field-only behavior.
-    void UnpackComplexSolution(const mfem::Vector& x_packed) {
-        auto x = port_operator->View(x_packed);
+	void RecoverSolvedUnknowns(mfem::Vector& x_packed) {
+		auto x = port_operator->View(x_packed);
+        // Copy field DOFs back into the complex grid function
         for (int i = 0; i < port_operator->Layout().NDofs(); ++i) {
             A->real()(i) = x.ReMesh(i);
             A->imag()(i) = x.ImMesh(i);
         }
-    }
+        // Copy solved port voltages back into real/imaginary port vectors
+		Re_port_values = std::make_unique<mfem::Vector>(port_operator->Layout().NPorts());
+		Im_port_values = std::make_unique<mfem::Vector>(port_operator->Layout().NPorts());
+		for (int p = 0; p < port_operator->Layout().NPorts(); ++p) {
+			// Recover the solved port values from the packed vector
+            (*Re_port_values)(p) = x.RePort(p);
+            (*Im_port_values)(p) = x.ImPort(p);
+		}
+	}
 
 public:
     // Constructor deals only with initialization, no manual nullptr assignment needed
@@ -329,25 +339,38 @@ public:
         LiftEssentialInto(*x_combined);
     }
 
+    void Run() override
+    {
+        if (config.Amr.Enabled) {
+            RunAdaptive();
+        }
+        else {
+            RunFixed();
+        }
+    }
+
+    void RunAdaptive() {
+        MFEM_VERIFY(!config.Amr.Enabled,
+            "AMR is not yet implemented for the MQS solver.");
+    }
+
     // Solve + save on the CURRENT mesh/operators. Both analysis types flow through
     // ONE imprint -> solve -> save loop over BuildSolveScenarios() (authored
     // scenarios for Field; synthetic per-terminal unit-current drives for
     // CouplingMatrix). MQS has no AMR path, so this is the whole run.
-    void Run() override {
-        if (config.AnalysisType == AnalysisType::CouplingMatrix) {
-            // CouplingMatrix synthesizes a unit-current scenario per terminal, so
-            // every terminal must be current-driven for the drive to be meaningful.
-            for (const auto& [term_name, term] : config.Terminals) {
-                MFEM_VERIFY(term.Excitation == Quantity::Current,
-                    "CouplingMatrix terminal '" + term_name +
-                    "' must be a Current terminal for the magnetoquasistatic solver.");
-            }
-        }
+    void RunFixed() {
+        PrepareAnalysis();
 
-        for (const auto& [sc_name, sc] : BuildSolveScenarios()) {
-            ImprintScenario(sc);
+        for (const auto& [name, scenario] : BuildSolveScenarios()) {
+            ImprintScenario(scenario);
             SolveSystem();
-            SaveScenario(sc_name);
+
+            if (config.AnalysisType == AnalysisType::CouplingMatrix) {
+                GatherCouplingColumn(scenario);
+            }
+            else {
+                SaveScenario(name);
+            }
         }
     }
 
@@ -373,7 +396,7 @@ public:
 
 		// X_vec is laid out [Re_Mesh, Re_Port, Im_Mesh, Im_Port]; copy the mesh
 		// (field) DOFs back into the complex grid function, dropping the ports.
-		UnpackComplexSolution(X_vec);
+		RecoverSolvedUnknowns(X_vec);
 	}
 
 	// Post-solve field recovery for the complex solution: the real/imaginary
@@ -406,6 +429,38 @@ public:
 		fields.AddScalar("B_Magnitude",
 			std::make_unique<ComplexVectorMagnitudeCoefficient>(*b_re, *b_im));
 		return fields;
+	}
+
+	void GatherCouplingColumn(const Scenario& sc) {
+		// For each massive terminal, the solved port voltage is the column of the
+		// coupling matrix corresponding to that terminal's unit current drive.
+		int p = 0;
+		for (const auto& [term_name, term] : config.Terminals) {
+			if (term.Conductor != ConductorType::Massive) continue;   // keep p aligned
+			for (const auto& exc : sc.Excitations)
+				if (exc.TerminalName == term_name) {
+					// The solved port voltage is the column of the coupling matrix
+					// corresponding to this terminal's unit current drive.
+					double V_re = (*Re_port_values)(p);
+					double V_im = (*Im_port_values)(p);
+					// Get the terminal index for term_name and store the complex voltage in the coupling matrix
+                    
+					coupling_matrix->Set(p, p, std::complex<double>(V_re, V_im));
+				}
+			++p;
+		}
+	}
+
+	void PrepareAnalysis() {
+		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
+			// Initialize the coupling matrix storage
+			coupling_matrix = std::make_unique<mfem::ComplexDenseMatrix>();
+			for (const auto& [term_name, term] : config.Terminals) {
+				if (term.Conductor == ConductorType::Massive) {
+					coupling_matrix[term_name] = std::make_pair(0.0, 0.0);
+				}
+			}
+		}
 	}
 
 	void SaveAnalysis() override
