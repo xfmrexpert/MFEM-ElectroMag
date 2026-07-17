@@ -6,6 +6,8 @@
 #include <memory>
 #include <cmath>
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 
 #include "mfem.hpp"
 #include "physics_solver.hpp"
@@ -278,6 +280,7 @@ public:
 		}
 
 		for (const auto& [sc_name, sc] : BuildSolveScenarios()) {
+			auto operation = Reporter().Start("scenario '" + sc_name + "'");
 			ImprintScenario(sc);
 			SolveSystem();
 			SaveScenario(sc_name);
@@ -317,24 +320,26 @@ public:
 
 			amr_history.push_back({ cdofs, global_err, peak_absB });
 
-			std::cout << "AMR iteration " << it
+			std::ostringstream diagnostic;
+			diagnostic << "AMR iteration " << it
 				<< ": elements=" << mesh.GetNE()
 				<< ", true_dofs=" << cdofs
 				<< ", global_error=" << std::scientific << std::setprecision(6) << global_err
-				<< ", peak|B|=" << peak_absB << std::endl;
+				<< ", peak|B|=" << peak_absB;
+			Reporter().Diagnostic(diagnostic.str());
 
 			// Stopping criteria (any one stops): error tolerance, DOF budget, or
 			// this being the last permitted iteration.
 			if (amr.ErrorTolerance > 0.0 && global_err < amr.ErrorTolerance) {
-				std::cout << "AMR: global error below tolerance. Stop." << std::endl;
+				Reporter().Diagnostic("AMR: global error below tolerance. Stop.");
 				break;
 			}
 			if (amr.MaxDofs > 0 && cdofs > amr.MaxDofs) {
-				std::cout << "AMR: reached the maximum number of DOFs. Stop." << std::endl;
+				Reporter().Diagnostic("AMR: reached the maximum number of DOFs. Stop.");
 				break;
 			}
 			if (it + 1 >= max_it) {
-				std::cout << "AMR: reached the maximum number of iterations. Stop." << std::endl;
+				Reporter().Diagnostic("AMR: reached the maximum number of iterations. Stop.");
 				break;
 			}
 
@@ -343,7 +348,7 @@ public:
 			mfem::Array<int> marked;
 			amr::MarkElementsDorfler(errors, amr.ErrorFraction, marked);
 			if (marked.Size() == 0) {
-				std::cout << "AMR: no elements marked for refinement. Stop." << std::endl;
+				Reporter().Diagnostic("AMR: no elements marked for refinement. Stop.");
 				break;
 			}
 			amr::RefineConforming(mesh, marked);
@@ -356,6 +361,7 @@ public:
 	}
 
 	void SolveSystem() {
+		auto operation = Reporter().Start("linear system solve");
 		// Form and solve
 		mfem::OperatorPtr Aop;
 		mfem::Vector X, B;
@@ -373,17 +379,19 @@ public:
 
 		mfem::GSSmoother M(*sp);
 		mfem::PCG(*sp, M, B, X,
-			config.SolverPrintLevel,
+			Reporter().SolverPrintLevel(config.SolverPrintLevel),
 			config.SolverMaxIter,
 			config.SolverTolerance,
 			0.0);
 
 		a->RecoverFEMSolution(X, *b, *A);
 
-		mfem::out << "\n=== A Statistics ===\n";
-		mfem::out << "  A min:     " << A->Min() << "\n";
-		mfem::out << "  A max:     " << A->Max() << "\n";
-		mfem::out << "  A L2 norm: " << A->Norml2() << "\n";
+		std::ostringstream statistics;
+		statistics << "=== A Statistics ===\n"
+			<< "  A min:     " << A->Min() << "\n"
+			<< "  A max:     " << A->Max() << "\n"
+			<< "  A L2 norm: " << A->Norml2();
+		Reporter().Diagnostic(statistics.str());
 	}
 
 	// Post-solve field recovery: the vector potential A and the flux density B.
@@ -399,7 +407,7 @@ public:
 			fields.AddVector("B", std::make_unique<MagneticFieldCoefficient>(A.get()));
 		}
 		else {
-			fields.AddVector("B", std::make_unique<mfem::CurlGridFunctionCoefficient>(A.get()));
+			fields.AddVector("B", std::make_unique<PlanarMagneticFieldCoefficient>(A.get()));
 		}
 		return fields;
 	}

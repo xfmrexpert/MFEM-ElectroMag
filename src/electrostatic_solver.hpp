@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <unordered_map>
 #include <vector>
 #include "mfem.hpp"
@@ -275,6 +276,7 @@ public:
 
 		int col = 0;
 		for (const auto& [name, sc] : BuildSolveScenarios()) {
+			auto operation = Reporter().Start("scenario '" + name + "'");
 			ImprintScenario(sc);
 			SolveSystem();
 			if (coupling) { GatherChargeColumn(col++); }
@@ -301,24 +303,26 @@ public:
 
 			amr_history.push_back({ cdofs, global_err, peak_absE });
 
-			std::cout << "AMR iteration " << it
+			std::ostringstream diagnostic;
+			diagnostic << "AMR iteration " << it
 				<< ": elements=" << mesh.GetNE()
 				<< ", true_dofs=" << cdofs
 				<< ", global_error=" << std::scientific << std::setprecision(6) << global_err
-				<< ", peak|E|=" << peak_absE << std::endl;
+				<< ", peak|E|=" << peak_absE;
+			Reporter().Diagnostic(diagnostic.str());
 
 			// Stopping criteria (any one stops): error tolerance, DOF budget, or
 			// this being the last permitted iteration.
 			if (amr.ErrorTolerance > 0.0 && global_err < amr.ErrorTolerance) {
-				std::cout << "AMR: global error below tolerance. Stop." << std::endl;
+				Reporter().Diagnostic("AMR: global error below tolerance. Stop.");
 				break;
 			}
 			if (amr.MaxDofs > 0 && cdofs > amr.MaxDofs) {
-				std::cout << "AMR: reached the maximum number of DOFs. Stop." << std::endl;
+				Reporter().Diagnostic("AMR: reached the maximum number of DOFs. Stop.");
 				break;
 			}
 			if (it + 1 >= max_it) {
-				std::cout << "AMR: reached the maximum number of iterations. Stop." << std::endl;
+				Reporter().Diagnostic("AMR: reached the maximum number of iterations. Stop.");
 				break;
 			}
 
@@ -327,7 +331,7 @@ public:
 			mfem::Array<int> marked;
 			amr::MarkElementsDorfler(errors, amr.ErrorFraction, marked);
 			if (marked.Size() == 0) {
-				std::cout << "AMR: no elements marked for refinement. Stop." << std::endl;
+				Reporter().Diagnostic("AMR: no elements marked for refinement. Stop.");
 				break;
 			}
 			amr::RefineConforming(mesh, marked);
@@ -340,6 +344,7 @@ public:
 	}
 
 	void SolveSystem() {
+		auto operation = Reporter().Start("linear system solve");
 		// The system matrix and its essential-DOF elimination (mat_e) were built for
 		// the current mesh in BuildOperators(). FormLinearSystem here re-derives ONLY
 		// this scenario's eliminated RHS from the freshly imprinted x/b (b was zeroed
@@ -352,7 +357,7 @@ public:
 		auto* sp = dynamic_cast<mfem::SparseMatrix*>(A_op.Ptr());
 		MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
 		mfem::GSSmoother M(*sp);
-		mfem::PCG(*A_op, M, B, X, config.SolverPrintLevel,
+		mfem::PCG(*A_op, M, B, X, Reporter().SolverPrintLevel(config.SolverPrintLevel),
 			config.SolverMaxIter, config.SolverTolerance, 0.0);
 		a->RecoverFEMSolution(X, *b, *x);
 	}

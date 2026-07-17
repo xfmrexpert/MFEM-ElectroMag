@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include "../src/input_parser.hpp"
 #include "../src/electrostatic_solver.hpp"
 #include "../src/magnetostatic_solver.hpp"
@@ -12,7 +13,9 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 
 namespace fs = std::filesystem;
@@ -238,6 +241,129 @@ TEST_CASE("Solver factory logic works correctly", "[solvers]") {
 
 namespace {
 
+void CreatePlanarStripMesh(const std::string& filename,
+                           double length, double height,
+                           int nx, int ny) {
+    const int nvx = nx + 1;
+    const int nvy = ny + 1;
+    auto vertex = [nvx](int i, int j) { return j * nvx + i; };
+
+    std::ofstream mesh_file(filename);
+    mesh_file << "MFEM mesh v1.0\n\n";
+    mesh_file << "dimension\n2\n\n";
+    mesh_file << "elements\n" << 2 * nx * ny << "\n";
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const int v00 = vertex(i, j);
+            const int v10 = vertex(i + 1, j);
+            const int v11 = vertex(i + 1, j + 1);
+            const int v01 = vertex(i, j + 1);
+            mesh_file << "1 2 " << v00 << " " << v10 << " " << v11 << "\n";
+            mesh_file << "1 2 " << v00 << " " << v11 << " " << v01 << "\n";
+        }
+    }
+
+    mesh_file << "\nboundary\n" << 2 * ny + 2 * nx << "\n";
+    for (int j = 0; j < ny; ++j) {
+        mesh_file << "1 1 " << vertex(0, j) << " " << vertex(0, j + 1) << "\n";
+        mesh_file << "2 1 " << vertex(nx, j) << " " << vertex(nx, j + 1) << "\n";
+    }
+    for (int i = 0; i < nx; ++i) {
+        mesh_file << "3 1 " << vertex(i, 0) << " " << vertex(i + 1, 0) << "\n";
+        mesh_file << "3 1 " << vertex(i, ny) << " " << vertex(i + 1, ny) << "\n";
+    }
+
+    mesh_file << "\nvertices\n" << nvx * nvy << "\n2\n";
+    for (int j = 0; j < nvy; ++j) {
+        const double y = height * static_cast<double>(j) / ny;
+        for (int i = 0; i < nvx; ++i) {
+            const double x = length * static_cast<double>(i) / nx;
+            mesh_file << x << " " << y << "\n";
+        }
+    }
+}
+
+json MakePlanarStripConfig(const std::string& physics,
+                           const std::string& mesh_file,
+                           int order,
+                           const json& material_properties,
+                           double left_value,
+                           double right_value) {
+    return json{
+        {"simulation", {
+            {"physics_type", physics},
+            {"mesh", mesh_file},
+            {"order", order},
+            {"geometry_type", "planar"},
+            {"analysis_type", "field"},
+            {"solver_tolerance", 1e-12},
+            {"solver_max_iter", 4000},
+            {"solver_print_level", 0}
+        }},
+        {"entity_groups", json::array({
+            {{"name", "Domain"}, {"dim", 2}, {"attribute_ids", {1}}},
+            {{"name", "Left"},   {"dim", 1}, {"attribute_ids", {1}}},
+            {{"name", "Right"},  {"dim", 1}, {"attribute_ids", {2}}}
+        })},
+        {"regions", json::array({
+            {{"name", "Domain"}, {"entity_group", "Domain"}, {"material", 1}}
+        })},
+        {"materials", json::array({
+            {{"name", "Material"}, {"properties", material_properties}}
+        })},
+        {"boundaries", json::array({
+            {{"name", "Left"},  {"type", "Dirichlet"}, {"entity_group", "Left"},  {"value", left_value}},
+            {{"name", "Right"}, {"type", "Dirichlet"}, {"entity_group", "Right"}, {"value", right_value}}
+        })},
+        {"scenarios", json::array({
+            {{"name", "analytic"}, {"excitations", json::array()}}
+        })}
+    };
+}
+
+const FieldExport& FindField(const FieldExportSet& fields, const std::string& name) {
+    const auto& exported = fields.Fields();
+    const auto field = std::find_if(exported.begin(), exported.end(),
+        [&name](const FieldExport& candidate) { return candidate.name == name; });
+    REQUIRE(field != exported.end());
+    return *field;
+}
+
+mfem::IntegrationPoint TriangleCenter() {
+    mfem::IntegrationPoint point;
+    point.Set2(1.0 / 3.0, 1.0 / 3.0);
+    return point;
+}
+
+mfem::Vector PhysicalPoint(const mfem::GridFunction& field, int element,
+                           const mfem::IntegrationPoint& point) {
+    mfem::Vector physical(2);
+    field.FESpace()->GetElementTransformation(element)->Transform(point, physical);
+    return physical;
+}
+
+double SamplePrimaryScalar(const FieldExportSet& fields, const std::string& name,
+                           int element, const mfem::IntegrationPoint& point) {
+    const FieldExport& field = FindField(fields, name);
+    REQUIRE(field.kind == FieldExport::Kind::PrimaryScalar);
+    return field.primary->GetValue(element, point);
+}
+
+mfem::Vector SampleDerivedVector(const FieldExportSet& fields, const std::string& name,
+                                 int element, const mfem::IntegrationPoint& point) {
+    const FieldExport& field = FindField(fields, name);
+    REQUIRE(field.kind == FieldExport::Kind::DerivedVector);
+    const auto& exported = fields.Fields();
+    const auto primary = std::find_if(exported.begin(), exported.end(),
+        [](const FieldExport& candidate) { return candidate.primary != nullptr; });
+    REQUIRE(primary != exported.end());
+    mfem::ElementTransformation* transformation =
+        primary->primary->FESpace()->GetElementTransformation(element);
+    mfem::Vector value(field.vector->GetVDim());
+    field.vector->Eval(value, *transformation, point);
+    return value;
+}
+
 // Build a 2D axisymmetric "coaxial capacitor" triangle mesh spanning
 // r in [r_inner, r_outer], z in [0, height], and write it as an MFEM v1.0 mesh.
 // Boundary attributes are assigned by geometry (independent of MFEM's internal
@@ -369,6 +495,133 @@ std::string ExtractMshSection(const std::string& path, const std::string& tag) {
 }
 
 } // namespace
+
+TEST_CASE("Electrostatic solver reproduces a uniform field between plates",
+          "[solvers][analytic][electrostatic]") {
+    const std::string mesh_file = "test_analytic_electrostatic.mesh";
+    constexpr double length = 0.2;
+    constexpr double height = 0.05;
+    constexpr double voltage = 100.0;
+    constexpr int nx = 8;
+    constexpr int ny = 2;
+    CreatePlanarStripMesh(mesh_file, length, height, nx, ny);
+
+    json config = MakePlanarStripConfig(
+        "electrostatics", mesh_file, 1, {{"epsilon_r", 2.5}}, voltage, 0.0);
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    ElectrostaticSolver solver(mesh, config);
+    solver.Setup();
+    solver.Run();
+
+    FieldExportSet fields = solver.CollectExportFields();
+    const mfem::IntegrationPoint point = TriangleCenter();
+    const int element = 2 * (nx / 2);
+    const FieldExport& potential_field = FindField(fields, "V");
+    const mfem::Vector physical = PhysicalPoint(*potential_field.primary, element, point);
+    const double expected_potential = voltage * (1.0 - physical(0) / length);
+    const double expected_field = voltage / length;
+
+    const double potential = SamplePrimaryScalar(fields, "V", element, point);
+    const mfem::Vector electric_field = SampleDerivedVector(fields, "E", element, point);
+
+    REQUIRE(potential == Catch::Approx(expected_potential).epsilon(1e-7));
+    REQUIRE(electric_field(0) == Catch::Approx(expected_field).epsilon(1e-6));
+    REQUIRE(electric_field(1) == Catch::Approx(0.0).margin(1e-4));
+
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Magnetostatic solver reproduces the field of a uniform current slab",
+          "[solvers][analytic][magnetostatic]") {
+    const std::string mesh_file = "test_analytic_magnetostatic.mesh";
+    constexpr double length = 0.1;
+    constexpr double height = 0.02;
+    constexpr double current_density = 2.0e6;
+    constexpr int nx = 8;
+    constexpr int ny = 2;
+    CreatePlanarStripMesh(mesh_file, length, height, nx, ny);
+
+    json config = MakePlanarStripConfig(
+        "magnetostatics", mesh_file, 2, {{"mu_r", 1.0}}, 0.0, 0.0);
+    config["terminals"] = json::array({
+        {{"name", "Current"}, {"excitation", "current"},
+         {"conductor_type", "stranded"}, {"entity_group", "Domain"}}
+    });
+    config["scenarios"][0]["excitations"] = json::array({
+        {{"terminal", "Current"}, {"value", current_density * length * height}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetostaticSolver solver(mesh, config);
+    solver.Setup();
+    solver.Run();
+
+    FieldExportSet fields = solver.CollectExportFields();
+    const mfem::IntegrationPoint point = TriangleCenter();
+    const int element = 2 * (nx / 4);
+    const FieldExport& vector_potential_field = FindField(fields, "A");
+    const mfem::Vector physical =
+        PhysicalPoint(*vector_potential_field.primary, element, point);
+    const double x = physical(0);
+    const double expected_potential =
+        0.5 * Constants::MU_0 * current_density * x * (length - x);
+    const double expected_by =
+        Constants::MU_0 * current_density * (x - 0.5 * length);
+
+    const double vector_potential = SamplePrimaryScalar(fields, "A", element, point);
+    const mfem::Vector magnetic_field = SampleDerivedVector(fields, "B", element, point);
+
+    REQUIRE(vector_potential == Catch::Approx(expected_potential).epsilon(1e-8));
+    REQUIRE(magnetic_field(0) == Catch::Approx(0.0).margin(1e-7));
+    REQUIRE(magnetic_field(1) == Catch::Approx(expected_by).epsilon(1e-7));
+
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Magnetoquasistatic solver reproduces conducting-slab skin effect",
+          "[solvers][analytic][mqs]") {
+    const std::string mesh_file = "test_analytic_mqs.mesh";
+    constexpr double length = 0.04;
+    constexpr double height = 0.005;
+    constexpr double conductivity = 3.5e7;
+    constexpr double frequency = 60.0;
+    constexpr int nx = 48;
+    constexpr int ny = 1;
+    CreatePlanarStripMesh(mesh_file, length, height, nx, ny);
+
+    json config = MakePlanarStripConfig(
+        "magnetoquasistatics", mesh_file, 2,
+        {{"mu_r", 1.0}, {"sigma", conductivity}}, 1.0, 0.0);
+    config["simulation"]["frequency"] = frequency;
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver solver(mesh, config);
+    solver.Setup();
+    solver.Run();
+
+    FieldExportSet fields = solver.CollectExportFields();
+    const mfem::IntegrationPoint point = TriangleCenter();
+    const int element = 2 * (nx / 4);
+    const FieldExport& real_field = FindField(fields, "A_Real");
+    const mfem::Vector physical = PhysicalPoint(*real_field.primary, element, point);
+
+    const double omega = Constants::TWO_PI * frequency;
+    const std::complex<double> wave_number =
+        std::sqrt(std::complex<double>(0.0, omega * Constants::MU_0 * conductivity));
+    const std::complex<double> expected =
+        std::sinh(wave_number * (length - physical(0))) /
+        std::sinh(wave_number * length);
+
+    const double actual_real = SamplePrimaryScalar(fields, "A_Real", element, point);
+    const double actual_imag = SamplePrimaryScalar(fields, "A_Imag", element, point);
+
+    REQUIRE(actual_real == Catch::Approx(expected.real()).epsilon(5e-3));
+    REQUIRE(actual_imag == Catch::Approx(expected.imag()).epsilon(5e-3));
+    REQUIRE(std::hypot(actual_real, actual_imag) < 1.0);
+    REQUIRE(actual_imag < 0.0);
+
+    fs::remove(mesh_file);
+}
 
 TEST_CASE("AMR refines an axisymmetric coax and stays conforming", "[solvers][amr]") {
     const std::string mesh_file = "test_amr_coax.mesh";

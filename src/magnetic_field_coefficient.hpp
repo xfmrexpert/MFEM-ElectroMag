@@ -49,3 +49,25 @@ public:
       }
    }
 };
+
+class PlanarMagneticFieldCoefficient : public mfem::VectorCoefficient
+{
+private:
+   mfem::GridFunction* A;
+
+public:
+   explicit PlanarMagneticFieldCoefficient(mfem::GridFunction* a_gf)
+      : mfem::VectorCoefficient(2), A(a_gf) { }
+
+   void Eval(mfem::Vector& B, mfem::ElementTransformation& T,
+             const mfem::IntegrationPoint& ip) override
+   {
+      T.SetIntPoint(&ip);
+      mfem::Vector grad_A(2);
+      A->GetGradient(T, grad_A);
+
+      B.SetSize(2);
+      B(0) = grad_A(1);
+      B(1) = -grad_A(0);
+   }
+};

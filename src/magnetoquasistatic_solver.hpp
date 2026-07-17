@@ -42,7 +42,8 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     mfem::Array<int> ess_mesh_tdofs;   // scalar-space essential mesh true DOFs
     std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
 
-	std::unique_ptr<mfem::ComplexDenseMatrix> coupling_matrix; // Coupling matrix for port interactions
+	std::unique_ptr<mfem::DenseMatrix> coupling_matrix_re; // Coupling matrix for port interactions
+	std::unique_ptr<mfem::DenseMatrix> coupling_matrix_im; // Coupling matrix for port interactions
 
     // Material property pickers for MaterialVector, named instead of inlined as
     // lambdas so the Setup() coefficient construction reads at a glance.
@@ -362,6 +363,7 @@ public:
         PrepareAnalysis();
 
         for (const auto& [name, scenario] : BuildSolveScenarios()) {
+            auto operation = Reporter().Start("scenario '" + name + "'");
             ImprintScenario(scenario);
             SolveSystem();
 
@@ -375,6 +377,7 @@ public:
     }
 
     void SolveSystem() {
+        auto operation = Reporter().Start("linear system solve");
         // Solve
         mfem::OperatorHandle A_op;
         mfem::Vector B_vec, X_vec;
@@ -389,7 +392,7 @@ public:
         // Iterative Complex Solver
         mfem::GMRESSolver gmres;
         gmres.SetOperator(*A_op.Ptr());
-        gmres.SetPrintLevel(config.SolverPrintLevel);
+        gmres.SetPrintLevel(Reporter().SolverPrintLevel(config.SolverPrintLevel));
         gmres.SetRelTol(config.SolverTolerance);
         gmres.SetMaxIter(config.SolverMaxIter);
 		gmres.Mult(B_vec, X_vec);
@@ -421,9 +424,9 @@ public:
 		else {
 			// Planar B = Curl(A_z) = (dA/dy, -dA/dx)
 			b_re = &fields.AddVector("B_Real",
-				std::make_unique<mfem::CurlGridFunctionCoefficient>(&A->real()));
+                std::make_unique<PlanarMagneticFieldCoefficient>(&A->real()));
 			b_im = &fields.AddVector("B_Imag",
-				std::make_unique<mfem::CurlGridFunctionCoefficient>(&A->imag()));
+                std::make_unique<PlanarMagneticFieldCoefficient>(&A->imag()));
 		}
 
 		fields.AddScalar("B_Magnitude",
@@ -445,7 +448,8 @@ public:
 					double V_im = (*Im_port_values)(p);
 					// Get the terminal index for term_name and store the complex voltage in the coupling matrix
                     
-					coupling_matrix->Set(p, p, std::complex<double>(V_re, V_im));
+					(*coupling_matrix_re)(p, p) = V_re;
+					(*coupling_matrix_im)(p, p) = V_im;
 				}
 			++p;
 		}
@@ -454,16 +458,20 @@ public:
 	void PrepareAnalysis() {
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
 			// Initialize the coupling matrix storage
-			coupling_matrix = std::make_unique<mfem::ComplexDenseMatrix>();
+			int num_ports = config.Terminals.size();
+			coupling_matrix_re = std::make_unique<mfem::DenseMatrix>(num_ports, num_ports);
+			coupling_matrix_im = std::make_unique<mfem::DenseMatrix>(num_ports, num_ports);
+			*coupling_matrix_re = 0.0;
+			*coupling_matrix_im = 0.0;
 			for (const auto& [term_name, term] : config.Terminals) {
 				if (term.Conductor == ConductorType::Massive) {
-					coupling_matrix[term_name] = std::make_pair(0.0, 0.0);
+					//coupling_matrix[term_name] = std::make_pair(0.0, 0.0);
 				}
 			}
 		}
 	}
 
-	void SaveAnalysis() override
+    void SaveAnalysis() override
 	{
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
 			WriteCouplingMatrix();

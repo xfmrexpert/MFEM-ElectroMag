@@ -9,6 +9,7 @@
 #include "gmsh_results_writer.hpp"
 #include "field_export.hpp"
 #include "matrix_writer.hpp"
+#include "status_reporter.hpp"
 
 using json = nlohmann::json;
 
@@ -29,6 +30,10 @@ protected:
     GeometryType geometry = GeometryType::Planar;
     mfem::Array<int> ess_bdr;
     mfem::Array<int> ess_tdof_list;
+
+    StatusReporter& Reporter() const {
+        return StatusReporter::Global();
+    }
 
     mfem::Array<int> MarkerFromAttrs(const std::vector<int>& attrs) const {
         mfem::Array<int> m(mesh.bdr_attributes.Max());
@@ -215,7 +220,7 @@ private:
         }
 
         gmsh_results::WriteGmshResults(out_path.string(), export_mesh, fes_vec, views);
-        std::cout << "Wrote " << out_path.string() << std::endl;
+        Reporter().Diagnostic("Wrote " + out_path.string());
     }
 
     // True high-order MSH output (native high-order elements + per-view
@@ -225,8 +230,8 @@ private:
     void WriteGmshFieldsHighOrder(const std::string& scenario_name,
                                   const FieldExportSet& /*fields*/) const
     {
-        std::cout << "WriteGmshFields(HighOrder) not implemented yet for scenario: "
-                  << scenario_name << "; falling back to no output." << std::endl;
+        Reporter().Diagnostic("WriteGmshFields(HighOrder) not implemented yet for scenario: "
+                              + scenario_name + "; falling back to no output.");
     }
 
 public:
@@ -281,7 +286,7 @@ public:
         pv.SetTime(0.0);
         pv.Save();
 
-        std::cout << "Wrote ParaView collection " << collection_name << std::endl;
+        Reporter().Diagnostic("Wrote ParaView collection " + collection_name);
     }
 
     // Geometric fallback: find boundary attributes whose boundary elements lie on r=0 and mark them essential.
@@ -322,7 +327,11 @@ public:
     }
 
     double CalculateRegionArea(const std::vector<int>& attribute_ids) const {
-        mfem::Array<int> marker = MarkerFromAttrs(attribute_ids);
+        mfem::Array<int> marker(mesh.attributes.Max());
+        marker = 0;
+        for (int attr : attribute_ids) {
+            if (attr > 0 && attr <= marker.Size()) marker[attr - 1] = 1;
+        }
         mfem::LinearForm area_form(fespace.get());
         mfem::ConstantCoefficient one(1.0);
 

@@ -9,6 +9,7 @@
 #include "physics_solver.hpp"
 #include "solver_factory.hpp"
 #include "config_validator.hpp"
+#include "status_reporter.hpp"
 
 namespace {
 
@@ -19,6 +20,7 @@ void PrintUsage(const char* prog) {
         "  --results-file <path>      Override Gmsh MSH 2.2 results output path\n"
         "  --export-refine <N>        Refinement factor for export mesh (default = solve order)\n"
         "  --export-vector-space <L2|H1>  Reserved; L2 is currently the only supported choice\n"
+        "  --verbosity <0|1|2>        0=status/timing, 1=solver output, 2=diagnostics\n"
         "  -h, --help                 Show this help\n";
 }
 
@@ -39,6 +41,7 @@ int main(int argc, char *argv[]) {
         std::string cli_results_file;
         int  cli_export_refine = 0;        // 0 = unset
         std::string cli_vector_space;
+        int cli_verbosity = 0;
 
         for (int i = 1; i < argc; ++i) {
             std::string a = argv[i];
@@ -68,6 +71,9 @@ int main(int argc, char *argv[]) {
                     std::cerr << "Warning: --export-vector-space H1 is not yet "
                                  "implemented; using L2." << std::endl;
                 }
+            } else if (a == "--verbosity") {
+                cli_verbosity = std::stoi(need_value(a));
+                StatusReporter::VerbosityFromInt(cli_verbosity);
             } else if (!a.empty() && a[0] == '-') {
                 throw std::runtime_error("Unknown option: " + a);
             } else {
@@ -75,15 +81,22 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        StatusReporter& reporter = StatusReporter::Global();
+        reporter.SetVerbosity(StatusReporter::VerbosityFromInt(cli_verbosity));
+
         // 1. Shared Infrastructure
         std::error_code config_ec;
         auto config_abs = std::filesystem::weakly_canonical(config_file, config_ec);
-        std::cout << "Config file: "
-                  << (config_ec ? std::filesystem::absolute(config_file).string()
-                                : config_abs.string())
-                  << std::endl;
+        reporter.Diagnostic("Config file: "
+            + (config_ec ? std::filesystem::absolute(config_file).string()
+                         : config_abs.string()));
 
-        InputParser parser(config_file);
+        std::unique_ptr<InputParser> parser_ptr;
+        {
+            auto operation = reporter.Start("configuration loading");
+            parser_ptr = std::make_unique<InputParser>(config_file);
+        }
+        InputParser& parser = *parser_ptr;
 
         // Inject CLI overrides into the shared json so downstream parsing picks
         // them up (solvers re-run InputParser internally inside Setup()).
@@ -103,15 +116,17 @@ int main(int argc, char *argv[]) {
 
         // 2. Validate Configuration (basic validation before mesh loading)
         ConfigValidator validator;
-        validator.ValidateOrThrow(parser.config);
+        {
+            auto operation = reporter.Start("configuration validation");
+            validator.ValidateOrThrow(parser.config);
+        }
 
         // 3. Load Mesh
         std::error_code mesh_ec;
         auto mesh_abs = std::filesystem::weakly_canonical(config.MeshPath, mesh_ec);
-        std::cout << "Mesh file: "
-                  << (mesh_ec ? std::filesystem::absolute(config.MeshPath).string()
-                              : mesh_abs.string())
-                  << std::endl;
+        reporter.Diagnostic("Mesh file: "
+            + (mesh_ec ? std::filesystem::absolute(config.MeshPath).string()
+                       : mesh_abs.string()));
 
         // Load without auto-fix so we can diagnose bad meshes uniformly in
         // Debug and Release (MFEM_ASSERT is a no-op in Release, which would
@@ -126,50 +141,70 @@ int main(int argc, char *argv[]) {
         // would std::abort(). We catch it here to produce an actionable
         // diagnostic instead of crashing.
         std::unique_ptr<mfem::Mesh> mesh_ptr;
-        try {
-            mesh_ptr = std::make_unique<mfem::Mesh>(
-                config.MeshPath, /*generate_edges=*/1, /*refine=*/0,
-                /*fix_orientation=*/false);
-        }
+        {
+            auto operation = reporter.Start("mesh loading");
+            try {
+                mesh_ptr = std::make_unique<mfem::Mesh>(
+                    config.MeshPath, /*generate_edges=*/1, /*refine=*/0,
+                    /*fix_orientation=*/false);
+            }
 #ifdef MFEM_USE_EXCEPTIONS
-        catch (const mfem::ErrorException& e) {
-            throw std::runtime_error(
-                "Invalid mesh '" + config.MeshPath + "': MFEM rejected it "
-                "during load. This usually means orphan boundary elements "
-                "(boundary edges whose endpoints are not shared by any 2D "
-                "element) or mis-oriented elements. Regenerate the mesh "
-                "with counter-clockwise 2D element winding and boundary "
-                "lines whose nodes lie on element edges.\nMFEM detail: "
-                + std::string(e.what()));
-        }
+            catch (const mfem::ErrorException& e) {
+                throw std::runtime_error(
+                    "Invalid mesh '" + config.MeshPath + "': MFEM rejected it "
+                    "during load. This usually means orphan boundary elements "
+                    "(boundary edges whose endpoints are not shared by any 2D "
+                    "element) or mis-oriented elements. Regenerate the mesh "
+                    "with counter-clockwise 2D element winding and boundary "
+                    "lines whose nodes lie on element edges.\nMFEM detail: "
+                    + std::string(e.what()));
+            }
 #endif
+            mfem::Mesh& mesh = *mesh_ptr;
+
+            int bad_el  = mesh.CheckElementOrientation(false);
+            int bad_bdr = mesh.CheckBdrElementOrientation(false);
+            if (bad_el != 0 || bad_bdr != 0) {
+                throw std::runtime_error(
+                    "Invalid mesh '" + config.MeshPath + "': "
+                    + std::to_string(bad_el) + " mis-oriented element(s), "
+                    + std::to_string(bad_bdr)
+                    + " mis-oriented or orphan boundary element(s). "
+                    "Regenerate the mesh with counter-clockwise 2D element "
+                    "winding and boundary lines whose nodes lie on element edges.");
+            }
+
+            mesh.Finalize(/*refine=*/true, /*fix_orientation=*/true);
+        }
+
         mfem::Mesh& mesh = *mesh_ptr;
 
-        int bad_el  = mesh.CheckElementOrientation(false);
-        int bad_bdr = mesh.CheckBdrElementOrientation(false);
-        if (bad_el != 0 || bad_bdr != 0) {
-            throw std::runtime_error(
-                "Invalid mesh '" + config.MeshPath + "': "
-                + std::to_string(bad_el) + " mis-oriented element(s), "
-                + std::to_string(bad_bdr)
-                + " mis-oriented or orphan boundary element(s). "
-                "Regenerate the mesh with counter-clockwise 2D element "
-                "winding and boundary lines whose nodes lie on element edges.");
+        // 4. Validate Configuration (with mesh for attribute checking)
+        {
+            auto operation = reporter.Start("mesh-aware configuration validation");
+            validator.ValidateOrThrow(parser.config, &mesh);
         }
 
-        mesh.Finalize(/*refine=*/true, /*fix_orientation=*/true);
-
-        // 4. Validate Configuration (with mesh for attribute checking)
-        validator.ValidateOrThrow(parser.config, &mesh);
-
         // 5. Factory Logic - Create Solver
-        auto solver = SolverFactory::Instance().Create(config.PhysicsType, mesh, parser.config);
+        std::unique_ptr<PhysicsSolver> solver;
+        {
+            auto operation = reporter.Start("solver creation");
+            solver = SolverFactory::Instance().Create(config.PhysicsType, mesh, parser.config);
+        }
 
         // 6. Execution
-        solver->Setup();
-        solver->Run();
-        // Save is now called inside of Run()
-        solver->SaveAnalysis();
+        {
+            auto operation = reporter.Start("solver setup");
+            solver->Setup();
+        }
+        {
+            auto operation = reporter.Start("solution process");
+            solver->Run();
+        }
+        {
+            auto operation = reporter.Start("analysis result writing");
+            solver->SaveAnalysis();
+        }
 
         return 0;
     }
