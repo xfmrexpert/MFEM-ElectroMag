@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cctype>
 #include <chrono>
 #include <exception>
 #include <iomanip>
@@ -10,16 +11,72 @@
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 #include <utility>
+#include "json.hpp"
 
 class StatusReporter {
 public:
+	enum class Format {
+		Text,
+		JsonLines
+	};
+
 	enum class Verbosity {
 		Status = 0,
 		Solver = 1,
 		Diagnostics = 2
 	};
+
+private:
+	class MessageBuffer : public std::streambuf {
+	public:
+		explicit MessageBuffer(StatusReporter& reporter) : reporter_(reporter) {}
+
+	protected:
+		int overflow(int ch) override {
+			if (ch == traits_type::eof()) {
+				return traits_type::not_eof(ch);
+			}
+			Append(static_cast<char>(ch));
+			return ch;
+		}
+
+		std::streamsize xsputn(const char* data, std::streamsize size) override {
+			for (std::streamsize i = 0; i < size; ++i) {
+				Append(data[i]);
+			}
+			return size;
+		}
+
+		int sync() override {
+			FlushLine();
+			return 0;
+		}
+
+	private:
+		void Append(char ch) {
+			if (ch == '\n') {
+				FlushLine();
+			}
+			else if (ch != '\r') {
+				line_ += ch;
+			}
+		}
+
+		void FlushLine() {
+			if (!line_.empty()) {
+				reporter_.SolverMessage(line_);
+				line_.clear();
+			}
+		}
+
+		StatusReporter& reporter_;
+		std::string line_;
+	};
+
+public:
 
 	class Operation {
 	public:
@@ -54,8 +111,12 @@ public:
 		int exception_count_;
 	};
 
-	explicit StatusReporter(std::ostream& output = std::cout)
-		: output_(output) {}
+	explicit StatusReporter(std::ostream& output = std::cout,
+		std::ostream& error_output = std::cerr)
+		: output_(output),
+		  error_output_(error_output),
+		  solver_buffer_(*this),
+		  solver_output_(&solver_buffer_) {}
 
 	static StatusReporter& Global() {
 		static StatusReporter reporter;
@@ -74,6 +135,9 @@ public:
 
 	void SetVerbosity(Verbosity verbosity) { verbosity_ = verbosity; }
 	Verbosity GetVerbosity() const { return verbosity_; }
+	void SetFormat(Format format) { format_ = format; }
+	Format GetFormat() const { return format_; }
+	bool IsMachineReadable() const { return format_ == Format::JsonLines; }
 
 	bool SolverOutputEnabled() const {
 		return verbosity_ >= Verbosity::Solver;
@@ -92,19 +156,61 @@ public:
 	}
 
 	void Status(const std::string& message) {
-		output_ << message << '\n';
+		WriteMessage("status", message);
 	}
 
 	void Diagnostic(const std::string& message) {
 		if (DiagnosticsEnabled()) {
-			output_ << message << '\n';
+			WriteMessage("diagnostic", message);
 		}
 	}
 
+	void Warning(const std::string& message) {
+		WriteMessage("warning", message, true);
+	}
+
+	void Error(const std::string& message) {
+		WriteMessage("error", message, true);
+	}
+
+	void SolverMessage(const std::string& message) {
+		WriteMessage("solver", message);
+	}
+
+	std::ostream& SolverOutput() { return solver_output_; }
+
 private:
+	void WriteJson(const nlohmann::json& event) {
+		output_ << event.dump() << '\n' << std::flush;
+	}
+
+	void WriteMessage(const char* level, const std::string& message,
+		bool use_error_output = false) {
+		if (IsMachineReadable()) {
+			WriteJson({
+				{"event", "message"},
+				{"level", level},
+				{"message", message}
+			});
+		}
+		else {
+			std::ostream& stream = use_error_output ? error_output_ : output_;
+			stream << message << '\n' << std::flush;
+		}
+	}
+
 	void Write(const char* state, const std::string& name) noexcept {
 		try {
-			output_ << state << ' ' << name << "...\n";
+			if (IsMachineReadable()) {
+				WriteJson({
+					{"event", "operation"},
+					{"state", state == std::string("Starting") ? "started" : state},
+					{"name", name}
+				});
+			}
+			else {
+				output_ << state << ' ' << name << "...\n" << std::flush;
+			}
 		}
 		catch (...) {
 		}
@@ -112,14 +218,32 @@ private:
 
 	void Write(const char* state, const std::string& name, double seconds) noexcept {
 		try {
-			std::ostringstream elapsed;
-			elapsed << std::fixed << std::setprecision(3) << seconds;
-			output_ << state << ' ' << name << " in " << elapsed.str() << " s\n";
+			if (IsMachineReadable()) {
+				std::string machine_state = state;
+				machine_state[0] = static_cast<char>(std::tolower(
+					static_cast<unsigned char>(machine_state[0])));
+				WriteJson({
+					{"event", "operation"},
+					{"state", machine_state},
+					{"name", name},
+					{"elapsed_seconds", seconds}
+				});
+			}
+			else {
+				std::ostringstream elapsed;
+				elapsed << std::fixed << std::setprecision(3) << seconds;
+				output_ << state << ' ' << name << " in " << elapsed.str() << " s\n"
+					<< std::flush;
+			}
 		}
 		catch (...) {
 		}
 	}
 
 	std::ostream& output_;
+	std::ostream& error_output_;
 	Verbosity verbosity_ = Verbosity::Status;
+	Format format_ = Format::Text;
+	MessageBuffer solver_buffer_;
+	std::ostream solver_output_;
 };

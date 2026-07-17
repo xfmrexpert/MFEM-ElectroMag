@@ -21,6 +21,7 @@ void PrintUsage(const char* prog) {
         "  --export-refine <N>        Refinement factor for export mesh (default = solve order)\n"
         "  --export-vector-space <L2|H1>  Reserved; L2 is currently the only supported choice\n"
         "  --verbosity <0|1|2>        0=status/timing, 1=solver output, 2=diagnostics\n"
+        "  --machine-readable         Emit flushed JSON Lines progress on stdout\n"
         "  -h, --help                 Show this help\n";
 }
 
@@ -35,6 +36,17 @@ int main(int argc, char *argv[]) {
 #ifdef MFEM_USE_EXCEPTIONS
     mfem::set_error_action(mfem::MFEM_ERROR_THROW);
 #endif
+    StatusReporter& reporter = StatusReporter::Global();
+    bool machine_readable_requested = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--machine-readable") {
+            machine_readable_requested = true;
+            break;
+        }
+    }
+    if (machine_readable_requested) {
+        reporter.SetFormat(StatusReporter::Format::JsonLines);
+    }
 
     try {
         std::string config_file = "config.json";
@@ -42,6 +54,7 @@ int main(int argc, char *argv[]) {
         int  cli_export_refine = 0;        // 0 = unset
         std::string cli_vector_space;
         int cli_verbosity = 0;
+        bool verbosity_explicit = false;
 
         for (int i = 1; i < argc; ++i) {
             std::string a = argv[i];
@@ -68,12 +81,14 @@ int main(int argc, char *argv[]) {
                     throw std::runtime_error("--export-vector-space must be L2 or H1");
                 }
                 if (cli_vector_space == "H1") {
-                    std::cerr << "Warning: --export-vector-space H1 is not yet "
-                                 "implemented; using L2." << std::endl;
+                    reporter.Warning("--export-vector-space H1 is not yet implemented; using L2.");
                 }
             } else if (a == "--verbosity") {
                 cli_verbosity = std::stoi(need_value(a));
                 StatusReporter::VerbosityFromInt(cli_verbosity);
+                verbosity_explicit = true;
+            } else if (a == "--machine-readable") {
+                machine_readable_requested = true;
             } else if (!a.empty() && a[0] == '-') {
                 throw std::runtime_error("Unknown option: " + a);
             } else {
@@ -81,8 +96,13 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        StatusReporter& reporter = StatusReporter::Global();
+        if (machine_readable_requested && !verbosity_explicit) {
+            cli_verbosity = 1;
+        }
         reporter.SetVerbosity(StatusReporter::VerbosityFromInt(cli_verbosity));
+        if (machine_readable_requested) {
+            mfem::out.SetStream(reporter.SolverOutput());
+        }
 
         // 1. Shared Infrastructure
         std::error_code config_ec;
@@ -209,11 +229,11 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        reporter.Error(e.what());
         return 1;
     }
     catch (...) {
-        std::cerr << "Error: Unknown exception occurred" << std::endl;
+        reporter.Error("Unknown exception occurred");
         return 2;
     }
 }

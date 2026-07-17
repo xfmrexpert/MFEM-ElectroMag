@@ -482,7 +482,7 @@ public:
 		// Placeholder: once the admittance matrix is assembled, write it via the
 		// shared helper, e.g.:
 		//   SaveCouplingMatrix(Y, "Admittance Matrix [S]", "admittance_matrix.csv");
-		mfem::out << "WriteCouplingMatrix() not implemented yet.\n";
+        Reporter().Warning("WriteCouplingMatrix() not implemented yet.");
 	}
 
 	double TerminalConductivity(const Terminal& term) const {

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "mfem.hpp"
+#include "status_reporter.hpp"
 
 namespace matrix_io {
 
@@ -79,7 +80,8 @@ public:
 
 		std::ofstream ofs(path);
 		if (!ofs) {
-			std::cerr << "MatrixWriter: failed to open " << path.string() << "\n";
+			StatusReporter::Global().Error(
+				"MatrixWriter: failed to open " + path.string());
 			return false;
 		}
 
@@ -94,7 +96,7 @@ public:
 			ofs << "\n";
 		}
 
-		std::cout << "Wrote " << path.string() << std::endl;
+		StatusReporter::Global().Diagnostic("Wrote " + path.string());
 		return true;
 	}
 

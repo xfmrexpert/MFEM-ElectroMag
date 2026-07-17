@@ -5,6 +5,7 @@
 #include "json.hpp" // nlohmann/json
 #include "constants.hpp"
 #include "problem_config.hpp"
+#include "status_reporter.hpp"
 #include <fstream>
 #include <iostream>
 #include <unordered_map>
@@ -216,8 +217,9 @@ private:
             config["simulation"].contains("order")) {
             int order = config["simulation"]["order"];
             if (order < 1) {
-                std::cerr << "Warning: 'order' must be >= 1, got " << order
-                          << ". Using order = 1." << std::endl;
+                StatusReporter::Global().Warning(
+                    "'order' must be >= 1, got " + std::to_string(order)
+                    + ". Using order = 1.");
                 return 1;
             }
             return order;

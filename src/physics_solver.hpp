@@ -391,7 +391,14 @@ public:
                             const std::string& title,
                             const std::string& csv_filename) const {
         matrix_io::MatrixWriter writer(title, TerminalNames());
-        writer.PrintConsole(M);
+        if (Reporter().IsMachineReadable()) {
+            std::ostringstream table;
+            writer.PrintConsole(M, table);
+            Reporter().Status(table.str());
+        }
+        else {
+            writer.PrintConsole(M);
+        }
 
         namespace fs = std::filesystem;
         fs::path out_path = fs::path(config.MeshPath).parent_path() / csv_filename;

@@ -246,7 +246,8 @@ public:
 			}
 			else
 			{
-				std::cerr << "Excitation type not supported in ElectrostaticSolver. Skipping terminal " << term_name << ".\n";
+				Reporter().Warning("Excitation type not supported in ElectrostaticSolver. "
+					"Skipping terminal " + term_name + ".");
 				continue;
 			}
 		}
@@ -418,7 +419,7 @@ private:
 	// conductor's capacitance to the grounded/closure boundary. 
 	void WriteCouplingMatrix() {
 		if (!C) {
-			std::cerr << "WriteCouplingMatrix: coupling matrix not computed.\n";
+			Reporter().Warning("WriteCouplingMatrix: coupling matrix not computed.");
 			return;
 		}
 

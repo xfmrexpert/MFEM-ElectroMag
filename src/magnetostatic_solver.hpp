@@ -421,7 +421,7 @@ public:
 
 	void WriteCouplingMatrix() {
 		if (!L) {
-			std::cerr << "WriteCouplingMatrix: coupling matrix not computed.\n";
+			Reporter().Warning("WriteCouplingMatrix: coupling matrix not computed.");
 			return;
 		}
 
