@@ -34,9 +34,8 @@ private:
 	// Cached constrained system for the CURRENT mesh. The matrix is identical
 	// for every solve on a given mesh (same bilinear form and essential DOFs),
 	// so it is assembled once per mesh in BuildOperators() and reused for all
-	// scenarios / coupling columns. AMR refinement rebuilds it via
-	// BuildOperators().
-	mfem::OperatorPtr A_op;
+	// scenarios / coupling columns. AMR refinement rebuilds it via BuildOperators().
+	mfem::OperatorHandle A_op;
 
 	std::unique_ptr<mfem::DenseMatrix> L; // Inductance matrix (coupling matrix) for the current mesh
 

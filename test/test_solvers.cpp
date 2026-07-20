@@ -17,6 +17,7 @@
 #include <cmath>
 #include <complex>
 #include <cstddef>
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -283,6 +284,52 @@ void CreatePlanarStripMesh(const std::string& filename,
     }
 }
 
+void CreateLayeredStripMesh(const std::string& filename,
+                            double length, double height,
+                            int nx, int ny, int interface_column) {
+    REQUIRE(interface_column > 0);
+    REQUIRE(interface_column < nx);
+
+    const int nvx = nx + 1;
+    const int nvy = ny + 1;
+    auto vertex = [nvx](int i, int j) { return j * nvx + i; };
+
+    std::ofstream mesh_file(filename);
+    mesh_file << "MFEM mesh v1.0\n\n";
+    mesh_file << "dimension\n2\n\n";
+    mesh_file << "elements\n" << 2 * nx * ny << "\n";
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const int attribute = i < interface_column ? 1 : 2;
+            const int v00 = vertex(i, j);
+            const int v10 = vertex(i + 1, j);
+            const int v11 = vertex(i + 1, j + 1);
+            const int v01 = vertex(i, j + 1);
+            mesh_file << attribute << " 2 " << v00 << " " << v10 << " " << v11 << "\n";
+            mesh_file << attribute << " 2 " << v00 << " " << v11 << " " << v01 << "\n";
+        }
+    }
+
+    mesh_file << "\nboundary\n" << 2 * ny + 2 * nx << "\n";
+    for (int j = 0; j < ny; ++j) {
+        mesh_file << "1 1 " << vertex(0, j) << " " << vertex(0, j + 1) << "\n";
+        mesh_file << "2 1 " << vertex(nx, j) << " " << vertex(nx, j + 1) << "\n";
+    }
+    for (int i = 0; i < nx; ++i) {
+        mesh_file << "3 1 " << vertex(i, 0) << " " << vertex(i + 1, 0) << "\n";
+        mesh_file << "3 1 " << vertex(i, ny) << " " << vertex(i + 1, ny) << "\n";
+    }
+
+    mesh_file << "\nvertices\n" << nvx * nvy << "\n2\n";
+    for (int j = 0; j < nvy; ++j) {
+        const double y = height * static_cast<double>(j) / ny;
+        for (int i = 0; i < nvx; ++i) {
+            const double x = length * static_cast<double>(i) / nx;
+            mesh_file << x << " " << y << "\n";
+        }
+    }
+}
+
 json MakePlanarStripConfig(const std::string& physics,
                            const std::string& mesh_file,
                            int order,
@@ -362,6 +409,101 @@ mfem::Vector SampleDerivedVector(const FieldExportSet& fields, const std::string
     mfem::Vector value(field.vector->GetVDim());
     field.vector->Eval(value, *transformation, point);
     return value;
+}
+
+double IntegrateVectorMagnitudeSquared(const FieldExportSet& fields,
+                                       const std::string& name) {
+    const FieldExport& field = FindField(fields, name);
+    REQUIRE(field.kind == FieldExport::Kind::DerivedVector);
+    const auto& exported = fields.Fields();
+    const auto primary = std::find_if(exported.begin(), exported.end(),
+        [](const FieldExport& candidate) { return candidate.primary != nullptr; });
+    REQUIRE(primary != exported.end());
+
+    const mfem::FiniteElementSpace* space = primary->primary->FESpace();
+    double integral = 0.0;
+    for (int element = 0; element < space->GetNE(); ++element) {
+        const mfem::FiniteElement* finite_element = space->GetFE(element);
+        mfem::ElementTransformation* transformation =
+            space->GetElementTransformation(element);
+        const mfem::IntegrationRule& rule = mfem::IntRules.Get(
+            finite_element->GetGeomType(), 2 * finite_element->GetOrder() + 2);
+        for (int q = 0; q < rule.GetNPoints(); ++q) {
+            const mfem::IntegrationPoint& point = rule.IntPoint(q);
+            transformation->SetIntPoint(&point);
+            mfem::Vector value(field.vector->GetVDim());
+            field.vector->Eval(value, *transformation, point);
+            integral += point.weight * transformation->Weight() * (value * value);
+        }
+    }
+    return integral;
+}
+
+double RelativeComplexL2Error(
+    const FieldExportSet& fields,
+    const std::function<std::complex<double>(const mfem::Vector&)>& exact) {
+    const FieldExport& real_field = FindField(fields, "A_Real");
+    const FieldExport& imag_field = FindField(fields, "A_Imag");
+    REQUIRE(real_field.kind == FieldExport::Kind::PrimaryScalar);
+    REQUIRE(imag_field.kind == FieldExport::Kind::PrimaryScalar);
+
+    const mfem::FiniteElementSpace* space = real_field.primary->FESpace();
+    double error_squared = 0.0;
+    double exact_squared = 0.0;
+    for (int element = 0; element < space->GetNE(); ++element) {
+        const mfem::FiniteElement* finite_element = space->GetFE(element);
+        mfem::ElementTransformation* transformation =
+            space->GetElementTransformation(element);
+        const mfem::IntegrationRule& rule = mfem::IntRules.Get(
+            finite_element->GetGeomType(), 2 * finite_element->GetOrder() + 4);
+        for (int q = 0; q < rule.GetNPoints(); ++q) {
+            const mfem::IntegrationPoint& point = rule.IntPoint(q);
+            transformation->SetIntPoint(&point);
+            mfem::Vector physical(2);
+            transformation->Transform(point, physical);
+            const std::complex<double> expected = exact(physical);
+            const std::complex<double> actual(
+                real_field.primary->GetValue(element, point),
+                imag_field.primary->GetValue(element, point));
+            const double weight = point.weight * transformation->Weight();
+            error_squared += weight * std::norm(actual - expected);
+            exact_squared += weight * std::norm(expected);
+        }
+    }
+    return std::sqrt(error_squared / exact_squared);
+}
+
+struct CsvMatrix {
+    std::vector<std::string> labels;
+    std::vector<std::vector<double>> values;
+};
+
+CsvMatrix ReadCsvMatrix(const std::string& filename) {
+    std::ifstream input(filename);
+    REQUIRE(input.is_open());
+
+    CsvMatrix matrix;
+    std::string line;
+    REQUIRE(static_cast<bool>(std::getline(input, line)));
+    std::istringstream header(line);
+    std::string cell;
+    REQUIRE(static_cast<bool>(std::getline(header, cell, ',')));
+    while (std::getline(header, cell, ',')) {
+        matrix.labels.push_back(cell);
+    }
+
+    while (std::getline(input, line)) {
+        std::istringstream row(line);
+        REQUIRE(static_cast<bool>(std::getline(row, cell, ',')));
+        std::vector<double> values;
+        while (std::getline(row, cell, ',')) {
+            values.push_back(std::stod(cell));
+        }
+        REQUIRE(values.size() == matrix.labels.size());
+        matrix.values.push_back(std::move(values));
+    }
+    REQUIRE(matrix.values.size() == matrix.labels.size());
+    return matrix;
 }
 
 // Build a 2D axisymmetric "coaxial capacitor" triangle mesh spanning
@@ -531,6 +673,179 @@ TEST_CASE("Electrostatic solver reproduces a uniform field between plates",
     fs::remove(mesh_file);
 }
 
+TEST_CASE("Electrostatic field energy gives analytic capacitance and conserves flux",
+          "[solvers][analytic][electrostatic][energy][conservation]") {
+    const std::string mesh_file = "test_electrostatic_energy.mesh";
+    constexpr double length = 0.2;
+    constexpr double height = 0.05;
+    constexpr double voltage = 100.0;
+    constexpr double relative_permittivity = 2.5;
+    constexpr int nx = 8;
+    constexpr int ny = 3;
+    CreatePlanarStripMesh(mesh_file, length, height, nx, ny);
+
+    json config = MakePlanarStripConfig(
+        "electrostatics", mesh_file, 1,
+        {{"epsilon_r", relative_permittivity}}, voltage, 0.0);
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    ElectrostaticSolver solver(mesh, config);
+    solver.Setup();
+    solver.Run();
+
+    FieldExportSet fields = solver.CollectExportFields();
+    const double permittivity = Constants::EPSILON_0 * relative_permittivity;
+    const double field_integral = IntegrateVectorMagnitudeSquared(fields, "E");
+    const double electric_energy = 0.5 * permittivity * field_integral;
+    const double computed_capacitance = 2.0 * electric_energy / (voltage * voltage);
+    const double analytic_capacitance = permittivity * height / length;
+
+    REQUIRE(electric_energy == Catch::Approx(
+        0.5 * analytic_capacitance * voltage * voltage).epsilon(1e-8));
+    REQUIRE(computed_capacitance ==
+        Catch::Approx(analytic_capacitance).epsilon(1e-8));
+
+    const mfem::IntegrationPoint center = TriangleCenter();
+    const double boundary_segment_length = height / ny;
+    double outward_flux = 0.0;
+    double absolute_flux = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        const int left_element = 2 * (j * nx) + 1;
+        const int right_element = 2 * (j * nx + nx - 1);
+        const mfem::Vector left_field =
+            SampleDerivedVector(fields, "E", left_element, center);
+        const mfem::Vector right_field =
+            SampleDerivedVector(fields, "E", right_element, center);
+        const double left_flux = -permittivity * left_field(0) * boundary_segment_length;
+        const double right_flux = permittivity * right_field(0) * boundary_segment_length;
+        outward_flux += left_flux + right_flux;
+        absolute_flux += std::abs(left_flux) + std::abs(right_flux);
+    }
+    REQUIRE(std::abs(outward_flux) < 1e-7 * absolute_flux);
+
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Electrostatic solver satisfies dielectric interface conditions",
+          "[solvers][analytic][electrostatic][materials][interface]") {
+    const std::string mesh_file = "test_dielectric_interface.mesh";
+    constexpr double length = 0.2;
+    constexpr double height = 0.05;
+    constexpr double voltage = 10.0;
+    constexpr double epsilon_r_left = 2.0;
+    constexpr double epsilon_r_right = 5.0;
+    constexpr int nx = 8;
+    constexpr int ny = 2;
+    constexpr int interface_column = nx / 2;
+    CreateLayeredStripMesh(
+        mesh_file, length, height, nx, ny, interface_column);
+
+    json config = {
+        {"simulation", {
+            {"physics_type", "electrostatics"},
+            {"mesh", mesh_file},
+            {"order", 1},
+            {"geometry_type", "planar"},
+            {"analysis_type", "field"},
+            {"solver_tolerance", 1e-12},
+            {"solver_max_iter", 4000},
+            {"solver_print_level", 0}
+        }},
+        {"entity_groups", json::array({
+            {{"name", "LeftDielectric"},  {"dim", 2}, {"attribute_ids", {1}}},
+            {{"name", "RightDielectric"}, {"dim", 2}, {"attribute_ids", {2}}},
+            {{"name", "Left"},  {"dim", 1}, {"attribute_ids", {1}}},
+            {{"name", "Right"}, {"dim", 1}, {"attribute_ids", {2}}}
+        })},
+        {"regions", json::array({
+            {{"name", "LeftDielectric"}, {"entity_group", "LeftDielectric"}, {"material", 1}},
+            {{"name", "RightDielectric"}, {"entity_group", "RightDielectric"}, {"material", 2}}
+        })},
+        {"materials", json::array({
+            {{"name", "LowPermittivity"}, {"properties", {{"epsilon_r", epsilon_r_left}}}},
+            {{"name", "HighPermittivity"}, {"properties", {{"epsilon_r", epsilon_r_right}}}}
+        })},
+        {"boundaries", json::array({
+            {{"name", "Left"},  {"type", "Dirichlet"}, {"entity_group", "Left"},  {"value", voltage}},
+            {{"name", "Right"}, {"type", "Dirichlet"}, {"entity_group", "Right"}, {"value", 0.0}}
+        })},
+        {"scenarios", json::array({
+            {{"name", "interface"}, {"excitations", json::array()}}
+        })}
+    };
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    ElectrostaticSolver solver(mesh, config);
+    solver.Setup();
+    solver.Run();
+
+    FieldExportSet fields = solver.CollectExportFields();
+    const mfem::IntegrationPoint center = TriangleCenter();
+    const int left_element = 2 * (interface_column - 1);
+    const int right_element = 2 * interface_column;
+    const mfem::Vector left_field =
+        SampleDerivedVector(fields, "E", left_element, center);
+    const mfem::Vector right_field =
+        SampleDerivedVector(fields, "E", right_element, center);
+    const double epsilon_left = Constants::EPSILON_0 * epsilon_r_left;
+    const double epsilon_right = Constants::EPSILON_0 * epsilon_r_right;
+    const double left_width = length * interface_column / nx;
+    const double right_width = length - left_width;
+    const double analytic_displacement =
+        voltage / (left_width / epsilon_left + right_width / epsilon_right);
+
+    REQUIRE(epsilon_left * left_field(0) ==
+        Catch::Approx(analytic_displacement).epsilon(1e-6));
+    REQUIRE(epsilon_right * right_field(0) ==
+        Catch::Approx(analytic_displacement).epsilon(1e-6));
+    REQUIRE(std::abs(left_field(1)) < 1e-6 * std::abs(left_field(0)));
+    REQUIRE(std::abs(right_field(1)) < 1e-6 * std::abs(right_field(0)));
+
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
+          "[solvers][analytic][electrostatic][coupling][reciprocity]") {
+    const std::string mesh_file = "test_capacitance_reciprocity.mesh";
+    const std::string matrix_file = "capacitance_matrix.csv";
+    constexpr double length = 0.2;
+    constexpr double height = 0.05;
+    constexpr double relative_permittivity = 2.5;
+    CreatePlanarStripMesh(mesh_file, length, height, 8, 2);
+
+    json config = MakePlanarStripConfig(
+        "electrostatics", mesh_file, 1,
+        {{"epsilon_r", relative_permittivity}}, 0.0, 0.0);
+    config["simulation"]["analysis_type"] = "coupling_matrix";
+    config["boundaries"] = json::array();
+    config["terminals"] = json::array({
+        {{"name", "Left"}, {"excitation", "voltage"}, {"entity_group", "Left"}},
+        {{"name", "Right"}, {"excitation", "voltage"}, {"entity_group", "Right"}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    ElectrostaticSolver solver(mesh, config);
+    solver.Setup();
+    solver.Run();
+    solver.SaveAnalysis();
+
+    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    REQUIRE(matrix.labels == std::vector<std::string>{"Left", "Right"});
+    const double analytic_capacitance =
+        Constants::EPSILON_0 * relative_permittivity * height / length;
+    REQUIRE(matrix.values[0][1] == Catch::Approx(matrix.values[1][0]).epsilon(1e-7));
+    REQUIRE(matrix.values[0][0] == Catch::Approx(analytic_capacitance).epsilon(1e-8));
+    REQUIRE(matrix.values[1][1] == Catch::Approx(analytic_capacitance).epsilon(1e-8));
+    REQUIRE(matrix.values[0][1] == Catch::Approx(-analytic_capacitance).epsilon(1e-8));
+    REQUIRE(matrix.values[1][0] == Catch::Approx(-analytic_capacitance).epsilon(1e-8));
+    REQUIRE(matrix.values[0][0] + matrix.values[0][1] ==
+        Catch::Approx(0.0).margin(1e-7 * analytic_capacitance));
+    REQUIRE(matrix.values[1][0] + matrix.values[1][1] ==
+        Catch::Approx(0.0).margin(1e-7 * analytic_capacitance));
+
+    fs::remove(matrix_file);
+    fs::remove(mesh_file);
+}
+
 TEST_CASE("Magnetostatic solver reproduces the field of a uniform current slab",
           "[solvers][analytic][magnetostatic]") {
     const std::string mesh_file = "test_analytic_magnetostatic.mesh";
@@ -621,6 +936,46 @@ TEST_CASE("Magnetoquasistatic solver reproduces conducting-slab skin effect",
     REQUIRE(actual_imag < 0.0);
 
     fs::remove(mesh_file);
+}
+
+TEST_CASE("Magnetoquasistatic skin-effect solution converges under mesh refinement",
+          "[solvers][analytic][mqs][convergence]") {
+    constexpr double length = 0.04;
+    constexpr double height = 0.005;
+    constexpr double conductivity = 3.5e7;
+    constexpr double frequency = 60.0;
+    const double omega = Constants::TWO_PI * frequency;
+    const std::complex<double> wave_number =
+        std::sqrt(std::complex<double>(0.0, omega * Constants::MU_0 * conductivity));
+    const auto exact = [=](const mfem::Vector& point) {
+        return std::sinh(wave_number * (length - point(0))) /
+               std::sinh(wave_number * length);
+    };
+
+    std::vector<double> errors;
+    for (const int nx : {8, 16, 32}) {
+        const std::string mesh_file =
+            "test_mqs_convergence_" + std::to_string(nx) + ".mesh";
+        CreatePlanarStripMesh(mesh_file, length, height, nx, 1);
+
+        json config = MakePlanarStripConfig(
+            "magnetoquasistatics", mesh_file, 1,
+            {{"mu_r", 1.0}, {"sigma", conductivity}}, 1.0, 0.0);
+        config["simulation"]["frequency"] = frequency;
+
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetoquasistaticSolver solver(mesh, config);
+        solver.Setup();
+        solver.Run();
+        errors.push_back(RelativeComplexL2Error(solver.CollectExportFields(), exact));
+
+        fs::remove(mesh_file);
+    }
+
+    REQUIRE(errors[1] < errors[0]);
+    REQUIRE(errors[2] < errors[1]);
+    REQUIRE(errors[0] / errors[1] > 2.5);
+    REQUIRE(errors[1] / errors[2] > 2.5);
 }
 
 TEST_CASE("AMR refines an axisymmetric coax and stays conforming", "[solvers][amr]") {
