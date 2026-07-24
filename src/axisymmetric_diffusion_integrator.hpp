@@ -24,9 +24,28 @@ private:
    static constexpr double factor = Constants::TWO_PI;
 
 public:
-   AxisymmetricDiffusionIntegrator(mfem::Coefficient &q) : Q(&q) 
+   explicit AxisymmetricDiffusionIntegrator(
+      mfem::Coefficient &q, const mfem::IntegrationRule *ir = nullptr)
+      : mfem::BilinearFormIntegrator(ir), Q(&q)
    {
       MFEM_ASSERT(Q != nullptr, "Coefficient cannot be null");
+   }
+
+   static const mfem::IntegrationRule &GetRule(
+      const mfem::FiniteElement &trial_fe,
+      const mfem::FiniteElement &test_fe,
+      const mfem::ElementTransformation &Trans)
+   {
+      // Curved inverse mappings make the transformed-gradient integrand
+      // rational, so this is a conservative order estimate.
+      const int order = Trans.OrderGrad(&trial_fe)
+         + Trans.OrderGrad(&test_fe) + Trans.Order();
+
+      if (trial_fe.Space() == mfem::FunctionSpace::rQk)
+      {
+         return mfem::RefinedIntRules.Get(trial_fe.GetGeomType(), order);
+      }
+      return mfem::IntRules.Get(trial_fe.GetGeomType(), order);
    }
 
    void AssembleElementMatrix(const mfem::FiniteElement &el,
@@ -44,9 +63,7 @@ public:
       mfem::DenseMatrix dshapedxt(nd, dim);
       mfem::Vector pos(2); // 2D axisymmetric
 
-      // Increase order by 1 for the linear 'r' term in the measure
-      int order = 2 * el.GetOrder() + Trans.OrderGrad(&el) + 1;
-      const mfem::IntegrationRule *ir = &mfem::IntRules.Get(el.GetGeomType(), order);
+      const mfem::IntegrationRule *ir = GetIntegrationRule(el, Trans);
 
       for (int i = 0; i < ir->GetNPoints(); i++)
       {
@@ -133,9 +150,13 @@ public:
       mfem::Vector pointflux(spaceDim);
       mfem::Vector pos(2); // 2D axisymmetric
 
-      const int order = 2 * fluxelem.GetOrder();
-      const mfem::IntegrationRule *ir =
-         &mfem::IntRules.Get(fluxelem.GetGeomType(), order);
+      const int order = 2 * fluxelem.GetOrder()
+         + Trans.Order() + Trans.OrderW();
+      const mfem::IntegrationRule *ir = GetIntRule();
+      if (!ir)
+      {
+         ir = &mfem::IntRules.Get(fluxelem.GetGeomType(), order);
+      }
 
       double energy = 0.0;
       if (d_energy) { *d_energy = 0.0; } // anisotropic estimation unsupported
@@ -167,5 +188,14 @@ public:
       }
 
       return energy;
+   }
+
+protected:
+   const mfem::IntegrationRule *GetDefaultIntegrationRule(
+      const mfem::FiniteElement &trial_fe,
+      const mfem::FiniteElement &test_fe,
+      const mfem::ElementTransformation &Trans) const override
+   {
+      return &GetRule(trial_fe, test_fe, Trans);
    }
 };

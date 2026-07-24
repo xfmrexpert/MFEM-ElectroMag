@@ -29,10 +29,33 @@
 class AxisymmetricCurlCurlIntegrator : public mfem::BilinearFormIntegrator
 {
 public:
-   explicit AxisymmetricCurlCurlIntegrator(mfem::Coefficient &reluctivity)
-      : nu_(&reluctivity)
+   explicit AxisymmetricCurlCurlIntegrator(
+      mfem::Coefficient &reluctivity,
+      const mfem::IntegrationRule *ir = nullptr)
+      : mfem::BilinearFormIntegrator(ir), nu_(&reluctivity)
    {
       MFEM_ASSERT(nu_ != nullptr, "Reluctivity coefficient cannot be null");
+   }
+
+   static const mfem::IntegrationRule &GetRule(
+      const mfem::FiniteElement &trial_fe,
+      const mfem::FiniteElement &test_fe,
+      const mfem::ElementTransformation &Trans)
+   {
+      // The transformed-gradient and 1/r contributions have different order
+      // requirements. The latter is non-polynomial, so use the larger
+      // geometry-aware estimate rather than claiming exact integration.
+      const int gradient_order = Trans.OrderGrad(&trial_fe)
+         + Trans.OrderGrad(&test_fe) + Trans.Order();
+      const int radial_reaction_order = trial_fe.GetOrder()
+         + test_fe.GetOrder() + Trans.Order() + Trans.OrderW();
+      const int order = std::max(gradient_order, radial_reaction_order);
+
+      if (trial_fe.Space() == mfem::FunctionSpace::rQk)
+      {
+         return mfem::RefinedIntRules.Get(trial_fe.GetGeomType(), order);
+      }
+      return mfem::IntRules.Get(trial_fe.GetGeomType(), order);
    }
 
    void AssembleElementMatrix(const mfem::FiniteElement &el,
@@ -53,13 +76,11 @@ public:
       mfem::DenseMatrix dshape_phys(nd, dim);
       mfem::Vector      pos(dim);
 
-      // Conservative quadrature order for products of gradients + 1/r term.
-      const int order = 2 * el.GetOrder() + Trans.OrderGrad(&el);
-      const mfem::IntegrationRule &ir = mfem::IntRules.Get(el.GetGeomType(), order);
+      const mfem::IntegrationRule *ir = GetIntegrationRule(el, Trans);
 
-      for (int i = 0; i < ir.GetNPoints(); i++)
+      for (int i = 0; i < ir->GetNPoints(); i++)
       {
-         const mfem::IntegrationPoint &ip = ir.IntPoint(i);
+         const mfem::IntegrationPoint &ip = ir->IntPoint(i);
          Trans.SetIntPoint(&ip);
 
          // Physical coordinates: pos(0)=r, pos(1)=z
@@ -131,7 +152,14 @@ public:
 	   return 0.0;
    }
 
-
+protected:
+   const mfem::IntegrationRule *GetDefaultIntegrationRule(
+      const mfem::FiniteElement &trial_fe,
+      const mfem::FiniteElement &test_fe,
+      const mfem::ElementTransformation &Trans) const override
+   {
+      return &GetRule(trial_fe, test_fe, Trans);
+   }
 
 private:
    mfem::Coefficient *nu_;

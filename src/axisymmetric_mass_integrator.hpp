@@ -18,9 +18,26 @@ private:
    static constexpr double factor = Constants::TWO_PI;
 
 public:
-   AxisymmetricMassIntegrator(mfem::Coefficient &q) : Q(&q) 
+   explicit AxisymmetricMassIntegrator(
+      mfem::Coefficient &q, const mfem::IntegrationRule *ir = nullptr)
+      : mfem::BilinearFormIntegrator(ir), Q(&q)
    {
       MFEM_ASSERT(Q != nullptr, "Coefficient cannot be null");
+   }
+
+   static const mfem::IntegrationRule &GetRule(
+      const mfem::FiniteElement &trial_fe,
+      const mfem::FiniteElement &test_fe,
+      const mfem::ElementTransformation &Trans)
+   {
+      const int order = trial_fe.GetOrder() + test_fe.GetOrder()
+         + Trans.Order() + Trans.OrderW();
+
+      if (trial_fe.Space() == mfem::FunctionSpace::rQk)
+      {
+         return mfem::RefinedIntRules.Get(trial_fe.GetGeomType(), order);
+      }
+      return mfem::IntRules.Get(trial_fe.GetGeomType(), order);
    }
 
    void AssembleElementMatrix(const mfem::FiniteElement &el,
@@ -34,10 +51,7 @@ public:
       mfem::Vector shape(nd);
       mfem::Vector pos(2);
 
-      // Standard order is fine here (no 1/r singularity)
-      // r dependency is linear, so Order + 1 is sufficient
-      int order = 2 * el.GetOrder() + 1;
-      const mfem::IntegrationRule *ir = &mfem::IntRules.Get(el.GetGeomType(), order);
+      const mfem::IntegrationRule *ir = GetIntegrationRule(el, Trans);
 
       for (int i = 0; i < ir->GetNPoints(); i++)
       {
@@ -64,5 +78,14 @@ public:
              }
          }
       }
+   }
+
+protected:
+   const mfem::IntegrationRule *GetDefaultIntegrationRule(
+      const mfem::FiniteElement &trial_fe,
+      const mfem::FiniteElement &test_fe,
+      const mfem::ElementTransformation &Trans) const override
+   {
+      return &GetRule(trial_fe, test_fe, Trans);
    }
 };

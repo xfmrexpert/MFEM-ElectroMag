@@ -16,9 +16,26 @@ private:
    mfem::Coefficient *src; // e.g., J_phi (magnetostatics) or rho (electrostatics)
 
 public:
-   AxisymmetricLFIntegrator(mfem::Coefficient &q) : src(&q)
+   explicit AxisymmetricLFIntegrator(
+      mfem::Coefficient &q, const mfem::IntegrationRule *ir = nullptr)
+      : mfem::LinearFormIntegrator(ir), src(&q)
    {
       MFEM_ASSERT(src != nullptr, "Coefficient cannot be null");
+   }
+
+   static const mfem::IntegrationRule &GetRule(
+      const mfem::FiniteElement &el,
+      const mfem::ElementTransformation &Trans)
+   {
+      // The source is piecewise constant; the remaining factors are the test
+      // function, radial coordinate, and Jacobian determinant.
+      const int order = el.GetOrder() + Trans.Order() + Trans.OrderW();
+
+      if (el.Space() == mfem::FunctionSpace::rQk)
+      {
+         return mfem::RefinedIntRules.Get(el.GetGeomType(), order);
+      }
+      return mfem::IntRules.Get(el.GetGeomType(), order);
    }
 
    void AssembleRHSElementVect(const mfem::FiniteElement &el,
@@ -32,13 +49,11 @@ public:
       mfem::Vector shape(nd);
       mfem::Vector pos(Trans.GetSpaceDim());
 
-      const int order = 2 * el.GetOrder() + 1;
-      const mfem::IntegrationRule &ir =
-         mfem::IntRules.Get(el.GetGeomType(), order);
+      const mfem::IntegrationRule *ir = GetIntegrationRule(el, Trans);
 
-      for (int i = 0; i < ir.GetNPoints(); i++)
+      for (int i = 0; i < ir->GetNPoints(); i++)
       {
-         const mfem::IntegrationPoint &ip = ir.IntPoint(i);
+         const mfem::IntegrationPoint &ip = ir->IntPoint(i);
          Trans.SetIntPoint(&ip);
          Trans.Transform(ip, pos);
 
@@ -50,5 +65,14 @@ public:
          el.CalcShape(ip, shape);
          elvect.Add(w, shape);
       }
+   }
+
+protected:
+   const mfem::IntegrationRule *GetDefaultIntegrationRule(
+      const mfem::FiniteElement &trial_fe,
+      const mfem::FiniteElement &,
+      const mfem::ElementTransformation &Trans) const override
+   {
+      return &GetRule(trial_fe, Trans);
    }
 };
