@@ -978,6 +978,64 @@ TEST_CASE("Magnetoquasistatic skin-effect solution converges under mesh refineme
     REQUIRE(errors[1] / errors[2] > 2.5);
 }
 
+TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
+          "[solvers][mqs][coupling][reciprocity]") {
+    const std::string mesh_file = "test_mqs_mixed_conductors.mesh";
+    const std::string inductance_file = "inductance_matrix.csv";
+    const std::string resistance_file = "resistance_matrix.csv";
+    CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 2, 1, 1);
+
+    json config = MakePlanarStripConfig(
+        "magnetoquasistatics", mesh_file, 1, {{"mu_r", 1.0}}, 0.0, 0.0);
+    config["simulation"]["analysis_type"] = "coupling_matrix";
+    config["simulation"]["frequency"] = 1000.0;
+    config["entity_groups"].push_back(
+        {{"name", "StrandedDomain"}, {"dim", 2}, {"attribute_ids", {1}}});
+    config["entity_groups"].push_back(
+        {{"name", "MassiveDomain"}, {"dim", 2}, {"attribute_ids", {2}}});
+    config["materials"] = json::array({
+        {{"name", "StrandedMaterial"},
+         {"properties", {{"mu_r", 1.0}, {"sigma", 0.0}}}},
+        {{"name", "MassiveMaterial"},
+         {"properties", {{"mu_r", 1.0}, {"sigma", 1.0e6}}}}
+    });
+    config["regions"] = json::array({
+        {{"name", "StrandedRegion"}, {"entity_group", "StrandedDomain"},
+         {"material", 1}},
+        {{"name", "MassiveRegion"}, {"entity_group", "MassiveDomain"},
+         {"material", 2}}
+    });
+    config["terminals"] = json::array({
+        {{"name", "Massive"}, {"excitation", "current"},
+         {"conductor_type", "massive"}, {"entity_group", "MassiveDomain"}},
+        {{"name", "Stranded"}, {"excitation", "current"},
+         {"conductor_type", "stranded"}, {"entity_group", "StrandedDomain"}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver solver(mesh, config);
+    solver.Setup();
+    solver.Run();
+    solver.SaveAnalysis();
+
+    const CsvMatrix inductance = ReadCsvMatrix(inductance_file);
+    const CsvMatrix resistance = ReadCsvMatrix(resistance_file);
+    const std::vector<std::string> expected_labels{"Massive", "Stranded"};
+    REQUIRE(inductance.labels == expected_labels);
+    REQUIRE(resistance.labels == expected_labels);
+    REQUIRE(inductance.values[0][1] ==
+        Catch::Approx(inductance.values[1][0]).epsilon(1e-7));
+    REQUIRE(resistance.values[0][1] ==
+        Catch::Approx(resistance.values[1][0]).epsilon(1e-7));
+    REQUIRE(inductance.values[0][0] > 0.0);
+    REQUIRE(inductance.values[1][1] > 0.0);
+    REQUIRE(resistance.values[0][0] > 0.0);
+
+    fs::remove(resistance_file);
+    fs::remove(inductance_file);
+    fs::remove(mesh_file);
+}
+
 TEST_CASE("AMR refines an axisymmetric coax and stays conforming", "[solvers][amr]") {
     const std::string mesh_file = "test_amr_coax.mesh";
     CreateCoaxMesh(mesh_file, /*r_inner=*/1.0, /*r_outer=*/4.0,

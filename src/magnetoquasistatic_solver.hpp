@@ -42,8 +42,8 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     mfem::Array<int> ess_mesh_tdofs;   // scalar-space essential mesh true DOFs
     std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
 
-	std::unique_ptr<mfem::DenseMatrix> coupling_matrix_re; // Coupling matrix for port interactions
-	std::unique_ptr<mfem::DenseMatrix> coupling_matrix_im; // Coupling matrix for port interactions
+    std::unique_ptr<mfem::DenseMatrix> resistance_matrix;
+    std::unique_ptr<mfem::DenseMatrix> inductance_matrix;
 
     // Material property pickers for MaterialVector, named instead of inlined as
     // lambdas so the Setup() coefficient construction reads at a glance.
@@ -254,9 +254,9 @@ public:
 
         // One load vector + self-admittance diagonal entry per massive port.
         std::vector<std::unique_ptr<mfem::Vector>> port_loads;
-        std::vector<mfem::real_t> g_scaled_diag;
+        std::vector<mfem::real_t> conductance_over_omega_diag;
         port_loads.reserve(n_ports);
-        g_scaled_diag.reserve(n_ports);
+        conductance_over_omega_diag.reserve(n_ports);
         for (const auto& [term_name, term] : config.Terminals) {
             if (term.Conductor != ConductorType::Massive) continue;   // skip stranded
             const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
@@ -265,13 +265,14 @@ public:
             port_loads.push_back(BuildPortVector(fespace.get(), attribute_ids, conductivity));
             double G_dc = ComputePortConductance(attribute_ids, conductivity);
             MFEM_VERIFY(G_dc > 0.0, "Massive port '" + term_name + "' has zero conductance.");
-            g_scaled_diag.push_back(-1.0 / (omega * G_dc));
+            conductance_over_omega_diag.push_back(-G_dc / omega);
         }
 
         // Hand the field matrices and port data to the block-system owner, which
         // assembles the complex saddle-point operator and owns all the wiring.
         port_operator = std::make_unique<MqsMassivePortOperator>(
-            n_dofs, K.SpMat(), M_sigma.SpMat(), std::move(port_loads), g_scaled_diag);
+            n_dofs, K.SpMat(), M_sigma.SpMat(), std::move(port_loads),
+            conductance_over_omega_diag);
 
         fespace->GetEssentialTrueDofs(ess_bdr, ess_mesh_tdofs);   // indices in [0, N_DOFs)
 
@@ -435,39 +436,47 @@ public:
 	}
 
 	void GatherCouplingColumn(const Scenario& sc) {
-		// For each massive terminal, the solved port voltage is the column of the
-		// coupling matrix corresponding to that terminal's unit current drive.
-		int p = 0;
-		for (const auto& [term_name, term] : config.Terminals) {
-			if (term.Conductor != ConductorType::Massive) continue;   // keep p aligned
-			for (const auto& exc : sc.Excitations)
-				if (exc.TerminalName == term_name) {
-					// The solved port voltage is the column of the coupling matrix
-					// corresponding to this terminal's unit current drive.
-					double V_re = (*Re_port_values)(p);
-					double V_im = (*Im_port_values)(p);
-					// Get the terminal index for term_name and store the complex voltage in the coupling matrix
-                    
-					(*coupling_matrix_re)(p, p) = V_re;
-					(*coupling_matrix_im)(p, p) = V_im;
-				}
-			++p;
-		}
+        MFEM_VERIFY(sc.Excitations.size() == 1,
+            "MQS coupling scenarios must drive exactly one terminal.");
+        const auto driven = config.Terminals.find(sc.Excitations.front().TerminalName);
+        MFEM_VERIFY(driven != config.Terminals.end(),
+            "MQS coupling scenario references an unknown terminal.");
+        const int column = static_cast<int>(std::distance(config.Terminals.begin(), driven));
+
+        int massive_port = 0;
+        int row = 0;
+        for (const auto& [term_name, term] : config.Terminals) {
+            if (term.Conductor == ConductorType::Massive) {
+                (*resistance_matrix)(row, column) = (*Re_port_values)(massive_port);
+                (*inductance_matrix)(row, column) =
+                    (*Im_port_values)(massive_port) / omega;
+                ++massive_port;
+            }
+            else {
+                const auto [flux_re, flux_im] =
+                    ComputeStrandedFluxLinkage(term_name);
+                (*resistance_matrix)(row, column) = -omega * flux_im;
+                (*inductance_matrix)(row, column) = flux_re;
+            }
+            ++row;
+        }
 	}
 
 	void PrepareAnalysis() {
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
-			// Initialize the coupling matrix storage
-			int num_ports = config.Terminals.size();
-			coupling_matrix_re = std::make_unique<mfem::DenseMatrix>(num_ports, num_ports);
-			coupling_matrix_im = std::make_unique<mfem::DenseMatrix>(num_ports, num_ports);
-			*coupling_matrix_re = 0.0;
-			*coupling_matrix_im = 0.0;
-			for (const auto& [term_name, term] : config.Terminals) {
-				if (term.Conductor == ConductorType::Massive) {
-					//coupling_matrix[term_name] = std::make_pair(0.0, 0.0);
-				}
-			}
+            for (const auto& [term_name, term] : config.Terminals) {
+                MFEM_VERIFY(term.Excitation == Quantity::Current,
+                    "MQS CouplingMatrix terminal '" + term_name +
+                    "' must be a Current terminal.");
+            }
+
+            const int num_terminals = static_cast<int>(config.Terminals.size());
+            resistance_matrix =
+                std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
+            inductance_matrix =
+                std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
+            *resistance_matrix = 0.0;
+            *inductance_matrix = 0.0;
 		}
 	}
 
@@ -479,10 +488,15 @@ public:
 	}
 
 	void WriteCouplingMatrix() {
-		// Placeholder: once the admittance matrix is assembled, write it via the
-		// shared helper, e.g.:
-		//   SaveCouplingMatrix(Y, "Admittance Matrix [S]", "admittance_matrix.csv");
-        Reporter().Warning("WriteCouplingMatrix() not implemented yet.");
+        if (!resistance_matrix || !inductance_matrix) {
+            Reporter().Warning("WriteCouplingMatrix: MQS coupling matrices not computed.");
+            return;
+        }
+
+        SaveCouplingMatrix(*inductance_matrix,
+            "Inductance Matrix [H]", "inductance_matrix.csv");
+        SaveCouplingMatrix(*resistance_matrix,
+            "Resistance Matrix [Ohm]", "resistance_matrix.csv");
 	}
 
 	double TerminalConductivity(const Terminal& term) const {
@@ -495,6 +509,49 @@ public:
 		}
 		return 0.0;
 	}
+
+    mfem::Vector BuildTerminalCurrentDensity(
+        const std::string& terminal_name, double current) const {
+        const Terminal& term = config.Terminals.at(terminal_name);
+        const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
+        const double area = CalculateRegionArea(group.AttributeIds);
+        MFEM_VERIFY(area > 0.0,
+            "Current terminal '" + terminal_name + "' has zero cross-section.");
+
+        mfem::Vector current_density(mesh.attributes.Max());
+        current_density = 0.0;
+        const double density = current / area;
+        for (int attr : group.AttributeIds) {
+            if (attr > 0 && attr <= current_density.Size()) {
+                current_density[attr - 1] = density;
+            }
+        }
+        return current_density;
+    }
+
+    std::pair<double, double> ComputeStrandedFluxLinkage(
+        const std::string& terminal_name) const {
+        mfem::Vector unit_density =
+            BuildTerminalCurrentDensity(terminal_name, 1.0);
+        mfem::PWConstCoefficient unit_density_coeff(unit_density);
+        mfem::LinearForm winding_functional(fespace.get());
+        if (geometry == GeometryType::Axisymmetric) {
+            winding_functional.AddDomainIntegrator(
+                new AxisymmetricLFIntegrator(unit_density_coeff));
+        }
+        else {
+            winding_functional.AddDomainIntegrator(
+                new mfem::DomainLFIntegrator(unit_density_coeff));
+        }
+        winding_functional.Assemble();
+
+        const double geometry_scale =
+            geometry == GeometryType::Axisymmetric ? Constants::TWO_PI : 1.0;
+        return {
+            geometry_scale * (winding_functional * A->real()),
+            geometry_scale * (winding_functional * A->imag())
+        };
+    }
 
     mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
         mfem::Vector j_src(mesh.attributes.Max());
@@ -510,17 +567,7 @@ public:
                 }
 
                 if (I == 0.0) continue;
-                const std::string& group_name = term.EntityGroupName;
-                const EntityGroup& group = config.EntityGroups.at(group_name);
-                const double A = CalculateRegionArea(group.AttributeIds);
-                MFEM_VERIFY(A > 0.0, "Current terminal '" + term_name + "' has zero cross-section.");
-                const double J = I / A; // Current density = current / area
-
-                for (int attr : group.AttributeIds) {
-                    if (attr > 0 && attr <= mesh.attributes.Max()) {
-                        j_src[attr - 1] = J;
-                    }
-                }
+                j_src += BuildTerminalCurrentDensity(term_name, I);
             }
         }
         return j_src;

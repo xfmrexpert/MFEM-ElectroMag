@@ -15,11 +15,11 @@
 // M_omega_sigma already contains the omega*sigma scaling:
 //
 //   [ K + j M_omega_sigma    -C              ] [ A      ]   [ F_source    ]
-//   [ -C^T                    -j/(omega G_dc) ] [ V_port ] = [ I/(j omega) ]
+//   [ -C^T                    -j G_dc/omega    ] [ V_port ] = [ I/(j omega) ]
 //
 // The lower equation is the physical current balance
 //
-//     V_port/G_dc - j*omega*C^T*A = I,
+//     G_dc*V_port - j*omega*C^T*A = I,
 //
 // divided by j*omega to make the field/port coupling symmetric. Consequently
 // the lower RHS is the scaled current phasor I/(j*omega), not the physical
@@ -47,12 +47,12 @@ public:
 		mfem::SparseMatrix& K,
 		mfem::SparseMatrix& M_omega_sigma,
 		std::vector<std::unique_ptr<mfem::Vector>> port_loads,
-		const std::vector<mfem::real_t>& inverse_omega_conductance_diag)
+		const std::vector<mfem::real_t>& conductance_over_omega_diag)
 		: layout(n_dofs, static_cast<int>(port_loads.size())),
 		  port_loads(std::move(port_loads))
 	{
 		MFEM_VERIFY(
-			static_cast<int>(inverse_omega_conductance_diag.size()) == layout.NPorts(),
+			static_cast<int>(conductance_over_omega_diag.size()) == layout.NPorts(),
 			"Port self-admittance diagonal must have one entry per port.");
 
 		std::unique_ptr<mfem::Operator> coupling;
@@ -73,14 +73,14 @@ public:
 		std::unique_ptr<mfem::Operator> port_corner;
 		if (layout.NPorts() > 0)
 		{
-			auto inverse_omega_conductance =
+			auto conductance_over_omega =
 				std::make_unique<mfem::DenseMatrix>(layout.NPorts(), layout.NPorts());
-			*inverse_omega_conductance = 0.0;
+			*conductance_over_omega = 0.0;
 			for (int p = 0; p < layout.NPorts(); ++p)
 			{
-				(*inverse_omega_conductance)(p, p) = inverse_omega_conductance_diag[p];
+				(*conductance_over_omega)(p, p) = conductance_over_omega_diag[p];
 			}
-			port_corner = std::move(inverse_omega_conductance);
+			port_corner = std::move(conductance_over_omega);
 		}
 
 		auto imaginary_block = std::make_unique<BorderedBlockOperator>(
