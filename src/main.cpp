@@ -17,7 +17,7 @@ void PrintUsage(const char* prog) {
     std::cerr <<
         "Usage: " << prog << " <config.json> [options]\n"
         "Options:\n"
-        "  --results-file <path>      Override Gmsh MSH 2.2 results output path\n"
+        "  --results-path <directory> Override Gmsh results output directory\n"
         "  --export-refine <N>        Refinement factor for export mesh (default = solve order)\n"
         "  --export-vector-space <L2|H1>  Reserved; L2 is currently the only supported choice\n"
         "  --verbosity <0|1|2>        0=status/timing, 1=solver output, 2=diagnostics\n"
@@ -50,7 +50,7 @@ int main(int argc, char *argv[]) {
 
     try {
         std::string config_file = "config.json";
-        std::string cli_results_file;
+        std::string cli_results_path;
         int  cli_export_refine = 0;        // 0 = unset
         std::string cli_vector_space;
         int cli_verbosity = 0;
@@ -68,8 +68,8 @@ int main(int argc, char *argv[]) {
             if (a == "-h" || a == "--help") {
                 PrintUsage(argv[0]);
                 return 0;
-            } else if (a == "--results-file") {
-                cli_results_file = need_value(a);
+            } else if (a == "--results-path") {
+                cli_results_path = need_value(a);
             } else if (a == "--export-refine") {
                 cli_export_refine = std::stoi(need_value(a));
                 if (cli_export_refine < 1) {
@@ -125,8 +125,8 @@ int main(int argc, char *argv[]) {
         if (!mutable_json.contains("simulation") || !mutable_json["simulation"].is_object()) {
             mutable_json["simulation"] = json::object();
         }
-        if (!cli_results_file.empty()) {
-            mutable_json["simulation"]["results_file"] = cli_results_file;
+        if (!cli_results_path.empty()) {
+            mutable_json["simulation"]["results_path"] = cli_results_path;
         }
         if (cli_export_refine > 0) {
             mutable_json["simulation"]["export_refine"] = cli_export_refine;

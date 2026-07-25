@@ -63,6 +63,39 @@ TEST_CASE("GetMeshPath throws on missing mesh file", "[input_parser]") {
     // REQUIRE_THROWS_AS(parser.GetMeshPath(), std::runtime_error);
 }
 
+TEST_CASE("Results path configures an output directory", "[input_parser]") {
+    json test_config = {
+        {"simulation", {
+            {"physics_type", "electrostatics"},
+            {"mesh", "test.msh"}
+        }}
+    };
+
+    SECTION("missing path preserves mesh-directory output") {
+        InputParser parser(test_config);
+        REQUIRE(parser.GetProblemConfig().ResultsDirectory.empty());
+    }
+
+    SECTION("empty path preserves mesh-directory output") {
+        test_config["simulation"]["results_path"] = "";
+        InputParser parser(test_config);
+        REQUIRE(parser.GetProblemConfig().ResultsDirectory.empty());
+    }
+
+    SECTION("relative path is resolved from the config directory") {
+        test_config["simulation"]["results_path"] = "results";
+        InputParser parser(test_config);
+        REQUIRE(fs::path(parser.GetProblemConfig().ResultsDirectory) == fs::path(".") / "results");
+    }
+
+    SECTION("absolute path is preserved") {
+        const fs::path results_path = fs::temp_directory_path() / "mfem-electromag-results";
+        test_config["simulation"]["results_path"] = results_path.string();
+        InputParser parser(test_config);
+        REQUIRE(fs::path(parser.GetProblemConfig().ResultsDirectory) == results_path);
+    }
+}
+
 TEST_CASE("SetupBoundaries handles valid attributes", "[input_parser]") {
     // Create a simple test mesh
     std::string temp_mesh = "temp_boundary_test.msh";

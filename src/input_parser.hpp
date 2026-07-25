@@ -80,7 +80,7 @@ private:
 
 		prob_config.OutputParaview = GetOutputParaview();
 		prob_config.OutputGmsh = GetOutputGmsh();
-		prob_config.ResultsPath = GetResultsPath();
+        prob_config.ResultsDirectory = GetResultsDirectory();
 		prob_config.ExportRefine = GetExportRefine();
 		prob_config.Amr = GetAmrSettings();
 
@@ -245,10 +245,11 @@ private:
         return false;
     }
 
-    [[nodiscard]] std::string GetResultsPath() const {
+    [[nodiscard]] std::string GetResultsDirectory() const {
         if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("results_file")) {
+            config["simulation"].contains("results_path")) {
             std::string p = config["simulation"]["results_path"];
+            if (p.empty()) return {};
             fs::path pp(p);
             if (pp.is_absolute()) return pp.string();
             return (fs::path(config_dir) / pp).string();

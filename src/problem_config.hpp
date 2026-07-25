@@ -101,7 +101,7 @@ struct ProblemConfig {
 	std::string MeshPath;
 	bool OutputParaview = false;
 	bool OutputGmsh = false;
-	std::string ResultsPath;       // Optional Gmsh MSH 2.2 results path (empty = derive from config)
+	std::string ResultsDirectory;  // Optional Gmsh results directory (empty = mesh directory)
 	int ExportRefine = -1;         // Refinement factor for export mesh (<0 = default to Order)
 	AmrSettings Amr;               // Adaptive mesh refinement controls (disabled by default)
 	std::unordered_map<std::string, EntityGroup> EntityGroups;

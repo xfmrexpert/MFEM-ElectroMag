@@ -168,8 +168,10 @@ private:
                                const FieldExportSet& fields) const
     {
         namespace fs = std::filesystem;
-        fs::path out_path = fs::path(config.MeshPath).parent_path()
-            / (scenario_name + ".results.msh");
+        const fs::path results_dir = config.ResultsDirectory.empty()
+            ? fs::path(config.MeshPath).parent_path()
+            : fs::path(config.ResultsDirectory);
+        const fs::path out_path = results_dir / (scenario_name + ".results.msh");
 
         const int ref_factor = (config.ExportRefine > 0) ? config.ExportRefine
             : std::max(1, config.Order);
