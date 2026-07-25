@@ -30,17 +30,17 @@ private:
 
     SolverFactory() {
         // Register all available solvers
-        Register(PhysicsType::Electrostatic,
+        Register(PhysicsType::Electrostatics,
             [](mfem::Mesh& mesh, const json& config) -> std::unique_ptr<PhysicsSolver> {
                 return std::make_unique<ElectrostaticSolver>(mesh, config);
             });
-
-        Register(PhysicsType::Magnetostatic,
+        
+        Register(PhysicsType::Magnetostatics,
             [](mfem::Mesh& mesh, const json& config) -> std::unique_ptr<PhysicsSolver> {
                 return std::make_unique<MagnetostaticSolver>(mesh, config);
             });
 
-        Register(PhysicsType::Magnetoquasistatic,
+        Register(PhysicsType::Magnetoquasistatics,
             [](mfem::Mesh& mesh, const json& config) -> std::unique_ptr<PhysicsSolver> {
                 return std::make_unique<MagnetoquasistaticSolver>(mesh, config);
             });

@@ -167,12 +167,12 @@ private:
             const auto& sim = config["simulation"];
             if (sim.contains("physics_type") && sim["physics_type"].is_string()) {
                 const std::string s = sim["physics_type"];
-                if (s == "electrostatics")      return ::PhysicsType::Electrostatic;
-                if (s == "magnetostatics")      return ::PhysicsType::Magnetostatic;
-                if (s == "magnetoquasistatics") return ::PhysicsType::Magnetoquasistatic;
+                if (s == "electrostatics")      return ::PhysicsType::Electrostatics;
+                if (s == "magnetostatics")      return ::PhysicsType::Magnetostatics;
+                if (s == "magnetoquasistatics") return ::PhysicsType::Magnetoquasistatics;
             }
         }
-        return ::PhysicsType::Electrostatic; // Default
+        return ::PhysicsType::Electrostatics; // Default
     }
 
     [[nodiscard]] ::GeometryType GetGeometryType() const {

@@ -89,7 +89,7 @@ struct AmrSettings {
 
 struct ProblemConfig {
 	int Order = 1;
-	::PhysicsType  PhysicsType  = ::PhysicsType::Electrostatic;
+	::PhysicsType  PhysicsType  = ::PhysicsType::Electrostatics;
 	::GeometryType GeometryType = ::GeometryType::Planar;
 	::AnalysisType AnalysisType = ::AnalysisType::Field;
 	double Frequency = 60.0;     // MQS only; constant across the analysis (ignored by ES/MS)

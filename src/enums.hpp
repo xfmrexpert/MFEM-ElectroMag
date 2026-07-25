@@ -7,9 +7,9 @@
  * @brief Physics formulation selected by "simulation.physics"
  */
 enum class PhysicsType {
-    Electrostatic,
-    Magnetostatic,
-    Magnetoquasistatic
+    Electrostatics,
+    Magnetostatics,
+    Magnetoquasistatics
 };
 
 /**
@@ -32,9 +32,9 @@ enum class GeometryType {
 /// PhysicsType -> canonical JSON string (used by the factory and diagnostics).
 inline const char* ToString(PhysicsType p) {
     switch (p) {
-        case PhysicsType::Electrostatic:      return "electrostatics";
-        case PhysicsType::Magnetostatic:      return "magnetostatics";
-        case PhysicsType::Magnetoquasistatic: return "magnetoquasistatics";
+        case PhysicsType::Electrostatics:      return "electrostatics";
+        case PhysicsType::Magnetostatics:      return "magnetostatics";
+        case PhysicsType::Magnetoquasistatics: return "magnetoquasistatics";
     }
     return "unknown";
 }
