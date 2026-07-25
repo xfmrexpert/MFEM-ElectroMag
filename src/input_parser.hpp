@@ -448,8 +448,8 @@ private:
     // --------------------------------------------------------
     // Scenarios (one solve each: parameters + per-terminal excitations)
     // --------------------------------------------------------
-    std::unordered_map<std::string, Scenario> GetScenarios() const {
-        std::unordered_map<std::string, Scenario> scenarios;
+    std::vector<std::pair<std::string, Scenario>> GetScenarios() const {
+        std::vector<std::pair<std::string, Scenario>> scenarios;
 
         if (config.contains("scenarios")) {
             for (auto &sc : config["scenarios"]) {
@@ -470,7 +470,7 @@ private:
                         scenario.Excitations.push_back(excitation);
                     }
                 }
-                scenarios.emplace(std::move(name), std::move(scenario));
+                scenarios.emplace_back(std::move(name), std::move(scenario));
             }
         }
         return scenarios;

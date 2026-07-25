@@ -5,6 +5,9 @@
 
 #include <vector>
 #include <string>
+#include <map>
+#include <unordered_map>
+#include <utility>
 #include "enums.hpp"      // PhysicsType, GeometryType
 #include "constants.hpp"  // Constants::DEFAULT_SOLVER_*
 
@@ -109,5 +112,5 @@ struct ProblemConfig {
 	std::vector<Material> Materials;
 	std::map<std::string, Terminal> Terminals;
 	std::vector<BoundaryCondition> BoundaryConditions;
-	std::unordered_map<std::string, Scenario> Scenarios;
+	std::vector<std::pair<std::string, Scenario>> Scenarios;
 };

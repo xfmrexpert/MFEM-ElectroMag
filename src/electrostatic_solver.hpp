@@ -12,7 +12,6 @@
 #include "mfem.hpp"
 #include "physics_solver.hpp"
 #include "axisymmetric_diffusion_integrator.hpp"
-#include "input_parser.hpp"
 #include "boundary_validation.hpp"
 #include "gmsh_results_writer.hpp"
 #include "amr_support.hpp"
@@ -51,13 +50,9 @@ private:
 	std::vector<AmrIterationInfo> amr_history;
 
 public:
-	ElectrostaticSolver(mfem::Mesh& m, const json& c) : PhysicsSolver(m, c) {}
+	ElectrostaticSolver(mfem::Mesh& m, const ProblemConfig& c) : PhysicsSolver(m, c) {}
 
 	void Setup() override {
-		// Config & solver type
-		InputParser parser(config_json);
-		config = parser.GetProblemConfig();
-
 		int order = config.Order;
 		const int dim = mesh.Dimension();
 

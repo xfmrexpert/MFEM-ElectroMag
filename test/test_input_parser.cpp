@@ -2,65 +2,135 @@
 // SPDX-License-Identifier: MIT
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include "../src/input_parser.hpp"
 #include <fstream>
 #include <filesystem>
 
 namespace fs = std::filesystem;
 
-TEST_CASE("InputParser can parse valid JSON", "[input_parser]") {
-    json test_config = {
+namespace {
+
+json CanonicalConfig() {
+    return json{
         {"simulation", {
-            {"type", "electrostatics"},
+            {"physics_type", "magnetoquasistatics"},
+            {"geometry_type", "axisymmetric"},
+            {"analysis_type", "coupling_matrix"},
             {"mesh", "test.msh"},
             {"order", 2},
-            {"axisymmetric", true}
+            {"frequency", 50.0},
+            {"solver_tolerance", 1e-9},
+            {"solver_max_iter", 321},
+            {"solver_print_level", 2},
+            {"output_paraview", true},
+            {"output_gmsh", true},
+            {"export_refine", 3},
+            {"amr", {
+                {"enabled", true},
+                {"max_iterations", 4},
+                {"max_dofs", 12345},
+                {"error_fraction", 0.6},
+                {"error_tolerance", 1e-5},
+                {"conforming", true}
+            }}
         }},
-        {"materials", json::array()}
+        {"entity_groups", json::array({
+            {{"name", "Conductor"}, {"dim", 2}, {"attribute_ids", {1, 2}}},
+            {{"name", "FarField"}, {"dim", 1}, {"attribute_ids", {3}}}
+        })},
+        {"regions", json::array({
+            {{"entity_group", "Conductor"}, {"material", 1}}
+        })},
+        {"materials", json::array({
+            {{"properties", {{"sigma", 5.8e7}, {"epsilon_r", 2.5}, {"mu_r", 1.2}}}}
+        })},
+        {"terminals", json::array({
+            {{"name", "Coil"}, {"excitation", "current"},
+             {"conductor_type", "stranded"}, {"entity_group", "Conductor"}}
+        })},
+        {"boundaries", json::array({
+            {{"type", "Robin"}, {"entity_group", "FarField"},
+             {"value", 4.0}, {"robin_coefficient", 2.0}}
+        })},
+        {"scenarios", json::array({
+            {{"name", "Second"}, {"excitations", json::array({
+                {{"terminal", "Coil"}, {"value", 20.0}}
+            })}},
+            {{"name", "First"}, {"excitations", json::array({
+                {{"terminal", "Coil"}, {"value", 10.0}, {"floating", false}}
+            })}}
+        })}
     };
+}
 
-    InputParser parser(test_config);
-    REQUIRE(parser.config["simulation"]["type"] == "electrostatics");
-    REQUIRE(parser.config["simulation"]["order"] == 2);
+} // namespace
+
+TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
+    json source = CanonicalConfig();
+    const ProblemConfig config = InputParser(source).GetProblemConfig();
+
+    REQUIRE(config.PhysicsType == PhysicsType::Magnetoquasistatics);
+    REQUIRE(config.GeometryType == GeometryType::Axisymmetric);
+    REQUIRE(config.AnalysisType == AnalysisType::CouplingMatrix);
+    REQUIRE(config.Order == 2);
+    REQUIRE(config.Frequency == Catch::Approx(50.0));
+    REQUIRE(config.SolverTolerance == Catch::Approx(1e-9));
+    REQUIRE(config.SolverMaxIter == 321);
+    REQUIRE(config.SolverPrintLevel == 2);
+    REQUIRE(config.OutputParaview);
+    REQUIRE(config.OutputGmsh);
+    REQUIRE(config.ExportRefine == 3);
+    REQUIRE(config.Amr.Enabled);
+    REQUIRE(config.Amr.MaxIterations == 4);
+    REQUIRE(config.Amr.MaxDofs == 12345);
+    REQUIRE(config.Amr.ErrorFraction == Catch::Approx(0.6));
+    REQUIRE(config.Amr.ErrorTolerance == Catch::Approx(1e-5));
+
+    REQUIRE(config.EntityGroups.at("Conductor").Dim == EntityDim::Domain);
+    REQUIRE((config.EntityGroups.at("Conductor").AttributeIds == std::vector<int>{1, 2}));
+    REQUIRE(config.EntityGroups.at("FarField").Dim == EntityDim::Boundary);
+    REQUIRE(config.Regions.size() == 1);
+    REQUIRE(config.Regions[0].EntityGroupName == "Conductor");
+    REQUIRE(config.Regions[0].Material == 0);
+    REQUIRE(config.Materials[0].Conductivity == Catch::Approx(5.8e7));
+    REQUIRE(config.Materials[0].RelPermittivity == Catch::Approx(2.5));
+    REQUIRE(config.Materials[0].RelPermeability == Catch::Approx(1.2));
+
+    REQUIRE(config.Terminals.at("Coil").Excitation == Quantity::Current);
+    REQUIRE(config.Terminals.at("Coil").Conductor == ConductorType::Stranded);
+    REQUIRE(config.Terminals.at("Coil").EntityGroupName == "Conductor");
+    REQUIRE(config.BoundaryConditions.size() == 1);
+    REQUIRE(config.BoundaryConditions[0].Type == "Robin");
+    REQUIRE(config.BoundaryConditions[0].RobinCoeff == Catch::Approx(2.0));
+
+    REQUIRE(config.Scenarios.size() == 2);
+    REQUIRE(config.Scenarios[0].first == "Second");
+    REQUIRE(config.Scenarios[0].second.Excitations[0].Value == Catch::Approx(20.0));
+    REQUIRE(config.Scenarios[1].first == "First");
 }
 
 TEST_CASE("InputParser throws on missing file", "[input_parser]") {
     REQUIRE_THROWS_AS(InputParser(std::string("nonexistent_file.json")), std::runtime_error);
 }
 
-TEST_CASE("GetMeshPath handles relative paths", "[input_parser]") {
-    // Create a temporary mesh file for testing
-    std::string temp_mesh = "temp_test_mesh.msh";
-    std::ofstream temp_file(temp_mesh);
-    temp_file << "test mesh content" << std::endl;
-    temp_file.close();
+TEST_CASE("InputParser resolves paths relative to the config file", "[input_parser]") {
+    const fs::path directory = fs::temp_directory_path() / "mfem-electromag-parser-test";
+    const fs::path config_path = directory / "config.json";
+    fs::create_directories(directory);
 
-    json test_config = {
-        {"simulation", {
-            {"type", "electrostatics"},
-            {"mesh", temp_mesh}
-        }}
-    };
+    json source = CanonicalConfig();
+    source["simulation"]["results_path"] = "results";
+    {
+        std::ofstream output(config_path);
+        output << source;
+    }
 
-    InputParser parser(test_config);
-    // std::string mesh_path = parser.GetMeshPath();
+    const ProblemConfig config = InputParser(config_path.string()).GetProblemConfig();
+    REQUIRE(fs::path(config.MeshPath) == directory / "test.msh");
+    REQUIRE(fs::path(config.ResultsDirectory) == directory / "results");
 
-    // REQUIRE(fs::exists(mesh_path));
-
-    // Cleanup
-    fs::remove(temp_mesh);
-}
-
-TEST_CASE("GetMeshPath throws on missing mesh file", "[input_parser]") {
-    json test_config = {
-        {"simulation", {
-            {"type", "electrostatics"},
-            {"mesh", "definitely_does_not_exist.msh"}
-        }}
-    };
-
-    InputParser parser(test_config);
-    // REQUIRE_THROWS_AS(parser.GetMeshPath(), std::runtime_error);
+    fs::remove_all(directory);
 }
 
 TEST_CASE("Results path configures an output directory", "[input_parser]") {
@@ -96,60 +166,8 @@ TEST_CASE("Results path configures an output directory", "[input_parser]") {
     }
 }
 
-TEST_CASE("SetupBoundaries handles valid attributes", "[input_parser]") {
-    // Create a simple test mesh
-    std::string temp_mesh = "temp_boundary_test.msh";
-    std::ofstream temp_file(temp_mesh);
-    temp_file << "$MeshFormat\n4.1 0 8\n$EndMeshFormat\n";
-    temp_file << "$Entities\n0 0 0 0\n$EndEntities\n";
-    temp_file << "$Nodes\n0 0 0\n$EndNodes\n";
-    temp_file << "$Elements\n0 0 0 0\n$EndElements\n";
-    temp_file.close();
-
-    json test_config = {
-        {"simulation", {
-            {"type", "electrostatics"},
-            {"mesh", temp_mesh}
-        }},
-        {"boundaries", json::array({
-            {
-                {"name", "test_boundary"},
-                {"attributes", {1, 2}},
-                {"type", "Dirichlet"},
-                {"value", 100.0}
-            }
-        })}
-    };
-
-    InputParser parser(test_config);
-
-    // Note: We can't fully test without creating a valid MFEM mesh,
-    // but we can verify the parser doesn't crash
-    REQUIRE(parser.config["boundaries"].size() == 1);
-
-    // Cleanup
-    fs::remove(temp_mesh);
-}
-
-TEST_CASE("Boundary attribute bounds checking", "[input_parser]") {
-    json test_config = {
-        {"simulation", {
-            {"type", "electrostatics"},
-            {"mesh", "test.msh"}
-        }},
-        {"boundaries", json::array({
-            {
-                {"name", "invalid_boundary"},
-                {"attributes", {0, -1, 100}},  // Invalid attributes
-                {"type", "Dirichlet"},
-                {"value", 0.0}
-            }
-        })}
-    };
-
-    InputParser parser(test_config);
-
-    // The parser should handle out-of-bounds attributes gracefully
-    // (not crash or throw, just skip invalid attributes)
-    REQUIRE(parser.config["boundaries"].size() == 1);
+TEST_CASE("InputParser wraps decoding type failures", "[input_parser]") {
+    json source = CanonicalConfig();
+    source["simulation"]["order"] = "second";
+    REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
 }

@@ -7,6 +7,7 @@
 #include "../src/electrostatic_solver.hpp"
 #include "../src/magnetostatic_solver.hpp"
 #include "../src/magnetoquasistatic_solver.hpp"
+#include "../src/solver_factory.hpp"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -40,28 +41,57 @@ void CreateTestMesh(const std::string& filename) {
     mesh_file.close();
 }
 
+ProblemConfig DecodeConfig(const json& config) {
+    return InputParser(config).GetProblemConfig();
+}
+
+class ScenarioOrderProbe : public PhysicsSolver {
+public:
+    ScenarioOrderProbe(mfem::Mesh& mesh, const ProblemConfig& config)
+        : PhysicsSolver(mesh, config) {}
+
+    std::vector<std::string> ScenarioNames() const {
+        std::vector<std::string> names;
+        for (const auto& [name, scenario] : BuildSolveScenarios()) {
+            names.push_back(name);
+        }
+        return names;
+    }
+
+    void Setup() override {}
+    void Run() override {}
+    void SaveAnalysis() override {}
+    FieldExportSet CollectExportFields() const override { return {}; }
+};
+
 TEST_CASE("ElectrostaticSolver can be constructed", "[solvers]") {
     std::string mesh_file = "test_electrostatic.mesh";
     CreateTestMesh(mesh_file);
 
     json test_config = {
         {"simulation", {
-            {"physics", "electrostatics"},
+            {"physics_type", "electrostatics"},
             {"mesh", mesh_file},
             {"order", 1},
-            {"geometry", "axisymmetric"}
+            {"geometry_type", "axisymmetric"}
         }},
+        {"entity_groups", json::array({
+            {{"name", "Domain"}, {"dim", 2}, {"attribute_ids", {1}}},
+            {{"name", "Ground"}, {"dim", 1}, {"attribute_ids", {1}}}
+        })},
+        {"regions", json::array({
+            {{"entity_group", "Domain"}, {"material", 1}}
+        })},
         {"materials", json::array({
             {
                 {"name", "dielectric"},
-                {"attributes", {1}},
                 {"properties", {{"epsilon_r", 2.0}}}
             }
         })},
         {"boundaries", json::array({
             {
                 {"name", "ground"},
-                {"attributes", {1}},
+                {"entity_group", "Ground"},
                 {"type", "Dirichlet"},
                 {"value", 0.0}
             }
@@ -69,11 +99,29 @@ TEST_CASE("ElectrostaticSolver can be constructed", "[solvers]") {
     };
 
     InputParser parser(test_config);
+    ProblemConfig config = parser.GetProblemConfig();
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
 
-    REQUIRE_NOTHROW(ElectrostaticSolver(mesh, parser.config));
+    REQUIRE_NOTHROW(ElectrostaticSolver(mesh, config));
 
     // Cleanup
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Field scenarios preserve declaration order", "[solvers][scenarios]") {
+    const std::string mesh_file = "test_scenario_order.mesh";
+    CreateTestMesh(mesh_file);
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+
+    ProblemConfig config;
+    config.AnalysisType = AnalysisType::Field;
+    config.Scenarios.emplace_back("Zulu", Scenario{});
+    config.Scenarios.emplace_back("Alpha", Scenario{});
+    config.Scenarios.emplace_back("Middle", Scenario{});
+
+    ScenarioOrderProbe probe(mesh, config);
+    REQUIRE((probe.ScenarioNames() == std::vector<std::string>{"Zulu", "Alpha", "Middle"}));
+
     fs::remove(mesh_file);
 }
 
@@ -83,30 +131,28 @@ TEST_CASE("MagnetostaticSolver can be constructed", "[solvers]") {
 
     json test_config = {
         {"simulation", {
-            {"physics", "magnetostatics"},
+            {"physics_type", "magnetostatics"},
             {"mesh", mesh_file},
             {"order", 1},
-            {"geometry", "axisymmetric"}
+            {"geometry_type", "axisymmetric"}
         }},
+        {"entity_groups", json::array({
+            {{"name", "Domain"}, {"dim", 2}, {"attribute_ids", {1}}},
+            {{"name", "FarField"}, {"dim", 1}, {"attribute_ids", {1}}}
+        })},
+        {"regions", json::array({
+            {{"entity_group", "Domain"}, {"material", 1}}
+        })},
         {"materials", json::array({
             {
                 {"name", "iron"},
-                {"attributes", {1}},
                 {"properties", {{"mu_r", 1000.0}}}
-            }
-        })},
-        {"sources", json::array({
-            {
-                {"name", "coil"},
-                {"attributes", {1}},
-                {"type", "CurrentDensity"},
-                {"value", 1000.0}
             }
         })},
         {"boundaries", json::array({
             {
                 {"name", "far_field"},
-                {"attributes", {1}},
+                {"entity_group", "FarField"},
                 {"type", "Dirichlet"},
                 {"value", 0.0}
             }
@@ -114,9 +160,10 @@ TEST_CASE("MagnetostaticSolver can be constructed", "[solvers]") {
     };
 
     InputParser parser(test_config);
+    ProblemConfig config = parser.GetProblemConfig();
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
 
-    REQUIRE_NOTHROW(MagnetostaticSolver(mesh, parser.config));
+    REQUIRE_NOTHROW(MagnetostaticSolver(mesh, config));
 
     // Cleanup
     fs::remove(mesh_file);
@@ -128,34 +175,32 @@ TEST_CASE("MagnetoquasistaticSolver can be constructed", "[solvers]") {
 
     json test_config = {
         {"simulation", {
-            {"physics", "magnetoquasistatics"},
+            {"physics_type", "magnetoquasistatics"},
             {"mesh", mesh_file},
             {"order", 1},
-            {"geometry", "axisymmetric"},
+            {"geometry_type", "axisymmetric"},
             {"frequency", 60.0}
         }},
+        {"entity_groups", json::array({
+            {{"name", "Domain"}, {"dim", 2}, {"attribute_ids", {1}}},
+            {{"name", "FarField"}, {"dim", 1}, {"attribute_ids", {1}}}
+        })},
+        {"regions", json::array({
+            {{"entity_group", "Domain"}, {"material", 1}}
+        })},
         {"materials", json::array({
             {
                 {"name", "conductor"},
-                {"attributes", {1}},
                 {"properties", {
                     {"mu_r", 1.0},
                     {"sigma", 5.8e7}
                 }}
             }
         })},
-        {"sources", json::array({
-            {
-                {"name", "coil"},
-                {"attributes", {1}},
-                {"type", "CurrentDensity"},
-                {"value", 1000.0}
-            }
-        })},
         {"boundaries", json::array({
             {
                 {"name", "far_field"},
-                {"attributes", {1}},
+                {"entity_group", "FarField"},
                 {"type", "Dirichlet"},
                 {"value", 0.0}
             }
@@ -163,9 +208,10 @@ TEST_CASE("MagnetoquasistaticSolver can be constructed", "[solvers]") {
     };
 
     InputParser parser(test_config);
+    ProblemConfig config = parser.GetProblemConfig();
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
 
-    REQUIRE_NOTHROW(MagnetoquasistaticSolver(mesh, parser.config));
+    REQUIRE_NOTHROW(MagnetoquasistaticSolver(mesh, config));
 
     // Cleanup
     fs::remove(mesh_file);
@@ -174,62 +220,27 @@ TEST_CASE("MagnetoquasistaticSolver can be constructed", "[solvers]") {
 TEST_CASE("Solver factory logic works correctly", "[solvers]") {
     std::string mesh_file = "test_factory.mesh";
     CreateTestMesh(mesh_file);
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
 
     SECTION("electrostatics") {
-        json config = {
-            {"simulation", {
-                {"physics", "electrostatics"},
-                {"mesh", mesh_file},
-                {"order", 1}
-            }},
-            {"materials", json::array()},
-            {"boundaries", json::array()}
-        };
-
-        InputParser parser(config);
-        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-
-        std::string type = parser.config["simulation"]["physics"];
-        REQUIRE(type == "electrostatics");
+        ProblemConfig config;
+        config.PhysicsType = PhysicsType::Electrostatics;
+        auto solver = SolverFactory::Instance().Create(mesh, config);
+        REQUIRE(dynamic_cast<ElectrostaticSolver*>(solver.get()) != nullptr);
     }
 
     SECTION("magnetostatics") {
-        json config = {
-            {"simulation", {
-                {"physics", "magnetostatics"},
-                {"mesh", mesh_file},
-                {"order", 1}
-            }},
-            {"materials", json::array()},
-            {"sources", json::array()},
-            {"boundaries", json::array()}
-        };
-
-        InputParser parser(config);
-        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-
-        std::string type = parser.config["simulation"]["physics"];
-        REQUIRE(type == "magnetostatics");
+        ProblemConfig config;
+        config.PhysicsType = PhysicsType::Magnetostatics;
+        auto solver = SolverFactory::Instance().Create(mesh, config);
+        REQUIRE(dynamic_cast<MagnetostaticSolver*>(solver.get()) != nullptr);
     }
 
     SECTION("magnetoquasistatics") {
-        json config = {
-            {"simulation", {
-                {"physics", "magnetoquasistatics"},
-                {"mesh", mesh_file},
-                {"order", 1},
-                {"frequency", 60.0}
-            }},
-            {"materials", json::array()},
-            {"sources", json::array()},
-            {"boundaries", json::array()}
-        };
-
-        InputParser parser(config);
-        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-
-        std::string type = parser.config["simulation"]["physics"];
-        REQUIRE(type == "magnetoquasistatics");
+        ProblemConfig config;
+        config.PhysicsType = PhysicsType::Magnetoquasistatics;
+        auto solver = SolverFactory::Instance().Create(mesh, config);
+        REQUIRE(dynamic_cast<MagnetoquasistaticSolver*>(solver.get()) != nullptr);
     }
 
     // Cleanup
@@ -578,7 +589,7 @@ void CreateCoaxMesh(const std::string& filename,
 json MakeCoaxAmrConfig(const std::string& mesh_file, int max_iterations) {
     return json{
         {"simulation", {
-            {"physics", "electrostatics"},
+            {"physics_type", "electrostatics"},
             {"mesh", mesh_file},
             {"order", 1},
             {"geometry_type", "axisymmetric"},
@@ -651,7 +662,7 @@ TEST_CASE("Electrostatic solver reproduces a uniform field between plates",
     json config = MakePlanarStripConfig(
         "electrostatics", mesh_file, 1, {{"epsilon_r", 2.5}}, voltage, 0.0);
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    ElectrostaticSolver solver(mesh, config);
+    ElectrostaticSolver solver(mesh, DecodeConfig(config));
     solver.Setup();
     solver.Run();
 
@@ -688,7 +699,7 @@ TEST_CASE("Electrostatic field energy gives analytic capacitance and conserves f
         "electrostatics", mesh_file, 1,
         {{"epsilon_r", relative_permittivity}}, voltage, 0.0);
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    ElectrostaticSolver solver(mesh, config);
+    ElectrostaticSolver solver(mesh, DecodeConfig(config));
     solver.Setup();
     solver.Run();
 
@@ -774,7 +785,7 @@ TEST_CASE("Electrostatic solver satisfies dielectric interface conditions",
     };
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    ElectrostaticSolver solver(mesh, config);
+    ElectrostaticSolver solver(mesh, DecodeConfig(config));
     solver.Setup();
     solver.Run();
 
@@ -823,7 +834,7 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    ElectrostaticSolver solver(mesh, config);
+    ElectrostaticSolver solver(mesh, DecodeConfig(config));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -867,7 +878,7 @@ TEST_CASE("Magnetostatic solver reproduces the field of a uniform current slab",
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    MagnetostaticSolver solver(mesh, config);
+    MagnetostaticSolver solver(mesh, DecodeConfig(config));
     solver.Setup();
     solver.Run();
 
@@ -910,7 +921,7 @@ TEST_CASE("Magnetoquasistatic solver reproduces conducting-slab skin effect",
     config["simulation"]["frequency"] = frequency;
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver solver(mesh, config);
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
     solver.Setup();
     solver.Run();
 
@@ -964,7 +975,7 @@ TEST_CASE("Magnetoquasistatic skin-effect solution converges under mesh refineme
         config["simulation"]["frequency"] = frequency;
 
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-        MagnetoquasistaticSolver solver(mesh, config);
+        MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
         solver.Setup();
         solver.Run();
         errors.push_back(RelativeComplexL2Error(solver.CollectExportFields(), exact));
@@ -1013,7 +1024,7 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver solver(mesh, config);
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -1043,10 +1054,9 @@ TEST_CASE("AMR refines an axisymmetric coax and stays conforming", "[solvers][am
 
     json config = MakeCoaxAmrConfig(mesh_file, /*max_iterations=*/4);
 
-    InputParser parser(config);
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
 
-    ElectrostaticSolver solver(mesh, parser.config);
+    ElectrostaticSolver solver(mesh, DecodeConfig(config));
     solver.Setup();
     REQUIRE_NOTHROW(solver.Run());
 
@@ -1108,10 +1118,9 @@ TEST_CASE("AMR with multiple scenarios writes a shared conforming mesh", "[solve
         })}}
     });
 
-    InputParser parser(config);
     mfem::Mesh mesh(mesh_in_tmp.string().c_str(), 1, 1);
 
-    ElectrostaticSolver solver(mesh, parser.config);
+    ElectrostaticSolver solver(mesh, DecodeConfig(config));
     solver.Setup();
     REQUIRE_NOTHROW(solver.Run());
 

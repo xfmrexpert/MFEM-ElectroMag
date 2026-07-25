@@ -11,7 +11,6 @@
 #include "axisymmetric_lf_integrator.hpp"
 #include "magnetic_field_coefficient.hpp"
 #include "complex_vector_magnitude_coefficient.hpp"
-#include "input_parser.hpp"
 #include "constants.hpp"
 #include "boundary_validation.hpp"
 #include "problem_config.hpp"
@@ -159,13 +158,9 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
 
 public:
     // Constructor deals only with initialization, no manual nullptr assignment needed
-    MagnetoquasistaticSolver(mfem::Mesh &m, const json &c) : PhysicsSolver(m, c) {}
+    MagnetoquasistaticSolver(mfem::Mesh &m, const ProblemConfig &c) : PhysicsSolver(m, c) {}
 
     void Setup() override {
-        // Config & solver type
-        InputParser parser(config_json);
-        config = parser.GetProblemConfig();
-        
         int order = config.Order;
         const int dim = mesh.Dimension();
 

@@ -7,6 +7,7 @@
 #include <vector>
 #include <set>
 #include <stdexcept>
+#include <functional>
 #include "json.hpp"
 #include "mfem.hpp"
 
@@ -38,6 +39,168 @@ private:
 
     void AddError(const std::string& field, const std::string& message) {
         errors.emplace_back(field, message);
+    }
+
+    enum class ExpectedType { Object, Array, String, Number, Integer, Boolean };
+
+    [[nodiscard]] static bool HasType(const json& value, ExpectedType type) {
+        switch (type) {
+            case ExpectedType::Object:  return value.is_object();
+            case ExpectedType::Array:   return value.is_array();
+            case ExpectedType::String:  return value.is_string();
+            case ExpectedType::Number:  return value.is_number();
+            case ExpectedType::Integer: return value.is_number_integer();
+            case ExpectedType::Boolean: return value.is_boolean();
+        }
+        return false;
+    }
+
+    [[nodiscard]] static const char* TypeName(ExpectedType type) {
+        switch (type) {
+            case ExpectedType::Object:  return "an object";
+            case ExpectedType::Array:   return "an array";
+            case ExpectedType::String:  return "a string";
+            case ExpectedType::Number:  return "a number";
+            case ExpectedType::Integer: return "an integer";
+            case ExpectedType::Boolean: return "a boolean";
+        }
+        return "the expected type";
+    }
+
+    void CheckFieldType(const json& object, const char* key,
+                        const std::string& field, ExpectedType type) {
+        if (object.contains(key) && !HasType(object[key], type)) {
+            AddError(field, std::string("Must be ") + TypeName(type));
+        }
+    }
+
+    void CheckObjectArrayTypes(
+        const json& config, const char* key,
+        const std::function<void(const json&, const std::string&)>& check_item) {
+        if (!config.contains(key)) return;
+        const auto& values = config[key];
+        if (!values.is_array()) {
+            AddError(key, "Must be an array");
+            return;
+        }
+        for (size_t i = 0; i < values.size(); ++i) {
+            const std::string prefix = std::string(key) + "[" + std::to_string(i) + "]";
+            if (!values[i].is_object()) {
+                AddError(prefix, "Must be an object");
+                continue;
+            }
+            check_item(values[i], prefix);
+        }
+    }
+
+    void ValidateDocumentTypes(const json& config) {
+        if (!config.is_object()) {
+            AddError("config", "Configuration root must be an object");
+            return;
+        }
+
+        if (config.contains("simulation") && !config["simulation"].is_object()) {
+            AddError("simulation", "Must be an object");
+        } else if (config.contains("simulation")) {
+            const auto& sim = config["simulation"];
+            CheckFieldType(sim, "physics_type", "simulation.physics_type", ExpectedType::String);
+            CheckFieldType(sim, "geometry_type", "simulation.geometry_type", ExpectedType::String);
+            CheckFieldType(sim, "analysis_type", "simulation.analysis_type", ExpectedType::String);
+            CheckFieldType(sim, "frequency", "simulation.frequency", ExpectedType::Number);
+            CheckFieldType(sim, "mesh", "simulation.mesh", ExpectedType::String);
+            CheckFieldType(sim, "order", "simulation.order", ExpectedType::Integer);
+            CheckFieldType(sim, "solver_tolerance", "simulation.solver_tolerance", ExpectedType::Number);
+            CheckFieldType(sim, "solver_max_iter", "simulation.solver_max_iter", ExpectedType::Integer);
+            CheckFieldType(sim, "solver_print_level", "simulation.solver_print_level", ExpectedType::Integer);
+            CheckFieldType(sim, "output_paraview", "simulation.output_paraview", ExpectedType::Boolean);
+            CheckFieldType(sim, "output_gmsh", "simulation.output_gmsh", ExpectedType::Boolean);
+            CheckFieldType(sim, "results_path", "simulation.results_path", ExpectedType::String);
+            CheckFieldType(sim, "export_refine", "simulation.export_refine", ExpectedType::Integer);
+            CheckFieldType(sim, "amr", "simulation.amr", ExpectedType::Object);
+
+            if (sim.contains("physics")) {
+                AddError("simulation.physics", "Unsupported field; use 'physics_type'");
+            }
+            if (sim.contains("geometry")) {
+                AddError("simulation.geometry", "Unsupported field; use 'geometry_type'");
+            }
+            if (sim.contains("type")) {
+                AddError("simulation.type", "Unsupported field; use 'physics_type'");
+            }
+            if (sim.contains("results_file")) {
+                AddError("simulation.results_file", "Unsupported field; use 'results_path'");
+            }
+
+            if (sim.contains("amr") && sim["amr"].is_object()) {
+                const auto& amr = sim["amr"];
+                CheckFieldType(amr, "enabled", "simulation.amr.enabled", ExpectedType::Boolean);
+                CheckFieldType(amr, "max_iterations", "simulation.amr.max_iterations", ExpectedType::Integer);
+                CheckFieldType(amr, "max_dofs", "simulation.amr.max_dofs", ExpectedType::Integer);
+                CheckFieldType(amr, "error_fraction", "simulation.amr.error_fraction", ExpectedType::Number);
+                CheckFieldType(amr, "error_tolerance", "simulation.amr.error_tolerance", ExpectedType::Number);
+                CheckFieldType(amr, "conforming", "simulation.amr.conforming", ExpectedType::Boolean);
+            }
+        }
+
+        CheckObjectArrayTypes(config, "entity_groups", [&](const json& group, const std::string& prefix) {
+            CheckFieldType(group, "name", prefix + ".name", ExpectedType::String);
+            CheckFieldType(group, "dim", prefix + ".dim", ExpectedType::Integer);
+            CheckFieldType(group, "attribute_ids", prefix + ".attribute_ids", ExpectedType::Array);
+            if (group.contains("attribute_ids") && group["attribute_ids"].is_array()) {
+                for (size_t i = 0; i < group["attribute_ids"].size(); ++i) {
+                    if (!group["attribute_ids"][i].is_number_integer()) {
+                        AddError(prefix + ".attribute_ids[" + std::to_string(i) + "]", "Must be an integer");
+                    }
+                }
+            }
+        });
+
+        CheckObjectArrayTypes(config, "regions", [&](const json& region, const std::string& prefix) {
+            CheckFieldType(region, "entity_group", prefix + ".entity_group", ExpectedType::String);
+            CheckFieldType(region, "material", prefix + ".material", ExpectedType::Integer);
+        });
+
+        CheckObjectArrayTypes(config, "materials", [&](const json& material, const std::string& prefix) {
+            CheckFieldType(material, "properties", prefix + ".properties", ExpectedType::Object);
+            if (material.contains("properties") && material["properties"].is_object()) {
+                const auto& props = material["properties"];
+                CheckFieldType(props, "sigma", prefix + ".properties.sigma", ExpectedType::Number);
+                CheckFieldType(props, "epsilon_r", prefix + ".properties.epsilon_r", ExpectedType::Number);
+                CheckFieldType(props, "mu_r", prefix + ".properties.mu_r", ExpectedType::Number);
+            }
+        });
+
+        CheckObjectArrayTypes(config, "terminals", [&](const json& terminal, const std::string& prefix) {
+            CheckFieldType(terminal, "name", prefix + ".name", ExpectedType::String);
+            CheckFieldType(terminal, "excitation", prefix + ".excitation", ExpectedType::String);
+            CheckFieldType(terminal, "conductor_type", prefix + ".conductor_type", ExpectedType::String);
+            CheckFieldType(terminal, "entity_group", prefix + ".entity_group", ExpectedType::String);
+        });
+
+        CheckObjectArrayTypes(config, "boundaries", [&](const json& boundary, const std::string& prefix) {
+            CheckFieldType(boundary, "type", prefix + ".type", ExpectedType::String);
+            CheckFieldType(boundary, "entity_group", prefix + ".entity_group", ExpectedType::String);
+            CheckFieldType(boundary, "value", prefix + ".value", ExpectedType::Number);
+            CheckFieldType(boundary, "robin_coefficient", prefix + ".robin_coefficient", ExpectedType::Number);
+        });
+
+        CheckObjectArrayTypes(config, "scenarios", [&](const json& scenario, const std::string& prefix) {
+            CheckFieldType(scenario, "name", prefix + ".name", ExpectedType::String);
+            CheckFieldType(scenario, "excitations", prefix + ".excitations", ExpectedType::Array);
+            if (scenario.contains("excitations") && scenario["excitations"].is_array()) {
+                for (size_t i = 0; i < scenario["excitations"].size(); ++i) {
+                    const auto& excitation = scenario["excitations"][i];
+                    const std::string eprefix = prefix + ".excitations[" + std::to_string(i) + "]";
+                    if (!excitation.is_object()) {
+                        AddError(eprefix, "Must be an object");
+                        continue;
+                    }
+                    CheckFieldType(excitation, "terminal", eprefix + ".terminal", ExpectedType::String);
+                    CheckFieldType(excitation, "value", eprefix + ".value", ExpectedType::Number);
+                    CheckFieldType(excitation, "floating", eprefix + ".floating", ExpectedType::Boolean);
+                }
+            }
+        });
     }
 
     // "simulation.physics_type" as a string, or "" when absent.
@@ -133,6 +296,30 @@ private:
                 AddError("simulation.solver_max_iter", "Max iterations must be at least 1");
             }
         }
+
+        if (sim.contains("frequency") && sim["frequency"].get<double>() <= 0.0) {
+            AddError("simulation.frequency", "Frequency must be positive");
+        }
+
+        if (sim.contains("export_refine") && sim["export_refine"].get<int>() < 1) {
+            AddError("simulation.export_refine", "Export refinement must be at least 1");
+        }
+
+        if (sim.contains("amr")) {
+            const auto& amr = sim["amr"];
+            if (amr.contains("max_iterations") && amr["max_iterations"].get<int>() < 0) {
+                AddError("simulation.amr.max_iterations", "Maximum iterations cannot be negative");
+            }
+            if (amr.contains("error_fraction")) {
+                const double fraction = amr["error_fraction"];
+                if (fraction <= 0.0 || fraction > 1.0) {
+                    AddError("simulation.amr.error_fraction", "Error fraction must be in (0, 1]");
+                }
+            }
+            if (amr.contains("error_tolerance") && amr["error_tolerance"].get<double>() < 0.0) {
+                AddError("simulation.amr.error_tolerance", "Error tolerance cannot be negative");
+            }
+        }
     }
 
     void ValidateEntityGroups(const json& config, const mfem::Mesh* mesh = nullptr) {
@@ -170,6 +357,9 @@ private:
                 AddError(prefix + ".dim", "Missing required field 'dim'");
             } else {
                 int dim = g["dim"];
+                if (dim != 1 && dim != 2) {
+                    AddError(prefix + ".dim", "Dimension must be 1 (boundary) or 2 (domain)");
+                }
                 is_boundary = (dim == 1);
             }
 
@@ -182,10 +372,12 @@ private:
                 AddError(prefix + ".attribute_ids", "Missing required field 'attribute_ids'");
             } else if (!g["attribute_ids"].is_array()) {
                 AddError(prefix + ".attribute_ids", "Attribute ids must be an array");
-            } else if (mesh) {
-                const int max_attr = is_boundary ? max_bdr : max_dom;
+            } else {
+                const int max_attr = mesh ? (is_boundary ? max_bdr : max_dom) : 0;
                 for (int attr : g["attribute_ids"]) {
-                    if (attr <= 0 || attr > max_attr) {
+                    if (attr <= 0) {
+                        AddError(prefix + ".attribute_ids", "Attributes must be positive integers");
+                    } else if (mesh && attr > max_attr) {
                         AddError(prefix + ".attribute_ids", "Attribute " + std::to_string(attr) +
                                 " is out of range [1, " + std::to_string(max_attr) + "]");
                     }
@@ -280,6 +472,10 @@ private:
                     // Sigma is optional (default 0), but warn if missing
                 }
             }
+
+            if (props.contains("sigma") && props["sigma"].get<double>() < 0.0) {
+                AddError(prefix + ".properties.sigma", "Conductivity cannot be negative");
+            }
         }
     }
 
@@ -338,17 +534,28 @@ private:
             return;
         }
 
+        std::set<std::string> terminal_names;
         for (size_t i = 0; i < terminals.size(); ++i) {
             const auto& t = terminals[i];
             std::string prefix = "terminals[" + std::to_string(i) + "]";
 
-            if (!t.contains("name")) {
+            if (!t.contains("name") || t["name"].get<std::string>().empty()) {
                 AddError(prefix + ".name", "Missing required field 'name'");
+            } else {
+                const std::string name = t["name"];
+                if (!terminal_names.insert(name).second) {
+                    AddError(prefix + ".name", "Duplicate terminal name '" + name + "'");
+                }
             }
 
             std::string excitation = t.value("excitation", "voltage");
             if (excitation != "voltage" && excitation != "current") {
                 AddError(prefix + ".excitation", "Invalid excitation '" + excitation + "'. Must be 'voltage' or 'current'");
+            }
+
+            const std::string conductor = t.value("conductor_type", "massive");
+            if (conductor != "massive" && conductor != "stranded") {
+                AddError(prefix + ".conductor_type", "Invalid conductor_type '" + conductor + "'. Must be 'massive' or 'stranded'");
             }
 
             // Voltage terminals bind to boundary groups; current terminals to domain groups.
@@ -389,9 +596,19 @@ private:
             }
         }
 
+        std::set<std::string> scenario_names;
         for (size_t i = 0; i < scenarios.size(); ++i) {
             const auto& sc = scenarios[i];
             std::string prefix = "scenarios[" + std::to_string(i) + "]";
+
+            if (!sc.contains("name") || sc["name"].get<std::string>().empty()) {
+                AddError(prefix + ".name", "Missing required field 'name'");
+            } else {
+                const std::string name = sc["name"];
+                if (!scenario_names.insert(name).second) {
+                    AddError(prefix + ".name", "Duplicate scenario name '" + name + "'");
+                }
+            }
 
             if (!sc.contains("excitations")) {
                 continue;
@@ -433,6 +650,11 @@ public:
      */
     bool Validate(const json& config, const mfem::Mesh* mesh = nullptr) {
         errors.clear();
+
+        ValidateDocumentTypes(config);
+        if (!errors.empty()) {
+            return false;
+        }
 
         ValidateSimulation(config);
         ValidateEntityGroups(config, mesh);

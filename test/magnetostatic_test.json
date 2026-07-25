@@ -1,19 +1,22 @@
 {
   "simulation": {
-    "physics": "magnetostatics",
+    "physics_type": "magnetostatics",
     "mesh": "test_loop.msh",
     "order": 2,
-    "geometry": "axisymmetric"
+    "geometry_type": "axisymmetric"
   },
+  "entity_groups": [
+    { "name": "Vacuum", "dim": 2, "attribute_ids": [1] },
+    { "name": "Coil_Source", "dim": 2, "attribute_ids": [2] },
+    { "name": "Axis_and_FarField", "dim": 1, "attribute_ids": [1, 2, 3, 4] }
+  ],
   "regions": [
     {
-      "name": "Vacuum",
-      "attribute_ids": [1], 
+      "entity_group": "Vacuum",
       "material": 1
     },
     {
-      "name": "Coil_Source",
-      "attribute_ids": [2],
+      "entity_group": "Coil_Source",
       "material": 2
     }
   ],
@@ -30,7 +33,7 @@
   "boundaries": [
     {
       "name": "Axis_and_FarField",
-      "attribute_ids": [1, 2, 3, 4],
+      "entity_group": "Axis_and_FarField",
       "type": "Dirichlet",
       "value": 0.0
     }
@@ -39,7 +42,7 @@
     {
       "name": "Loop_Current",
       "excitation": "current",
-      "attribute_ids": [2]
+      "entity_group": "Coil_Source"
     }
   ],
   "scenarios": [

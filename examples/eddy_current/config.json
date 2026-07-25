@@ -1,28 +1,31 @@
 {
   "simulation": {
-    "physics": "magnetoquasistatics",
+    "physics_type": "magnetoquasistatics",
     "mesh": "eddy_current.mesh",
     "order": 2,
-    "geometry": "axisymmetric",
+    "geometry_type": "axisymmetric",
     "frequency": 60.0,
     "solver_tolerance": 1e-6,
     "solver_max_iter": 3000,
     "solver_print_level": 1
   },
+  "entity_groups": [
+    { "name": "Air", "dim": 2, "attribute_ids": [1] },
+    { "name": "AluminumConductor", "dim": 2, "attribute_ids": [2] },
+    { "name": "Coil", "dim": 2, "attribute_ids": [3] },
+    { "name": "FarField", "dim": 1, "attribute_ids": [1] }
+  ],
   "regions": [
     {
-      "name": "Air",
-      "attribute_ids": [1],
+      "entity_group": "Air",
       "material": 1
     },
     {
-      "name": "AluminumConductor",
-      "attribute_ids": [2],
+      "entity_group": "AluminumConductor",
       "material": 2
     },
     {
-      "name": "Coil",
-      "attribute_ids": [3],
+      "entity_group": "Coil",
       "material": 3
     }
   ],
@@ -53,13 +56,13 @@
     {
       "name": "ExcitationCoil",
       "excitation": "current",
-      "attribute_ids": [3]
+      "entity_group": "Coil"
     }
   ],
   "boundaries": [
     {
       "name": "FarField",
-      "attribute_ids": [1],
+      "entity_group": "FarField",
       "type": "Dirichlet",
       "value": 0.0
     }

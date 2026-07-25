@@ -133,6 +133,7 @@ if(BUILD_TESTING)
     add_executable(mfem_tests
         test/test_main.cpp
         test/test_axisymmetric_quadrature.cpp
+        test/test_config_validator.cpp
         test/test_input_parser.cpp
         test/test_mqs_port_operator.cpp
         test/test_solvers.cpp

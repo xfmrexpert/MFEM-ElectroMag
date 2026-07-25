@@ -1,24 +1,32 @@
 {
   "simulation": {
-    "physics": "electrostatics",
+    "physics_type": "electrostatics",
     "mesh": "electrostatic_test.msh",
     "order": 2,
-    "geometry": "axisymmetric"
+    "geometry_type": "axisymmetric"
   },
+  "entity_groups": [
+    { "name": "Oil", "dim": 2, "attribute_ids": [1] },
+    { "name": "Pressboard", "dim": 2, "attribute_ids": [2] },
+    { "name": "Copper", "dim": 2, "attribute_ids": [2] },
+    { "name": "High_Voltage", "dim": 1, "attribute_ids": [11, 21, 22] },
+    { "name": "Low_Voltage_GND", "dim": 1, "attribute_ids": [12] },
+    { "name": "Regulating_Windings_GND", "dim": 1, "attribute_ids": [13] },
+    { "name": "Static_Rings_GND", "dim": 1, "attribute_ids": [14, 23, 24] },
+    { "name": "Clamping_Ring_GND", "dim": 1, "attribute_ids": [15, 16] },
+    { "name": "Tank_Wall", "dim": 1, "attribute_ids": [17] }
+  ],
   "regions": [
     {
-      "name": "Oil",
-      "attribute_ids": [1], 
+      "entity_group": "Oil",
       "material": 1
     },
     {
-      "name": "Pressboard",
-      "attribute_ids": [2],
+      "entity_group": "Pressboard",
       "material": 2
     },
     {
-      "name": "Copper",
-      "attribute_ids": [2],
+      "entity_group": "Copper",
       "material": 2
     }
   ],
@@ -40,32 +48,32 @@
     {
       "name": "High_Voltage",
       "excitation": "voltage",
-      "attribute_ids": [11, 21, 22]
+      "entity_group": "High_Voltage"
     },
     {
       "name": "Low_Voltage_GND",
       "excitation": "voltage",
-      "attribute_ids": [12]
+      "entity_group": "Low_Voltage_GND"
     },
     {
       "name": "Regulating_Windings_GND",
       "excitation": "voltage",
-      "attribute_ids": [13]
+      "entity_group": "Regulating_Windings_GND"
     },
     {
       "name": "Static_Rings_GND",
       "excitation": "voltage",
-      "attribute_ids": [14, 23, 24]
+      "entity_group": "Static_Rings_GND"
     },
     {
       "name": "Clamping_Ring_GND",
       "excitation": "voltage",
-      "attribute_ids": [15, 16]
+      "entity_group": "Clamping_Ring_GND"
     },
     {
       "name": "Tank_Wall",
       "excitation": "voltage",
-      "attribute_ids": [17]
+      "entity_group": "Tank_Wall"
     }
   ],
   "scenarios": [

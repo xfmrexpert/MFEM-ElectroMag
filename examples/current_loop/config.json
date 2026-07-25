@@ -1,22 +1,25 @@
 {
   "simulation": {
-    "physics": "magnetostatics",
+    "physics_type": "magnetostatics",
     "mesh": "loop.mesh",
     "order": 2,
-    "geometry": "axisymmetric",
+    "geometry_type": "axisymmetric",
     "solver_tolerance": 1e-12,
     "solver_max_iter": 2000,
     "solver_print_level": 0
   },
+  "entity_groups": [
+    { "name": "Vacuum", "dim": 2, "attribute_ids": [1] },
+    { "name": "Loop", "dim": 2, "attribute_ids": [2] },
+    { "name": "Outer", "dim": 1, "attribute_ids": [1] }
+  ],
   "regions": [
     {
-      "name": "Vacuum",
-      "attribute_ids": [1], 
+      "entity_group": "Vacuum",
       "material": 1
     },
     {
-      "name": "Loop",
-      "attribute_ids": [2],
+      "entity_group": "Loop",
       "material": 2
     }
   ],
@@ -34,13 +37,13 @@
     {
       "name": "LoopCurrent",
       "excitation": "current",
-      "attribute_ids": [2]
+      "entity_group": "Loop"
     }
   ],
   "boundaries": [
     {
       "name": "Outer",
-      "attribute_ids": [1],
+      "entity_group": "Outer",
       "type": "Dirichlet",
       "value": 0.0
     }

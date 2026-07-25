@@ -4,25 +4,20 @@
 #pragma once
 #include <list>
 #include "mfem.hpp"
-#include "json.hpp"
 #include "problem_config.hpp"
 #include "gmsh_results_writer.hpp"
 #include "field_export.hpp"
 #include "matrix_writer.hpp"
 #include "status_reporter.hpp"
 
-using json = nlohmann::json;
-
 /**
  * @brief Base class for physics solvers using MFEM
  *
- * @warning The mesh and config references must outlive this solver instance.
- *          Do not destroy the mesh or config objects before the solver is done.
+ * @warning The mesh reference must outlive this solver instance.
  */
 class PhysicsSolver {
 protected:
     mfem::Mesh &mesh;
-    const json &config_json;
     ProblemConfig config;
 
     std::unique_ptr<mfem::H1_FECollection>    fec;
@@ -345,7 +340,7 @@ public:
     }
 
 public:
-    PhysicsSolver(mfem::Mesh &m, const json &c) : mesh(m), config_json(c) {}
+    PhysicsSolver(mfem::Mesh &m, const ProblemConfig &c) : mesh(m), config(c) {}
 
     // Virtual destructor is essential for unique_ptr polymorphism
     virtual ~PhysicsSolver() = default;

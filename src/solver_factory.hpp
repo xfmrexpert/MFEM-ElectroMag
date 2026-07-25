@@ -10,20 +10,17 @@
 #include <vector>
 #include <stdexcept>
 #include "mfem.hpp"
-#include "json.hpp"
 #include "physics_solver.hpp"
 #include "electrostatic_solver.hpp"
 #include "magnetostatic_solver.hpp"
 #include "magnetoquasistatic_solver.hpp"
-
-using json = nlohmann::json;
 
 /**
  * @brief Factory for creating physics solvers based on simulation type
  */
 class SolverFactory {
 public:
-    using SolverCreator = std::function<std::unique_ptr<PhysicsSolver>(mfem::Mesh&, const json&)>;
+    using SolverCreator = std::function<std::unique_ptr<PhysicsSolver>(mfem::Mesh&, const ProblemConfig&)>;
 
 private:
     std::unordered_map<PhysicsType, SolverCreator> registry;
@@ -31,17 +28,17 @@ private:
     SolverFactory() {
         // Register all available solvers
         Register(PhysicsType::Electrostatics,
-            [](mfem::Mesh& mesh, const json& config) -> std::unique_ptr<PhysicsSolver> {
+            [](mfem::Mesh& mesh, const ProblemConfig& config) -> std::unique_ptr<PhysicsSolver> {
                 return std::make_unique<ElectrostaticSolver>(mesh, config);
             });
         
         Register(PhysicsType::Magnetostatics,
-            [](mfem::Mesh& mesh, const json& config) -> std::unique_ptr<PhysicsSolver> {
+            [](mfem::Mesh& mesh, const ProblemConfig& config) -> std::unique_ptr<PhysicsSolver> {
                 return std::make_unique<MagnetostaticSolver>(mesh, config);
             });
 
         Register(PhysicsType::Magnetoquasistatics,
-            [](mfem::Mesh& mesh, const json& config) -> std::unique_ptr<PhysicsSolver> {
+            [](mfem::Mesh& mesh, const ProblemConfig& config) -> std::unique_ptr<PhysicsSolver> {
                 return std::make_unique<MagnetoquasistaticSolver>(mesh, config);
             });
     }
@@ -66,20 +63,18 @@ public:
 
     /**
      * @brief Create a solver based on the physics formulation
-     * @param physics The physics formulation (from ProblemConfig)
      * @param mesh The mesh object
-     * @param config The JSON configuration
+     * @param config The decoded problem configuration
      * @return Unique pointer to the created solver
      * @throws std::runtime_error if the physics type is not registered
      */
     [[nodiscard]] std::unique_ptr<PhysicsSolver> Create(
-        PhysicsType physics,
         mfem::Mesh& mesh,
-        const json& config) const {
+        const ProblemConfig& config) const {
 
-        auto it = registry.find(physics);
+        auto it = registry.find(config.PhysicsType);
         if (it == registry.end()) {
-            throw std::runtime_error(std::string("Unregistered physics: ") + ToString(physics));
+            throw std::runtime_error(std::string("Unregistered physics: ") + ToString(config.PhysicsType));
         }
         return it->second(mesh, config);
     }

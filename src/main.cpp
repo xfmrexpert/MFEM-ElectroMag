@@ -132,14 +132,14 @@ int main(int argc, char *argv[]) {
             mutable_json["simulation"]["export_refine"] = cli_export_refine;
         }
 
-        ProblemConfig config = parser.GetProblemConfig();
-
-        // 2. Validate Configuration (basic validation before mesh loading)
+        // 2. Validate Configuration (schema and basic semantics before decoding)
         ConfigValidator validator;
         {
             auto operation = reporter.Start("configuration validation");
             validator.ValidateOrThrow(parser.config);
         }
+
+        ProblemConfig config = parser.GetProblemConfig();
 
         // 3. Load Mesh
         std::error_code mesh_ec;
@@ -209,7 +209,7 @@ int main(int argc, char *argv[]) {
         std::unique_ptr<PhysicsSolver> solver;
         {
             auto operation = reporter.Start("solver creation");
-            solver = SolverFactory::Instance().Create(config.PhysicsType, mesh, parser.config);
+            solver = SolverFactory::Instance().Create(mesh, config);
         }
 
         // 6. Execution

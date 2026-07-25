@@ -14,7 +14,6 @@
 #include "axisymmetric_curl_curl_integrator.hpp"
 #include "axisymmetric_lf_integrator.hpp"
 #include "magnetic_field_coefficient.hpp"
-#include "input_parser.hpp"
 #include "boundary_validation.hpp"
 #include "constants.hpp"
 #include "gmsh_results_writer.hpp"
@@ -51,14 +50,10 @@ private:
 	std::vector<AmrIterationInfo> amr_history;
 
 public:
-	MagnetostaticSolver(mfem::Mesh& m, const json& c) : PhysicsSolver(m, c) {}
+	MagnetostaticSolver(mfem::Mesh& m, const ProblemConfig& c) : PhysicsSolver(m, c) {}
 
 	void Setup() override
 	{
-		// Config & solver type
-		InputParser parser(config_json);
-		config = parser.GetProblemConfig();
-
 		int order = config.Order;
 		const int dim = mesh.Dimension();
 
