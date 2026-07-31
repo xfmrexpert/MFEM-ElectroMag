@@ -56,6 +56,55 @@ bool HasError(const ConfigValidator& validator, const std::string& field) {
 
 } // namespace
 
+TEST_CASE("ConfigValidator validates open-current MQS regions",
+		  "[config_validator][mqs][regions]") {
+	SECTION("accepts a conductive open-current region") {
+		json config = ValidMqsConfig();
+		config["materials"][0]["properties"]["sigma"] = 1.0e6;
+		config["regions"][0]["current_constraint"] = "open";
+		config["terminals"] = json::array();
+		config["scenarios"][0]["excitations"] = json::array();
+
+		ConfigValidator validator;
+		REQUIRE(validator.Validate(config));
+	}
+
+	SECTION("rejects unsupported values and physics") {
+		json config = ValidConfig();
+		config["regions"][0]["current_constraint"] = "fixed";
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "regions[0].current_constraint"));
+	}
+
+	SECTION("rejects zero conductivity") {
+		json config = ValidMqsConfig();
+		config["regions"][0]["current_constraint"] = "open";
+		config["terminals"] = json::array();
+		config["scenarios"][0]["excitations"] = json::array();
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "regions[0].current_constraint"));
+	}
+
+	SECTION("rejects overlap with a massive terminal") {
+		json config = ValidMqsConfig();
+		config["materials"][0]["properties"]["sigma"] = 1.0e6;
+		config["regions"][0]["current_constraint"] = "open";
+		config["terminals"] = json::array({
+			{{"name", "Port"}, {"excitation", "current"},
+			 {"conductor_type", "massive"}, {"entity_group", "Domain"}}
+		});
+		config["scenarios"][0]["excitations"] = json::array();
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "regions[0].current_constraint"));
+	}
+}
+
 TEST_CASE("ConfigValidator accepts the canonical schema", "[config_validator]") {
 	ConfigValidator validator;
 	REQUIRE(validator.Validate(ValidConfig()));

@@ -25,6 +25,8 @@ enum class EntityDim { Boundary, Domain };
 
 enum class ConductorType { Massive, Stranded };
 
+enum class RegionCurrentConstraint { None, Open };
+
 struct EntityGroup {
 	EntityDim Dim;              // boundary or domain
 	std::vector<int> AttributeIds;   // mesh attribute ids (boundary or domain, depending on context)
@@ -33,6 +35,7 @@ struct EntityGroup {
 struct Region {
 	std::string EntityGroupName;   // mesh domain (element) group name (validated)
 	int Material = -1;               // index into ProblemConfig::Materials
+	RegionCurrentConstraint CurrentConstraint = RegionCurrentConstraint::None;
 };
 
 // A driven/measured excitation site. Single primitive for both physics

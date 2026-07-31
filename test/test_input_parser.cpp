@@ -39,7 +39,8 @@ json CanonicalConfig() {
             {{"name", "FarField"}, {"dim", 1}, {"attribute_ids", {3}}}
         })},
         {"regions", json::array({
-            {{"entity_group", "Conductor"}, {"material", 1}}
+            {{"entity_group", "Conductor"}, {"material", 1},
+             {"current_constraint", "open"}}
         })},
         {"materials", json::array({
             {{"properties", {{"sigma", 5.8e7}, {"epsilon_r", 2.5}, {"mu_r", 1.2}}}}
@@ -88,6 +89,7 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
     REQUIRE(config.EntityGroups.at("Conductor").Dim == EntityDim::Domain);
     REQUIRE((config.EntityGroups.at("Conductor").AttributeIds == std::vector<int>{1, 2}));
     REQUIRE(config.EntityGroups.at("FarField").Dim == EntityDim::Boundary);
+    REQUIRE(config.Regions[0].CurrentConstraint == RegionCurrentConstraint::Open);
     REQUIRE(config.Regions.size() == 1);
     REQUIRE(config.Regions[0].EntityGroupName == "Conductor");
     REQUIRE(config.Regions[0].Material == 0);

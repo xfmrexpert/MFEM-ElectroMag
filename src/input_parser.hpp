@@ -386,6 +386,9 @@ private:
                 if (region.contains("material")) {
                     _region.Material = (int)region["material"] - 1; // Convert 1-based to 0-based
                 }
+                if (region.value("current_constraint", std::string{}) == "open") {
+                    _region.CurrentConstraint = RegionCurrentConstraint::Open;
+                }
                 regions.push_back(_region);
             }
         }

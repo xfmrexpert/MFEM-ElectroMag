@@ -1166,6 +1166,66 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     fs::remove(mesh_file);
 }
 
+TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
+          "[solvers][mqs][coupling][regions]") {
+    const std::string mesh_file = "test_mqs_open_current_region.mesh";
+    const std::string inductance_file = "inductance_matrix_point_1000Hz.csv";
+    const std::string resistance_file = "resistance_matrix_point_1000Hz.csv";
+    CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 4, 1, 2);
+
+    json config = MakePlanarStripConfig(
+        "magnetoquasistatics", mesh_file, 1,
+        {{"mu_r", 1.0}, {"sigma", 1.0e6}}, 0.0, 0.0);
+    config["simulation"]["analysis_type"] = "coupling_matrix";
+    config["scenarios"] = json::array({
+        {{"name", "point"}, {"frequency", 1000.0}, {"excitations", json::array()}}
+    });
+    config["entity_groups"].push_back(
+        {{"name", "DriveDomain"}, {"dim", 2}, {"attribute_ids", {1}}});
+    config["entity_groups"].push_back(
+        {{"name", "PassiveDomain"}, {"dim", 2}, {"attribute_ids", {2}}});
+    config["regions"] = json::array({
+        {{"name", "DriveRegion"}, {"entity_group", "DriveDomain"}, {"material", 1}},
+        {{"name", "PassiveRegion"}, {"entity_group", "PassiveDomain"}, {"material", 1}}
+    });
+    config["terminals"] = json::array({
+        {{"name", "Drive"}, {"excitation", "current"},
+         {"conductor_type", "massive"}, {"entity_group", "DriveDomain"}}
+    });
+
+    mfem::Mesh baseline_mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver baseline_solver(baseline_mesh, DecodeConfig(config));
+    baseline_solver.Setup();
+    baseline_solver.Run();
+    baseline_solver.SaveAnalysis();
+    const CsvMatrix baseline_inductance = ReadCsvMatrix(inductance_file);
+    const CsvMatrix baseline_resistance = ReadCsvMatrix(resistance_file);
+
+    config["regions"][1]["current_constraint"] = "open";
+    mfem::Mesh constrained_mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver constrained_solver(constrained_mesh, DecodeConfig(config));
+    constrained_solver.Setup();
+    constrained_solver.Run();
+    constrained_solver.SaveAnalysis();
+    const CsvMatrix constrained_inductance = ReadCsvMatrix(inductance_file);
+    const CsvMatrix constrained_resistance = ReadCsvMatrix(resistance_file);
+
+    const std::vector<std::string> expected_labels{"Drive"};
+    REQUIRE(constrained_inductance.labels == expected_labels);
+    REQUIRE(constrained_resistance.labels == expected_labels);
+    REQUIRE(constrained_inductance.values.size() == 1);
+    REQUIRE(constrained_resistance.values.size() == 1);
+    const double inductance_change = std::abs(
+        constrained_inductance.values[0][0] - baseline_inductance.values[0][0]);
+    const double resistance_change = std::abs(
+        constrained_resistance.values[0][0] - baseline_resistance.values[0][0]);
+    REQUIRE(inductance_change + resistance_change > 1e-12);
+
+    fs::remove(resistance_file);
+    fs::remove(inductance_file);
+    fs::remove(mesh_file);
+}
+
 TEST_CASE("AMR refines an axisymmetric coax and stays conforming", "[solvers][amr]") {
     const std::string mesh_file = "test_amr_coax.mesh";
     CreateCoaxMesh(mesh_file, /*r_inner=*/1.0, /*r_outer=*/4.0,

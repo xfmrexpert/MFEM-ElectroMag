@@ -54,6 +54,11 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
         std::unique_ptr<mfem::DenseMatrix> Resistance;
         std::unique_ptr<mfem::DenseMatrix> Inductance;
     };
+    struct MassivePortDefinition {
+        std::string Name;
+        std::vector<int> AttributeIds;
+        double Conductivity;
+    };
     std::vector<CouplingResult> coupling_results;
     mfem::DenseMatrix* resistance_matrix = nullptr;
     mfem::DenseMatrix* inductance_matrix = nullptr;
@@ -243,24 +248,34 @@ public:
 
         const int n_dofs = fespace->GetTrueVSize();
 
-        // N_Ports = massive terminals only
-        int n_ports = 0;
-        for (const auto& [name, term] : config.Terminals)
-            if (term.Conductor == ConductorType::Massive) ++n_ports;
-
-        // One load vector + self-admittance diagonal entry per massive port.
-        std::vector<std::unique_ptr<mfem::Vector>> port_loads;
-        port_loads.reserve(n_ports);
-        port_conductances.clear();
-        port_conductances.reserve(n_ports);
+        std::vector<MassivePortDefinition> massive_ports;
+        massive_ports.reserve(config.Terminals.size() + config.Regions.size());
         for (const auto& [term_name, term] : config.Terminals) {
-            if (term.Conductor != ConductorType::Massive) continue;   // skip stranded
+            if (term.Conductor != ConductorType::Massive) continue;
             const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
-            std::vector<int> attribute_ids = group.AttributeIds;
-            double conductivity = TerminalConductivity(term);
-            port_loads.push_back(BuildPortVector(fespace.get(), attribute_ids, conductivity));
-            double G_dc = ComputePortConductance(attribute_ids, conductivity);
-            MFEM_VERIFY(G_dc > 0.0, "Massive port '" + term_name + "' has zero conductance.");
+            massive_ports.push_back(
+                { term_name, group.AttributeIds, TerminalConductivity(term) });
+        }
+        for (const Region& region : config.Regions) {
+            if (region.CurrentConstraint != RegionCurrentConstraint::Open) continue;
+            const EntityGroup& group = config.EntityGroups.at(region.EntityGroupName);
+            massive_ports.push_back({ region.EntityGroupName, group.AttributeIds,
+                config.Materials[region.Material].Conductivity });
+        }
+
+        // Explicit massive terminals come first so their solved voltage indices
+        // retain terminal order. Passive open-current regions follow and receive
+        // an identically zero current RHS in every scenario.
+        std::vector<std::unique_ptr<mfem::Vector>> port_loads;
+        port_loads.reserve(massive_ports.size());
+        port_conductances.clear();
+        port_conductances.reserve(massive_ports.size());
+        for (const MassivePortDefinition& port : massive_ports) {
+            port_loads.push_back(
+                BuildPortVector(fespace.get(), port.AttributeIds, port.Conductivity));
+            double G_dc = ComputePortConductance(port.AttributeIds, port.Conductivity);
+            MFEM_VERIFY(G_dc > 0.0,
+                "Massive port '" + port.Name + "' has zero conductance.");
             port_conductances.push_back(G_dc);
         }
 

@@ -158,6 +158,7 @@ private:
         CheckObjectArrayTypes(config, "regions", [&](const json& region, const std::string& prefix) {
             CheckFieldType(region, "entity_group", prefix + ".entity_group", ExpectedType::String);
             CheckFieldType(region, "material", prefix + ".material", ExpectedType::Integer);
+            CheckFieldType(region, "current_constraint", prefix + ".current_constraint", ExpectedType::String);
         });
 
         CheckObjectArrayTypes(config, "materials", [&](const json& material, const std::string& prefix) {
@@ -410,6 +411,30 @@ private:
             num_materials = config["materials"].size();
         }
 
+        auto group_attributes = [&](const std::string& name) {
+            std::set<int> attributes;
+            if (!config.contains("entity_groups") || !config["entity_groups"].is_array()) {
+                return attributes;
+            }
+            for (const auto& group : config["entity_groups"]) {
+                if (group.value("name", std::string{}) != name) continue;
+                for (int attribute : group["attribute_ids"]) attributes.insert(attribute);
+                break;
+            }
+            return attributes;
+        };
+
+        std::set<int> massive_terminal_attributes;
+        if (config.contains("terminals") && config["terminals"].is_array()) {
+            for (const auto& terminal : config["terminals"]) {
+                if (terminal.value("conductor_type", "massive") != "massive" ||
+                    !terminal.contains("entity_group")) continue;
+                const auto attributes = group_attributes(terminal["entity_group"]);
+                massive_terminal_attributes.insert(attributes.begin(), attributes.end());
+            }
+        }
+        std::set<int> constrained_attributes;
+
         for (size_t i = 0; i < regions.size(); ++i) {
             const auto& reg = regions[i];
             std::string prefix = "regions[" + std::to_string(i) + "]";
@@ -429,6 +454,47 @@ private:
                              " is out of range [1, " + std::to_string(num_materials) + "]");
                 }
             }
+
+            if (!reg.contains("current_constraint")) continue;
+            const std::string constraint = reg["current_constraint"];
+            if (constraint != "open") {
+                AddError(prefix + ".current_constraint",
+                    "Invalid current constraint '" + constraint + "'. Must be 'open'");
+                continue;
+            }
+            if (PhysicsType(config) != "magnetoquasistatics") {
+                AddError(prefix + ".current_constraint",
+                    "Region current constraints are supported only for magnetoquasistatics");
+            }
+
+            const int material = reg.contains("material")
+                ? reg["material"].get<int>() - 1 : -1;
+            if (material >= 0 && material < static_cast<int>(num_materials) &&
+                config["materials"][material].contains("properties") &&
+                config["materials"][material]["properties"].is_object()) {
+                const auto& properties = config["materials"][material]["properties"];
+                const double conductivity = properties.value("sigma", 0.0);
+                if (!std::isfinite(conductivity) || conductivity <= 0.0) {
+                    AddError(prefix + ".current_constraint",
+                        "An open-current region requires a material with positive conductivity");
+                }
+            }
+
+            const auto attributes = reg.contains("entity_group")
+                ? group_attributes(reg["entity_group"]) : std::set<int>{};
+            for (int attribute : attributes) {
+                if (massive_terminal_attributes.count(attribute) != 0) {
+                    AddError(prefix + ".current_constraint",
+                        "Open-current region overlaps an explicit massive terminal");
+                    break;
+                }
+                if (constrained_attributes.count(attribute) != 0) {
+                    AddError(prefix + ".current_constraint",
+                        "Open-current region overlaps another open-current region");
+                    break;
+                }
+            }
+            constrained_attributes.insert(attributes.begin(), attributes.end());
         }
     }
 
