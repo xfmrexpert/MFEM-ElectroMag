@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <cmath>
 #include <stdexcept>
 #include <functional>
 #include "json.hpp"
@@ -106,7 +107,6 @@ private:
             CheckFieldType(sim, "physics_type", "simulation.physics_type", ExpectedType::String);
             CheckFieldType(sim, "geometry_type", "simulation.geometry_type", ExpectedType::String);
             CheckFieldType(sim, "analysis_type", "simulation.analysis_type", ExpectedType::String);
-            CheckFieldType(sim, "frequency", "simulation.frequency", ExpectedType::Number);
             CheckFieldType(sim, "mesh", "simulation.mesh", ExpectedType::String);
             CheckFieldType(sim, "order", "simulation.order", ExpectedType::Integer);
             CheckFieldType(sim, "solver_tolerance", "simulation.solver_tolerance", ExpectedType::Number);
@@ -187,6 +187,18 @@ private:
         CheckObjectArrayTypes(config, "scenarios", [&](const json& scenario, const std::string& prefix) {
             CheckFieldType(scenario, "name", prefix + ".name", ExpectedType::String);
             CheckFieldType(scenario, "excitations", prefix + ".excitations", ExpectedType::Array);
+            if (scenario.contains("frequency")) {
+                const auto& frequency = scenario["frequency"];
+                if (frequency.is_object()) {
+                    CheckFieldType(frequency, "scale", prefix + ".frequency.scale", ExpectedType::String);
+                    CheckFieldType(frequency, "start", prefix + ".frequency.start", ExpectedType::Number);
+                    CheckFieldType(frequency, "stop", prefix + ".frequency.stop", ExpectedType::Number);
+                    CheckFieldType(frequency, "points", prefix + ".frequency.points", ExpectedType::Integer);
+                }
+                else if (!frequency.is_number()) {
+                    AddError(prefix + ".frequency", "Must be a number or a sweep object");
+                }
+            }
             if (scenario.contains("excitations") && scenario["excitations"].is_array()) {
                 for (size_t i = 0; i < scenario["excitations"].size(); ++i) {
                     const auto& excitation = scenario["excitations"][i];
@@ -250,9 +262,9 @@ private:
                 AddError("simulation.physics_type", "Invalid physics_type '" + type + "'. Must be 'electrostatics', 'magnetostatics', or 'magnetoquasistatics'");
             }
 
-            // Physics-specific requirements
-            if (type == "magnetoquasistatics" && !sim.contains("frequency")) {
-                AddError("simulation.frequency", "Magnetoquasistatic simulations require 'frequency' field");
+            if (type == "magnetoquasistatics" && sim.contains("frequency")) {
+                AddError("simulation.frequency",
+                    "Unsupported for magnetoquasistatics; define 'frequency' on each scenario");
             }
         }
 
@@ -295,10 +307,6 @@ private:
             if (max_iter < 1) {
                 AddError("simulation.solver_max_iter", "Max iterations must be at least 1");
             }
-        }
-
-        if (sim.contains("frequency") && sim["frequency"].get<double>() <= 0.0) {
-            AddError("simulation.frequency", "Frequency must be positive");
         }
 
         if (sim.contains("export_refine") && sim["export_refine"].get<int>() < 1) {
@@ -571,12 +579,20 @@ private:
 
     void ValidateScenarios(const json& config, const mfem::Mesh* mesh = nullptr) {
         if (!config.contains("scenarios")) {
+            if (PhysicsType(config) == "magnetoquasistatics") {
+                AddError("scenarios", "Magnetoquasistatic simulations require at least one frequency scenario");
+            }
             return;
         }
 
         const auto& scenarios = config["scenarios"];
         if (!scenarios.is_array()) {
             AddError("scenarios", "Scenarios must be an array");
+            return;
+        }
+        const bool is_mqs = PhysicsType(config) == "magnetoquasistatics";
+        if (is_mqs && scenarios.empty()) {
+            AddError("scenarios", "Magnetoquasistatic simulations require at least one frequency scenario");
             return;
         }
 
@@ -607,6 +623,50 @@ private:
                 const std::string name = sc["name"];
                 if (!scenario_names.insert(name).second) {
                     AddError(prefix + ".name", "Duplicate scenario name '" + name + "'");
+                }
+            }
+
+            if (is_mqs) {
+                if (!sc.contains("frequency")) {
+                    AddError(prefix + ".frequency",
+                        "Missing required MQS scenario field 'frequency'");
+                }
+                else if (sc["frequency"].is_number()) {
+                    const double frequency = sc["frequency"].get<double>();
+                    if (!std::isfinite(frequency) || frequency <= 0.0) {
+                        AddError(prefix + ".frequency", "Frequency must be finite and positive");
+                    }
+                }
+                else if (sc["frequency"].is_object()) {
+                    const auto& sweep = sc["frequency"];
+                    const bool complete = sweep.contains("scale") && sweep.contains("start")
+                        && sweep.contains("stop") && sweep.contains("points");
+                    if (!complete) {
+                        AddError(prefix + ".frequency",
+                            "Sweep requires 'scale', 'start', 'stop', and 'points'");
+                    }
+                    else {
+                        const std::string scale = sweep["scale"];
+                        const double start = sweep["start"];
+                        const double stop = sweep["stop"];
+                        const int points = sweep["points"];
+                        if (scale != "linear" && scale != "log") {
+                            AddError(prefix + ".frequency.scale",
+                                "Must be 'linear' or 'log'");
+                        }
+                        if (!std::isfinite(start) || start <= 0.0) {
+                            AddError(prefix + ".frequency.start", "Must be finite and positive");
+                        }
+                        if (!std::isfinite(stop) || stop <= 0.0) {
+                            AddError(prefix + ".frequency.stop", "Must be finite and positive");
+                        }
+                        if (std::isfinite(start) && std::isfinite(stop) && stop < start) {
+                            AddError(prefix + ".frequency.stop", "Must be greater than or equal to start");
+                        }
+                        if (points < 1) {
+                            AddError(prefix + ".frequency.points", "Must be at least 1");
+                        }
+                    }
                 }
             }
 

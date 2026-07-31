@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <cctype>
+#include <iomanip>
 #include <memory> // Required for smart pointers
+#include <sstream>
 #include "mfem.hpp"
 #include "physics_solver.hpp"
 #include "axisymmetric_curl_curl_integrator.hpp"
@@ -22,8 +25,8 @@
 
 class MagnetoquasistaticSolver : public PhysicsSolver {
 
-    double frequency = 60.0;
-    mfem::real_t omega = Constants::TWO_PI * frequency;
+    double frequency = 0.0;
+    mfem::real_t omega = 0.0;
     
     // Complex system objects. S_AA owns the real/imag field matrices referenced
     // by port_operator, so it is declared first and outlives that operator.
@@ -37,14 +40,23 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
 
     // Coefficients
     std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;
-    std::unique_ptr<mfem::PWConstCoefficient> omega_sigma_coeff;
+    std::unique_ptr<mfem::PWConstCoefficient> sigma_coeff;
     std::unique_ptr<mfem::PWConstCoefficient> j_coeff;     
+    mfem::Vector conductivity_values;
+    std::vector<mfem::real_t> port_conductances;
     
     mfem::Array<int> ess_mesh_tdofs;   // scalar-space essential mesh true DOFs
     std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
 
-    std::unique_ptr<mfem::DenseMatrix> resistance_matrix;
-    std::unique_ptr<mfem::DenseMatrix> inductance_matrix;
+    struct CouplingResult {
+        std::string Name;
+        double Frequency;
+        std::unique_ptr<mfem::DenseMatrix> Resistance;
+        std::unique_ptr<mfem::DenseMatrix> Inductance;
+    };
+    std::vector<CouplingResult> coupling_results;
+    mfem::DenseMatrix* resistance_matrix = nullptr;
+    mfem::DenseMatrix* inductance_matrix = nullptr;
 
     // Material property pickers for MaterialVector, named instead of inlined as
     // lambdas so the Setup() coefficient construction reads at a glance.
@@ -166,7 +178,9 @@ public:
         int order = config.Order;
         const int dim = mesh.Dimension();
 
-        frequency = config.Frequency;
+        MFEM_VERIFY(!config.Scenarios.empty(),
+            "Magnetoquasistatic simulations require at least one frequency scenario.");
+        frequency = config.Scenarios.front().second.Frequency;
         omega = Constants::TWO_PI * frequency;
 
         // Axisymmetric or Planar
@@ -179,10 +193,10 @@ public:
         // Real part: reluctivity nu = 1/mu.
         nu_coeff = MaterialCoefficient(1.0 / Constants::MU_0, Reluctivity);
 
-        // Imag part: omega * sigma (raw conductivity scaled by omega before wrapping).
-        mfem::Vector omega_sigma = MaterialVector(0.0, Conductivity);
-        omega_sigma *= omega;
-        omega_sigma_coeff = std::make_unique<mfem::PWConstCoefficient>(omega_sigma);
+        // Assemble conductivity without frequency scaling so the mass matrix can
+        // be reused at every sweep point.
+        conductivity_values = MaterialVector(0.0, Conductivity);
+        sigma_coeff = std::make_unique<mfem::PWConstCoefficient>(conductivity_values);
 
         auto bcs = BuildClosureBcs();
 
@@ -236,9 +250,9 @@ public:
 
         // One load vector + self-admittance diagonal entry per massive port.
         std::vector<std::unique_ptr<mfem::Vector>> port_loads;
-        std::vector<mfem::real_t> conductance_over_omega_diag;
         port_loads.reserve(n_ports);
-        conductance_over_omega_diag.reserve(n_ports);
+        port_conductances.clear();
+        port_conductances.reserve(n_ports);
         for (const auto& [term_name, term] : config.Terminals) {
             if (term.Conductor != ConductorType::Massive) continue;   // skip stranded
             const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
@@ -247,14 +261,14 @@ public:
             port_loads.push_back(BuildPortVector(fespace.get(), attribute_ids, conductivity));
             double G_dc = ComputePortConductance(attribute_ids, conductivity);
             MFEM_VERIFY(G_dc > 0.0, "Massive port '" + term_name + "' has zero conductance.");
-            conductance_over_omega_diag.push_back(-G_dc / omega);
+            port_conductances.push_back(G_dc);
         }
 
         // Hand the field matrices and port data to the block-system owner, which
         // assembles the complex saddle-point operator and owns all the wiring.
         port_operator = std::make_unique<MqsMassivePortOperator>(
             n_dofs, K.SpMat(), M_sigma.SpMat(), std::move(port_loads),
-            conductance_over_omega_diag);
+            port_conductances, omega);
 
         fespace->GetEssentialTrueDofs(ess_bdr, ess_mesh_tdofs);   // indices in [0, N_DOFs)
 
@@ -277,14 +291,23 @@ public:
 
 	mfem::BilinearFormIntegrator* MakeMassIntegrator() {
 		if (geometry == GeometryType::Axisymmetric) {
-			return new AxisymmetricMassIntegrator(*omega_sigma_coeff);
+            return new AxisymmetricMassIntegrator(*sigma_coeff);
 		}
 		else {
-			return new mfem::MassIntegrator(*omega_sigma_coeff);
+            return new mfem::MassIntegrator(*sigma_coeff);
 		}
 	}
 
+    void ActivateFrequency(const Scenario& sc) {
+        MFEM_VERIFY(std::isfinite(sc.Frequency) && sc.Frequency > 0.0,
+            "MQS scenario frequency must be finite and positive.");
+        frequency = sc.Frequency;
+        omega = Constants::TWO_PI * frequency;
+        port_operator->SetOmega(omega);
+    }
+
     void ImprintScenario(const Scenario& sc) {
+        ActivateFrequency(sc);
         *A = 0.0;
 
         // Re-apply non-zero essential (closure) BC values on this mesh's A.
@@ -341,23 +364,33 @@ public:
         LiftEssentialInto(*x_combined);
     }
 
-    // Solve + save on the CURRENT mesh/operators. Both analysis types flow through
-    // ONE imprint -> solve -> save loop over BuildSolveScenarios() (authored
-    // scenarios for Field; synthetic per-terminal unit-current drives for
-    // CouplingMatrix). The base AMR lifecycle calls this once on the final mesh.
+    // Solve + save on the CURRENT mesh/operators. Field analysis performs one
+    // solve per concrete scenario. Coupling analysis uses each authored scenario
+    // as a frequency point and synthesizes one unit-current solve per terminal.
     void RunOnCurrentMesh() override {
         PrepareAnalysis();
 
-        for (const auto& [name, scenario] : BuildSolveScenarios()) {
-            auto operation = Reporter().Start("scenario '" + name + "'");
-            ImprintScenario(scenario);
-            SolveSystem();
-
-            if (config.AnalysisType == AnalysisType::CouplingMatrix) {
-                GatherCouplingColumn(scenario);
-            }
-            else {
+        if (config.AnalysisType == AnalysisType::Field) {
+            for (const auto& [name, scenario] : config.Scenarios) {
+                auto operation = Reporter().Start("scenario '" + name + "'");
+                ImprintScenario(scenario);
+                SolveSystem();
                 SaveScenario(name);
+            }
+            return;
+        }
+
+        for (const auto& [point_name, point] : config.Scenarios) {
+            BeginCouplingPoint(point_name, point.Frequency);
+            for (const auto& [term_name, term] : config.Terminals) {
+                Scenario column;
+                column.Frequency = point.Frequency;
+                column.Excitations.push_back({ term_name, 1.0 });
+                auto operation = Reporter().Start(
+                    "scenario '" + point_name + "', terminal '" + term_name + "'");
+                ImprintScenario(column);
+                SolveSystem();
+                GatherCouplingColumn(column);
             }
         }
     }
@@ -416,7 +449,8 @@ public:
         estimator_im.SetWithCoeff(false);     // flux = nu * grad(A)
         estimator_im.SetFluxAveraging(1);    // do not average across attribute interfaces
 
-        return EstimateScenarioMaximumError(combined,
+        const auto amr_scenarios = BuildAmrSolveScenarios();
+        return EstimateScenarioMaximumErrorOver(amr_scenarios, combined,
             [this](const Scenario& scenario) {
                 ImprintScenario(scenario);
                 SolveSystem();
@@ -431,6 +465,24 @@ public:
                     current(k) = std::hypot(errs_re(k), errs_im(k));
                 }
             });
+    }
+
+    std::vector<std::pair<std::string, Scenario>> BuildAmrSolveScenarios() const {
+        if (config.AnalysisType == AnalysisType::Field) {
+            return config.Scenarios;
+        }
+
+        std::vector<std::pair<std::string, Scenario>> scenarios;
+        scenarios.reserve(config.Scenarios.size() * config.Terminals.size());
+        for (const auto& [point_name, point] : config.Scenarios) {
+            for (const auto& [term_name, term] : config.Terminals) {
+                Scenario column;
+                column.Frequency = point.Frequency;
+                column.Excitations.push_back({ term_name, 1.0 });
+                scenarios.emplace_back(point_name + "_" + term_name, std::move(column));
+            }
+        }
+        return scenarios;
     }
 
     // Peak flux density |B| over the current solution *A, sampled at element
@@ -543,15 +595,26 @@ public:
                     "' must be a Current terminal.");
             }
 
-            const int num_terminals = static_cast<int>(config.Terminals.size());
-            resistance_matrix =
-                std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
-            inductance_matrix =
-                std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
-            *resistance_matrix = 0.0;
-            *inductance_matrix = 0.0;
+            coupling_results.clear();
+            coupling_results.reserve(config.Scenarios.size());
+            resistance_matrix = nullptr;
+            inductance_matrix = nullptr;
 		}
 	}
+
+    void BeginCouplingPoint(const std::string& name, double point_frequency) {
+        const int num_terminals = static_cast<int>(config.Terminals.size());
+        CouplingResult result;
+        result.Name = name;
+        result.Frequency = point_frequency;
+        result.Resistance = std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
+        result.Inductance = std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
+        *result.Resistance = 0.0;
+        *result.Inductance = 0.0;
+        coupling_results.push_back(std::move(result));
+        resistance_matrix = coupling_results.back().Resistance.get();
+        inductance_matrix = coupling_results.back().Inductance.get();
+    }
 
     void SaveAnalysis() override
 	{
@@ -561,16 +624,36 @@ public:
 	}
 
 	void WriteCouplingMatrix() {
-        if (!resistance_matrix || !inductance_matrix) {
+        if (coupling_results.empty()) {
             Reporter().Warning("WriteCouplingMatrix: MQS coupling matrices not computed.");
             return;
         }
 
-        SaveCouplingMatrix(*inductance_matrix,
-            "Inductance Matrix [H]", "inductance_matrix.csv");
-        SaveCouplingMatrix(*resistance_matrix,
-            "Resistance Matrix [Ohm]", "resistance_matrix.csv");
+        for (const CouplingResult& result : coupling_results) {
+            const std::string frequency_label = FrequencyOutputToken(result.Frequency) + "Hz";
+            const std::string output_tag = SafeOutputToken(result.Name) + "_" + frequency_label;
+            SaveCouplingMatrix(*result.Inductance,
+                "Inductance Matrix at " + frequency_label + " [H]",
+                "inductance_matrix_" + output_tag + ".csv");
+            SaveCouplingMatrix(*result.Resistance,
+                "Resistance Matrix at " + frequency_label + " [Ohm]",
+                "resistance_matrix_" + output_tag + ".csv");
+        }
 	}
+
+    static std::string SafeOutputToken(std::string value) {
+        for (char& c : value) {
+            const unsigned char uc = static_cast<unsigned char>(c);
+            if (!std::isalnum(uc) && c != '-' && c != '_') c = '_';
+        }
+        return value;
+    }
+
+    static std::string FrequencyOutputToken(double value) {
+        std::ostringstream stream;
+        stream << std::setprecision(12) << value;
+        return SafeOutputToken(stream.str());
+    }
 
 	double TerminalConductivity(const Terminal& term) const {
 		// First domain attribute of the terminal's group that a region claims

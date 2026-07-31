@@ -87,7 +87,7 @@ TEST_CASE("MQS massive-port operator preserves the coupled block equation", "[mq
 	port_loads.push_back(std::move(load));
 
 	MqsMassivePortOperator coupled(
-		2, *K, *M, std::move(port_loads), { -0.25 });
+		2, *K, *M, std::move(port_loads), { 0.25 }, 1.0);
 
 	mfem::Vector x(coupled.Layout().FullSize());
 	x(0) = 1.0;
@@ -114,7 +114,7 @@ TEST_CASE("MQS massive-port operator degenerates to the complex field operator",
 	auto M = DiagonalMatrix({ 5.0, 7.0 });
 	std::vector<std::unique_ptr<mfem::Vector>> no_port_loads;
 
-	MqsMassivePortOperator coupled(2, *K, *M, std::move(no_port_loads), {});
+	MqsMassivePortOperator coupled(2, *K, *M, std::move(no_port_loads), {}, 1.0);
 
 	mfem::Vector x(coupled.Layout().FullSize());
 	x(0) = 1.0;

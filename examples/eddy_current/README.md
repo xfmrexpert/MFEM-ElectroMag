@@ -10,7 +10,8 @@ This example demonstrates time-harmonic eddy current analysis for a conducting c
 - Axisymmetric configuration
 
 **Physics:**
-- Frequency: f = 60 Hz (power frequency)
+- Frequency sweep: f = 10 Hz to 1 kHz (five logarithmically spaced points)
+- The 60 Hz calculations below provide a power-frequency reference
 - Angular frequency: ω = 2πf = 377 rad/s
 - Conductor: Aluminum (σ = 3.5 × 10⁷ S/m, μᵣ = 1.0)
 - Coil: Copper (J_source = 1 × 10⁵ A/m²)
@@ -143,11 +144,27 @@ Inside conductor:
 
 ## Frequency Sweep
 
-Modify config to study frequency dependence:
+Each MQS scenario requires either a positive scalar frequency or an inclusive
+linear/logarithmic range. The example uses:
 
 ```json
-"frequency": [10, 60, 400, 1000]
+"frequency": {
+  "scale": "log",
+  "start": 10.0,
+  "stop": 1000.0,
+  "points": 5
+}
 ```
+
+Use `"scale": "linear"` for uniform spacing. Both endpoints are included;
+`"points": 1` solves only `start`. The excitation list is copied to every
+expanded frequency point, and output scenario names include the point and
+frequency.
+
+For a coupling-matrix sweep, set `"analysis_type": "coupling_matrix"` and
+provide one or more frequency scenarios. Terminal excitations in those
+scenarios are ignored because the solver synthesizes each unit-current column;
+each frequency receives its own labeled resistance and inductance CSV files.
 
 **Expected trends:**
 - Higher f → smaller δ (stronger skin effect)

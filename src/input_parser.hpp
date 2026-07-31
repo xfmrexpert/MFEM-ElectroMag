@@ -14,6 +14,9 @@
 #include <filesystem> // C++17
 #include <iterator>
 #include <cctype>
+#include <cmath>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 
 using json = nlohmann::json;
@@ -64,7 +67,6 @@ private:
 		prob_config.PhysicsType = GetPhysicsType();
 		prob_config.GeometryType = GetGeometryType();
 		prob_config.AnalysisType = GetAnalysisType();
-		prob_config.Frequency = GetFrequency();
 		prob_config.MeshPath = GetMeshPath();
 
 		prob_config.EntityGroups = GetEntityGroups();
@@ -202,14 +204,6 @@ private:
             }
         }
         return ::AnalysisType::Field; // Default
-    }
-
-    [[nodiscard]] double GetFrequency() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("frequency")) {
-            return config["simulation"]["frequency"];
-        }
-        return 60.0; // Default (MQS only; ignored by ES/MS)
     }
 
     [[nodiscard]] int GetOrder() const {
@@ -448,29 +442,82 @@ private:
     // --------------------------------------------------------
     // Scenarios (one solve each: parameters + per-terminal excitations)
     // --------------------------------------------------------
+    static std::string SweepScenarioName(const std::string& base_name,
+                                         int point,
+                                         double frequency) {
+        std::ostringstream value;
+        value << std::setprecision(12) << frequency;
+        std::string token = value.str();
+        for (char& c : token) {
+            if (c == '.') c = 'p';
+            else if (c == '+') c = '_';
+            else if (c == '-') c = 'm';
+        }
+        return base_name + "_f" + std::to_string(point + 1) + "_" + token + "Hz";
+    }
+
+    static Scenario ParseScenarioExcitations(const json& source) {
+        Scenario scenario;
+        if (source.contains("excitations")) {
+            for (const auto& d : source["excitations"]) {
+                Excitation excitation;
+                if (d.contains("terminal")) {
+                    excitation.TerminalName = d["terminal"];
+                }
+                excitation.Value = d.value("value", 0.0);
+                excitation.Floating = d.value("floating", false);
+                scenario.Excitations.push_back(excitation);
+            }
+        }
+        return scenario;
+    }
+
     std::vector<std::pair<std::string, Scenario>> GetScenarios() const {
         std::vector<std::pair<std::string, Scenario>> scenarios;
 
         if (config.contains("scenarios")) {
-            for (auto &sc : config["scenarios"]) {
-                Scenario scenario;
-                std::string name;
-                if (sc.contains("name")) {
-                    name = sc["name"];
+            const bool is_mqs = GetPhysicsType() == PhysicsType::Magnetoquasistatics;
+            for (const auto& sc : config["scenarios"]) {
+                const std::string name = sc.value("name", "");
+                Scenario scenario = ParseScenarioExcitations(sc);
+
+                if (!is_mqs || !sc.contains("frequency")) {
+                    scenarios.emplace_back(name, std::move(scenario));
+                    continue;
                 }
 
-                if (sc.contains("excitations")) {
-                    for (auto &d : sc["excitations"]) {
-                        Excitation excitation;
-                        if (d.contains("terminal")) {
-                            excitation.TerminalName = d["terminal"];
-                        }
-                        excitation.Value = d.value("value", 0.0);
-                        excitation.Floating = d.value("floating", false);
-                        scenario.Excitations.push_back(excitation);
-                    }
+                const auto& frequency = sc["frequency"];
+                if (frequency.is_number()) {
+                    scenario.Frequency = frequency.get<double>();
+                    scenarios.emplace_back(name, std::move(scenario));
+                    continue;
                 }
-                scenarios.emplace_back(std::move(name), std::move(scenario));
+
+                const std::string scale = frequency.at("scale").get<std::string>();
+                const double start = frequency.at("start").get<double>();
+                const double stop = frequency.at("stop").get<double>();
+                const int points = frequency.at("points").get<int>();
+                const double log_start = std::log(start);
+                const double log_stop = std::log(stop);
+
+                for (int i = 0; i < points; ++i) {
+                    Scenario point_scenario = scenario;
+                    if (points == 1) {
+                        point_scenario.Frequency = start;
+                    }
+                    else if (i == points - 1) {
+                        point_scenario.Frequency = stop;
+                    }
+                    else {
+                        const double fraction = static_cast<double>(i) / (points - 1);
+                        point_scenario.Frequency = scale == "log"
+                            ? std::exp(log_start + fraction * (log_stop - log_start))
+                            : start + fraction * (stop - start);
+                    }
+                    scenarios.emplace_back(
+                        SweepScenarioName(name, i, point_scenario.Frequency),
+                        std::move(point_scenario));
+                }
             }
         }
         return scenarios;

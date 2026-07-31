@@ -3,8 +3,7 @@
     "physics_type": "magnetoquasistatics",
     "mesh": "test_loop.msh",
     "order": 2,
-    "geometry_type": "axisymmetric",
-    "frequency": 60.0
+    "geometry_type": "axisymmetric"
   },
   "entity_groups": [
     { "name": "Vacuum", "dim": 2, "attribute_ids": [1] },
@@ -49,6 +48,7 @@
   "scenarios": [
     {
       "name": "60Hz",
+      "frequency": 60.0,
       "excitations": [
         { "terminal": "Loop_Current", "value": 1.0e7 }
       ]

@@ -265,8 +265,7 @@ TEST_CASE("MagnetoquasistaticSolver can be constructed", "[solvers]") {
             {"physics_type", "magnetoquasistatics"},
             {"mesh", mesh_file},
             {"order", 1},
-            {"geometry_type", "axisymmetric"},
-            {"frequency", 60.0}
+            {"geometry_type", "axisymmetric"}
         }},
         {"entity_groups", json::array({
             {{"name", "Domain"}, {"dim", 2}, {"attribute_ids", {1}}},
@@ -291,6 +290,9 @@ TEST_CASE("MagnetoquasistaticSolver can be constructed", "[solvers]") {
                 {"type", "Dirichlet"},
                 {"value", 0.0}
             }
+        })},
+        {"scenarios", json::array({
+            {{"name", "default"}, {"frequency", 60.0}, {"excitations", json::array()}}
         })}
     };
 
@@ -991,13 +993,14 @@ TEST_CASE("Magnetostatic solver reproduces the field of a uniform current slab",
     fs::remove(mesh_file);
 }
 
-TEST_CASE("Magnetoquasistatic solver reproduces conducting-slab skin effect",
+TEST_CASE("Magnetoquasistatic frequency sweep updates conducting-slab skin effect",
           "[solvers][analytic][mqs]") {
     const std::string mesh_file = "test_analytic_mqs.mesh";
     constexpr double length = 0.04;
     constexpr double height = 0.005;
     constexpr double conductivity = 3.5e7;
-    constexpr double frequency = 60.0;
+    constexpr double low_frequency = 60.0;
+    constexpr double frequency = 600.0;
     constexpr int nx = 48;
     constexpr int ny = 1;
     CreatePlanarStripMesh(mesh_file, length, height, nx, ny);
@@ -1005,7 +1008,13 @@ TEST_CASE("Magnetoquasistatic solver reproduces conducting-slab skin effect",
     json config = MakePlanarStripConfig(
         "magnetoquasistatics", mesh_file, 2,
         {{"mu_r", 1.0}, {"sigma", conductivity}}, 1.0, 0.0);
-    config["simulation"]["frequency"] = frequency;
+    config["scenarios"] = json::array({
+        {{"name", "skin"},
+         {"frequency", {{"scale", "linear"}, {"start", low_frequency},
+                        {"stop", frequency}, {"points", 2}}},
+         {"excitations", json::array()}}
+    });
+    config["simulation"]["amr"] = {{"enabled", true}, {"max_iterations", 1}};
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
     MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
@@ -1024,12 +1033,20 @@ TEST_CASE("Magnetoquasistatic solver reproduces conducting-slab skin effect",
     const std::complex<double> expected =
         std::sinh(wave_number * (length - physical(0))) /
         std::sinh(wave_number * length);
+    const std::complex<double> low_wave_number =
+        std::sqrt(std::complex<double>(
+            0.0, Constants::TWO_PI * low_frequency * Constants::MU_0 * conductivity));
+    const std::complex<double> low_expected =
+        std::sinh(low_wave_number * (length - physical(0))) /
+        std::sinh(low_wave_number * length);
 
     const double actual_real = SamplePrimaryScalar(fields, "A_Real", element, point);
     const double actual_imag = SamplePrimaryScalar(fields, "A_Imag", element, point);
 
     REQUIRE(actual_real == Catch::Approx(expected.real()).epsilon(5e-3));
     REQUIRE(actual_imag == Catch::Approx(expected.imag()).epsilon(5e-3));
+    REQUIRE(std::abs(std::complex<double>(actual_real, actual_imag) - expected) <
+            std::abs(std::complex<double>(actual_real, actual_imag) - low_expected));
     REQUIRE(std::hypot(actual_real, actual_imag) < 1.0);
     REQUIRE(actual_imag < 0.0);
 
@@ -1059,7 +1076,7 @@ TEST_CASE("Magnetoquasistatic skin-effect solution converges under mesh refineme
         json config = MakePlanarStripConfig(
             "magnetoquasistatics", mesh_file, 1,
             {{"mu_r", 1.0}, {"sigma", conductivity}}, 1.0, 0.0);
-        config["simulation"]["frequency"] = frequency;
+        config["scenarios"][0]["frequency"] = frequency;
 
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
         MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
@@ -1079,14 +1096,19 @@ TEST_CASE("Magnetoquasistatic skin-effect solution converges under mesh refineme
 TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
           "[solvers][mqs][coupling][reciprocity]") {
     const std::string mesh_file = "test_mqs_mixed_conductors.mesh";
-    const std::string inductance_file = "inductance_matrix.csv";
-    const std::string resistance_file = "resistance_matrix.csv";
+    const std::string low_inductance_file = "inductance_matrix_low_100Hz.csv";
+    const std::string low_resistance_file = "resistance_matrix_low_100Hz.csv";
+    const std::string high_inductance_file = "inductance_matrix_high_1000Hz.csv";
+    const std::string high_resistance_file = "resistance_matrix_high_1000Hz.csv";
     CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 2, 1, 1);
 
     json config = MakePlanarStripConfig(
         "magnetoquasistatics", mesh_file, 1, {{"mu_r", 1.0}}, 0.0, 0.0);
     config["simulation"]["analysis_type"] = "coupling_matrix";
-    config["simulation"]["frequency"] = 1000.0;
+    config["scenarios"] = json::array({
+        {{"name", "low"}, {"frequency", 100.0}, {"excitations", json::array()}},
+        {{"name", "high"}, {"frequency", 1000.0}, {"excitations", json::array()}}
+    });
     config["entity_groups"].push_back(
         {{"name", "StrandedDomain"}, {"dim", 2}, {"attribute_ids", {1}}});
     config["entity_groups"].push_back(
@@ -1116,8 +1138,14 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     solver.Run();
     solver.SaveAnalysis();
 
-    const CsvMatrix inductance = ReadCsvMatrix(inductance_file);
-    const CsvMatrix resistance = ReadCsvMatrix(resistance_file);
+    REQUIRE(fs::exists(low_inductance_file));
+    REQUIRE(fs::exists(low_resistance_file));
+    REQUIRE(fs::exists(high_inductance_file));
+    REQUIRE(fs::exists(high_resistance_file));
+    const CsvMatrix low_inductance = ReadCsvMatrix(low_inductance_file);
+    const CsvMatrix low_resistance = ReadCsvMatrix(low_resistance_file);
+    const CsvMatrix inductance = ReadCsvMatrix(high_inductance_file);
+    const CsvMatrix resistance = ReadCsvMatrix(high_resistance_file);
     const std::vector<std::string> expected_labels{"Massive", "Stranded"};
     REQUIRE(inductance.labels == expected_labels);
     REQUIRE(resistance.labels == expected_labels);
@@ -1128,9 +1156,13 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     REQUIRE(inductance.values[0][0] > 0.0);
     REQUIRE(inductance.values[1][1] > 0.0);
     REQUIRE(resistance.values[0][0] > 0.0);
+    REQUIRE(std::abs(inductance.values[0][0] - low_inductance.values[0][0]) > 1e-12);
+    REQUIRE(std::abs(resistance.values[0][0] - low_resistance.values[0][0]) > 1e-12);
 
-    fs::remove(resistance_file);
-    fs::remove(inductance_file);
+    fs::remove(low_resistance_file);
+    fs::remove(low_inductance_file);
+    fs::remove(high_resistance_file);
+    fs::remove(high_inductance_file);
     fs::remove(mesh_file);
 }
 

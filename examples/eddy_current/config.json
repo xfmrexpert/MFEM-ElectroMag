@@ -4,7 +4,6 @@
     "mesh": "eddy_current.mesh",
     "order": 2,
     "geometry_type": "axisymmetric",
-    "frequency": 60.0,
     "solver_tolerance": 1e-6,
     "solver_max_iter": 3000,
     "solver_print_level": 1
@@ -69,7 +68,13 @@
   ],
   "scenarios": [
     {
-      "name": "60Hz",
+      "name": "FrequencySweep",
+      "frequency": {
+        "scale": "log",
+        "start": 10.0,
+        "stop": 1000.0,
+        "points": 5
+      },
       "excitations": [
         { "terminal": "ExcitationCoil", "value": 100000.0 }
       ]

@@ -12,7 +12,8 @@
 #include "owning_complex_block_operator.hpp"
 
 // The assembled time-harmonic MQS operator with massive-conductor port coupling.
-// M_omega_sigma already contains the omega*sigma scaling:
+// M_sigma is assembled once and scaled by the active omega at operator-application
+// time:
 //
 //   [ K + j M_omega_sigma    -C              ] [ A      ]   [ F_source    ]
 //   [ -C^T                    -j G_dc/omega    ] [ V_port ] = [ I/(j omega) ]
@@ -25,7 +26,7 @@
 // the lower RHS is the scaled current phasor I/(j*omega), not the physical
 // current phasor I itself. For a real in-phase current this value is -j*I/omega.
 //
-// K (curl-curl, 1/mu) and M_omega_sigma (omega*sigma mass) are the real/imag
+// K (curl-curl, 1/mu) and M_sigma (sigma mass) are the real/imag
 // parts of the field SesquilinearForm; they are REFERENCED here, not owned (the
 // caller keeps that form alive). The port load vectors (the columns of C) are
 // owned here.
@@ -35,25 +36,80 @@
 // The wiring is delegated to reusable algebraic building blocks:
 //   - DenseColumnsOperator       : C, the rank-N_ports border from port loads.
 //   - BorderedBlockOperator      : the real [K, -C; -C^T, 0] and imaginary
-//                                  [M_omega_sigma, 0; 0, -1/(omega G_dc)] blocks.
+//                                  [omega M_sigma, 0; 0, -G_dc/omega] blocks.
 //   - OwningComplexBlockOperator : owns both blocks and the ComplexOperator.
 // With zero massive ports the borders/corners are absent and the operator
 // degenerates to K + j M_omega_sigma.
 class MqsMassivePortOperator
 {
+	class ScaledReferenceOperator : public mfem::Operator
+	{
+	public:
+		ScaledReferenceOperator(mfem::Operator& referenced, mfem::real_t scale)
+			: mfem::Operator(referenced.Height(), referenced.Width()),
+			  referenced(referenced), scale(scale) {}
+
+		void SetScale(mfem::real_t value) { scale = value; }
+
+		void Mult(const mfem::Vector& x, mfem::Vector& y) const override
+		{
+			referenced.Mult(x, y);
+			y *= scale;
+		}
+
+		void MultTranspose(const mfem::Vector& x, mfem::Vector& y) const override
+		{
+			referenced.MultTranspose(x, y);
+			y *= scale;
+		}
+
+	private:
+		mfem::Operator& referenced;
+		mfem::real_t scale;
+	};
+
+	class ConductanceCornerOperator : public mfem::Operator
+	{
+	public:
+		ConductanceCornerOperator(const std::vector<mfem::real_t>& conductances,
+								  mfem::real_t omega)
+			: mfem::Operator(static_cast<int>(conductances.size())),
+			  conductances(conductances), omega(omega) {}
+
+		void SetOmega(mfem::real_t value) { omega = value; }
+
+		void Mult(const mfem::Vector& x, mfem::Vector& y) const override
+		{
+			for (int p = 0; p < Height(); ++p) {
+				y(p) = -conductances[p] * x(p) / omega;
+			}
+		}
+
+		void MultTranspose(const mfem::Vector& x, mfem::Vector& y) const override
+		{
+			Mult(x, y);
+		}
+
+	private:
+		std::vector<mfem::real_t> conductances;
+		mfem::real_t omega;
+	};
+
 public:
 	MqsMassivePortOperator(
 		int n_dofs,
 		mfem::SparseMatrix& K,
-		mfem::SparseMatrix& M_omega_sigma,
+		mfem::SparseMatrix& M_sigma,
 		std::vector<std::unique_ptr<mfem::Vector>> port_loads,
-		const std::vector<mfem::real_t>& conductance_over_omega_diag)
+		const std::vector<mfem::real_t>& conductances,
+		mfem::real_t omega)
 		: layout(n_dofs, static_cast<int>(port_loads.size())),
 		  port_loads(std::move(port_loads))
 	{
+		MFEM_VERIFY(omega > 0.0, "MQS angular frequency must be positive.");
 		MFEM_VERIFY(
-			static_cast<int>(conductance_over_omega_diag.size()) == layout.NPorts(),
-			"Port self-admittance diagonal must have one entry per port.");
+			static_cast<int>(conductances.size()) == layout.NPorts(),
+			"Port conductance data must have one entry per port.");
 
 		std::unique_ptr<mfem::Operator> coupling;
 		if (layout.NPorts() > 0)
@@ -73,23 +129,28 @@ public:
 		std::unique_ptr<mfem::Operator> port_corner;
 		if (layout.NPorts() > 0)
 		{
-			auto conductance_over_omega =
-				std::make_unique<mfem::DenseMatrix>(layout.NPorts(), layout.NPorts());
-			*conductance_over_omega = 0.0;
-			for (int p = 0; p < layout.NPorts(); ++p)
-			{
-				(*conductance_over_omega)(p, p) = conductance_over_omega_diag[p];
-			}
-			port_corner = std::move(conductance_over_omega);
+			auto frequency_corner =
+				std::make_unique<ConductanceCornerOperator>(conductances, omega);
+			conductance_corner = frequency_corner.get();
+			port_corner = std::move(frequency_corner);
 		}
 
+		auto frequency_mass = std::make_unique<ScaledReferenceOperator>(M_sigma, omega);
 		auto imaginary_block = std::make_unique<BorderedBlockOperator>(
-			layout.NDofs(), layout.NPorts(), M_omega_sigma,
+			layout.NDofs(), layout.NPorts(), *frequency_mass,
 			/*border=*/nullptr, 1.0, std::move(port_corner));
+		owned_scaled_mass = std::move(frequency_mass);
 
 		complex_operator = std::make_unique<OwningComplexBlockOperator>(
 			std::move(real_block), std::move(imaginary_block),
 			mfem::ComplexOperator::HERMITIAN);
+	}
+
+	void SetOmega(mfem::real_t value)
+	{
+		MFEM_VERIFY(value > 0.0, "MQS angular frequency must be positive.");
+		owned_scaled_mass->SetScale(value);
+		if (conductance_corner) conductance_corner->SetOmega(value);
 	}
 
 	mfem::ComplexOperator& Operator() { return complex_operator->GetOperator(); }
@@ -117,5 +178,7 @@ private:
 	// and destroyed first. layout is independent and remains the size authority.
 	ComplexPortLayout layout;
 	std::vector<std::unique_ptr<mfem::Vector>> port_loads;
+	ConductanceCornerOperator* conductance_corner = nullptr;
+	std::unique_ptr<ScaledReferenceOperator> owned_scaled_mass;
 	std::unique_ptr<OwningComplexBlockOperator> complex_operator;
 };

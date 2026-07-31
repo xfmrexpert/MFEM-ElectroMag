@@ -19,7 +19,6 @@ json CanonicalConfig() {
             {"analysis_type", "coupling_matrix"},
             {"mesh", "test.msh"},
             {"order", 2},
-            {"frequency", 50.0},
             {"solver_tolerance", 1e-9},
             {"solver_max_iter", 321},
             {"solver_print_level", 2},
@@ -54,10 +53,10 @@ json CanonicalConfig() {
              {"value", 4.0}, {"robin_coefficient", 2.0}}
         })},
         {"scenarios", json::array({
-            {{"name", "Second"}, {"excitations", json::array({
+            {{"name", "Second"}, {"frequency", 50.0}, {"excitations", json::array({
                 {{"terminal", "Coil"}, {"value", 20.0}}
             })}},
-            {{"name", "First"}, {"excitations", json::array({
+            {{"name", "First"}, {"frequency", 50.0}, {"excitations", json::array({
                 {{"terminal", "Coil"}, {"value", 10.0}, {"floating", false}}
             })}}
         })}
@@ -74,7 +73,6 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
     REQUIRE(config.GeometryType == GeometryType::Axisymmetric);
     REQUIRE(config.AnalysisType == AnalysisType::CouplingMatrix);
     REQUIRE(config.Order == 2);
-    REQUIRE(config.Frequency == Catch::Approx(50.0));
     REQUIRE(config.SolverTolerance == Catch::Approx(1e-9));
     REQUIRE(config.SolverMaxIter == 321);
     REQUIRE(config.SolverPrintLevel == 2);
@@ -106,8 +104,53 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
 
     REQUIRE(config.Scenarios.size() == 2);
     REQUIRE(config.Scenarios[0].first == "Second");
+    REQUIRE(config.Scenarios[0].second.Frequency == Catch::Approx(50.0));
     REQUIRE(config.Scenarios[0].second.Excitations[0].Value == Catch::Approx(20.0));
     REQUIRE(config.Scenarios[1].first == "First");
+}
+
+TEST_CASE("InputParser expands MQS frequency sweeps", "[input_parser][mqs]") {
+    json source = CanonicalConfig();
+
+    SECTION("linear spacing is inclusive and preserves excitations") {
+        source["scenarios"] = json::array({{
+            {"name", "Linear"},
+            {"frequency", {{"scale", "linear"}, {"start", 10.0},
+                           {"stop", 30.0}, {"points", 3}}},
+            {"excitations", json::array({{{"terminal", "Coil"}, {"value", 7.0}}})}
+        }});
+        const auto scenarios = InputParser(source).GetProblemConfig().Scenarios;
+        REQUIRE(scenarios.size() == 3);
+        REQUIRE(scenarios[0].first == "Linear_f1_10Hz");
+        REQUIRE(scenarios[1].second.Frequency == Catch::Approx(20.0));
+        REQUIRE(scenarios[2].second.Frequency == Catch::Approx(30.0));
+        REQUIRE(scenarios[2].second.Excitations[0].Value == Catch::Approx(7.0));
+    }
+
+    SECTION("log spacing is inclusive") {
+        source["scenarios"] = json::array({{
+            {"name", "Log"},
+            {"frequency", {{"scale", "log"}, {"start", 10.0},
+                           {"stop", 1000.0}, {"points", 3}}}
+        }});
+        const auto scenarios = InputParser(source).GetProblemConfig().Scenarios;
+        REQUIRE(scenarios.size() == 3);
+        REQUIRE(scenarios[0].second.Frequency == Catch::Approx(10.0));
+        REQUIRE(scenarios[1].second.Frequency == Catch::Approx(100.0));
+        REQUIRE(scenarios[2].second.Frequency == Catch::Approx(1000.0));
+    }
+
+    SECTION("one point resolves to start") {
+        source["scenarios"] = json::array({{
+            {"name", "Single"},
+            {"frequency", {{"scale", "linear"}, {"start", 25.0},
+                           {"stop", 50.0}, {"points", 1}}}
+        }});
+        const auto scenarios = InputParser(source).GetProblemConfig().Scenarios;
+        REQUIRE(scenarios.size() == 1);
+        REQUIRE(scenarios[0].second.Frequency == Catch::Approx(25.0));
+        REQUIRE(scenarios[0].first == "Single_f1_25Hz");
+    }
 }
 
 TEST_CASE("InputParser throws on missing file", "[input_parser]") {

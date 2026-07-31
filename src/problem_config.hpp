@@ -70,10 +70,11 @@ struct BoundaryCondition {
 		: Type(t), EntityGroupName(g), Value(v), RobinCoeff(rc) {}
 };
 
-// One solve: a parameter point (Frequency, ...) plus per-terminal excitations.
+// One solve: a parameter point plus per-terminal excitations.
 // A terminal omitted from Excitations defaults to zero of its quantity
 // (grounded for Voltage, open for Current).
 struct Scenario {
+	double Frequency = 0.0; // Hz; required and positive for MQS, ignored by ES/MS
 	std::vector<Excitation> Excitations;
 };
 
@@ -95,7 +96,6 @@ struct ProblemConfig {
 	::PhysicsType  PhysicsType  = ::PhysicsType::Electrostatics;
 	::GeometryType GeometryType = ::GeometryType::Planar;
 	::AnalysisType AnalysisType = ::AnalysisType::Field;
-	double Frequency = 60.0;     // MQS only; constant across the analysis (ignored by ES/MS)
 
 	double SolverTolerance  = Constants::DEFAULT_SOLVER_TOLERANCE;
 	int    SolverMaxIter    = Constants::DEFAULT_SOLVER_MAX_ITER;

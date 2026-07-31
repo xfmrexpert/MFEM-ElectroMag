@@ -172,12 +172,24 @@ protected:
         mfem::Vector& combined,
         SolveScenario&& solve_scenario,
         EstimateCurrentSolution&& estimate_current_solution) {
+        return EstimateScenarioMaximumErrorOver(
+            BuildSolveScenarios(), combined,
+            std::forward<SolveScenario>(solve_scenario),
+            std::forward<EstimateCurrentSolution>(estimate_current_solution));
+    }
+
+    template <typename SolveScenario, typename EstimateCurrentSolution>
+    double EstimateScenarioMaximumErrorOver(
+        const std::vector<std::pair<std::string, Scenario>>& scenarios,
+        mfem::Vector& combined,
+        SolveScenario&& solve_scenario,
+        EstimateCurrentSolution&& estimate_current_solution) {
         const int ne = mesh.GetNE();
         combined.SetSize(ne);
         combined = 0.0;
 
         mfem::Vector current;
-        for (const auto& [name, scenario] : BuildSolveScenarios()) {
+        for (const auto& [name, scenario] : scenarios) {
             solve_scenario(scenario);
             estimate_current_solution(current);
             MFEM_VERIFY(current.Size() == ne,

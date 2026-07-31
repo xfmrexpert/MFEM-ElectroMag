@@ -170,6 +170,30 @@ See `examples/` directory for complete example problems with documentation:
 - `solenoid/`: Magnetostatic coil with field calculations
 - `eddy_current/`: Time-harmonic eddy current analysis
 
+### MQS Frequency Scenarios
+
+Magnetoquasistatic frequency is defined on every scenario, not in the
+`simulation` block. A scalar performs one solve:
+
+```json
+{"name": "60Hz", "frequency": 60.0, "excitations": []}
+```
+
+A sweep uses an inclusive linear or logarithmic range:
+
+```json
+{
+  "name": "Sweep",
+  "frequency": {"scale": "log", "start": 10.0, "stop": 1000.0, "points": 5},
+  "excitations": []
+}
+```
+
+`points` includes both endpoints; with `points: 1`, only `start` is solved.
+Field analyses write one result per expanded point. For MQS
+`coupling_matrix` analyses, each scenario defines a frequency point and the
+solver writes a separate frequency-labeled resistance/inductance CSV pair.
+
 For detailed mathematical formulation, see `docs/math_formulation.md`.
 
 ## Output
