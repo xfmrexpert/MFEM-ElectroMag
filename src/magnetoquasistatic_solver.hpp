@@ -18,8 +18,10 @@
 #include "complex_block_layout.hpp"
 #include "axisymmetric_conductance_coefficient.hpp"
 #include "gmsh_results_writer.hpp"
+#include "amr_support.hpp"
 
 class MagnetoquasistaticSolver : public PhysicsSolver {
+
     double frequency = 60.0;
     mfem::real_t omega = Constants::TWO_PI * frequency;
     
@@ -210,29 +212,14 @@ public:
         validator.ValidateBoundaryConditions(bcs, /*terminals=*/{}, false);  // Strict mode - reject conflicts
     }
 
-	void BuildOperators() {
+    void BuildOperators() override {
 		// Build the FE space and everything bound to it for the starting mesh.
 		fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
 
         // Setup Complex Billinear Form
         S_AA = std::make_unique<mfem::SesquilinearForm>(fespace.get(), mfem::ComplexOperator::HERMITIAN);
-
-        if (geometry == GeometryType::Axisymmetric) {
-            // Real Part: Curl-Curl (1/mu) with r weight
-            S_AA->AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(*nu_coeff), nullptr);
-
-            // Imag Part: Mass (sigma * omega) with r weight
-            S_AA->AddDomainIntegrator(nullptr, new AxisymmetricMassIntegrator(*omega_sigma_coeff));
-        }
-        else {
-            // Planar 2D
-            // Real Part: Diffusion (similar to Magnetostatic Planar)
-            // Solves Div(nu Grad A)
-            S_AA->AddDomainIntegrator(new mfem::DiffusionIntegrator(*nu_coeff), nullptr);
-
-            // Imag Part: Standard Mass (sigma * omega)
-            S_AA->AddDomainIntegrator(nullptr, new mfem::MassIntegrator(*omega_sigma_coeff));
-        }
+        S_AA->AddDomainIntegrator(MakeStiffnessIntegrator(), nullptr);
+        S_AA->AddDomainIntegrator(nullptr, MakeMassIntegrator());
 
         S_AA->Assemble();
         S_AA->Finalize();
@@ -277,6 +264,24 @@ public:
 
         // Grid Function (for solution recovery later)
         A = std::make_unique<mfem::ComplexGridFunction>(fespace.get());
+	}
+
+	mfem::BilinearFormIntegrator* MakeStiffnessIntegrator() {
+		if (geometry == GeometryType::Axisymmetric) {
+			return new AxisymmetricCurlCurlIntegrator(*nu_coeff);
+		}
+		else {
+			return new mfem::DiffusionIntegrator(*nu_coeff);
+		}
+	}
+
+	mfem::BilinearFormIntegrator* MakeMassIntegrator() {
+		if (geometry == GeometryType::Axisymmetric) {
+			return new AxisymmetricMassIntegrator(*omega_sigma_coeff);
+		}
+		else {
+			return new mfem::MassIntegrator(*omega_sigma_coeff);
+		}
 	}
 
     void ImprintScenario(const Scenario& sc) {
@@ -336,26 +341,11 @@ public:
         LiftEssentialInto(*x_combined);
     }
 
-    void Run() override
-    {
-        if (config.Amr.Enabled) {
-            RunAdaptive();
-        }
-        else {
-            RunFixed();
-        }
-    }
-
-    void RunAdaptive() {
-        MFEM_VERIFY(!config.Amr.Enabled,
-            "AMR is not yet implemented for the MQS solver.");
-    }
-
     // Solve + save on the CURRENT mesh/operators. Both analysis types flow through
     // ONE imprint -> solve -> save loop over BuildSolveScenarios() (authored
     // scenarios for Field; synthetic per-terminal unit-current drives for
-    // CouplingMatrix). MQS has no AMR path, so this is the whole run.
-    void RunFixed() {
+    // CouplingMatrix). The base AMR lifecycle calls this once on the final mesh.
+    void RunOnCurrentMesh() override {
         PrepareAnalysis();
 
         for (const auto& [name, scenario] : BuildSolveScenarios()) {
@@ -397,6 +387,94 @@ public:
 		// (field) DOFs back into the complex grid function, dropping the ports.
 		RecoverSolvedUnknowns(X_vec);
 	}
+
+    // Estimate per-element error on the CURRENT mesh, folding every scenario /
+    // coupling column into a single indicator via the element-wise maximum
+    //     eta_k = max over solves s of eta_k(s),
+    // so one shared mesh is refined for all scenarios (spec: identical
+    // $Nodes/$Elements across every <scenario>.results.msh).
+    //
+    // Uses the serial recovery-based ZienkiewiczZhuEstimator (the L2 variant is
+    // MPI-only). A dedicated integrator instance (separate from a's) and an H1
+    // vector flux space are constructed here per call; SetFluxAveraging(1) keeps
+    // the recovered flux from smoothing across material-attribute interfaces so
+    // per-region reluctivity discontinuities are respected. The real and
+    // imaginary indicators are combined as a complex magnitude before the base
+    // class folds them across scenarios.
+    //
+    // @param combined  Output: per-element max error indicator (sized to NE).
+    // @return Global error sqrt(sum_k combined_k^2).
+    double EstimateCombinedError(mfem::Vector& combined) override {
+        const int sdim = mesh.SpaceDimension();
+        std::unique_ptr<mfem::BilinearFormIntegrator> flux_integ(MakeStiffnessIntegrator());
+        mfem::FiniteElementSpace flux_fes(&mesh, fec.get(), sdim);
+        mfem::ZienkiewiczZhuEstimator estimator_re(*flux_integ, A->real(), flux_fes);
+        estimator_re.SetWithCoeff(false);     // flux = nu * grad(A)
+        estimator_re.SetFluxAveraging(1);    // do not average across attribute interfaces
+
+        mfem::ZienkiewiczZhuEstimator estimator_im(*flux_integ, A->imag(), flux_fes);
+        estimator_im.SetWithCoeff(false);     // flux = nu * grad(A)
+        estimator_im.SetFluxAveraging(1);    // do not average across attribute interfaces
+
+        return EstimateScenarioMaximumError(combined,
+            [this](const Scenario& scenario) {
+                ImprintScenario(scenario);
+                SolveSystem();
+            },
+            [&estimator_re, &estimator_im](mfem::Vector& current) {
+                estimator_re.Reset();
+                const mfem::Vector& errs_re = estimator_re.GetLocalErrors();
+                estimator_im.Reset();
+                const mfem::Vector& errs_im = estimator_im.GetLocalErrors();
+                current.SetSize(errs_re.Size());
+                for (int k = 0; k < current.Size(); ++k) {
+                    current(k) = std::hypot(errs_re(k), errs_im(k));
+                }
+            });
+    }
+
+    // Peak flux density |B| over the current solution *A, sampled at element
+    // nodes. AMR convergence diagnostic: the peak near a conductor corner or
+    // high-permeability edge should settle as refinement resolves it.
+    //
+    // Planar: B = (dA/dy, -dA/dx), so |B| == |grad(A)| exactly.
+    // Axisymmetric: B_r=-dA/dz, B_z=A/r+dA/dr, so the A/r term matters; reuse
+    // MagneticFieldCoefficient (same B reconstruction as the exporters, incl.
+    // the r->0 limit). Reflects whichever solution currently lives in *A.
+    double ComputePeakFieldMagnitude() const override {
+        if (!A) { return 0.0; }
+
+        MagneticFieldCoefficient B_axi_re(&A->real());
+        MagneticFieldCoefficient B_axi_im(&A->imag());
+        const bool axi = (geometry == GeometryType::Axisymmetric);
+
+        double peak = 0.0;
+        mfem::Vector B_re;
+        mfem::Vector B_im;
+        for (int e = 0; e < fespace->GetNE(); ++e) {
+            const mfem::FiniteElement* fe = fespace->GetFE(e);
+            mfem::ElementTransformation* T = fespace->GetElementTransformation(e);
+            const mfem::IntegrationRule& nodes = fe->GetNodes();
+            for (int i = 0; i < nodes.GetNPoints(); ++i) {
+                const mfem::IntegrationPoint& ip = nodes.IntPoint(i);
+                T->SetIntPoint(&ip);
+                if (axi) {
+                    B_axi_re.Eval(B_re, *T, ip);
+                    B_axi_im.Eval(B_im, *T, ip);
+                }  // true |B| incl. A/r term
+                else {
+                    A->real().GetGradient(*T, B_re);
+                    A->imag().GetGradient(*T, B_im);
+                }   // |B| == |grad(A)| (planar)
+                const double mag_re = B_re.Norml2();
+                const double mag_im = B_im.Norml2();
+                const double mag = std::hypot(mag_re, mag_im);
+                if (mag > peak) { peak = mag; }
+            }
+        }
+        return peak;
+    }
+
 
 	// Post-solve field recovery for the complex solution: the real/imaginary
 	// vector-potential parts (primaries), the real/imaginary flux densities

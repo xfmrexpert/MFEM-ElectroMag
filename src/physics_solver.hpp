@@ -2,13 +2,17 @@
 // SPDX-License-Identifier: MIT
 
 #pragma once
+#include <cmath>
+#include <iomanip>
 #include <list>
+#include <sstream>
 #include "mfem.hpp"
 #include "problem_config.hpp"
 #include "gmsh_results_writer.hpp"
 #include "field_export.hpp"
 #include "matrix_writer.hpp"
 #include "status_reporter.hpp"
+#include "amr_support.hpp"
 
 /**
  * @brief Base class for physics solvers using MFEM
@@ -25,6 +29,8 @@ protected:
     GeometryType geometry = GeometryType::Planar;
     mfem::Array<int> ess_bdr;
     mfem::Array<int> ess_tdof_list;
+
+    std::vector<amr::AmrIterationInfo> amr_history;
 
     StatusReporter& Reporter() const {
         return StatusReporter::Global();
@@ -151,6 +157,101 @@ protected:
                 WriteGmshFieldsHighOrder(scenario_name, fields);
                 return;
         }
+    }
+
+    // AMR per-iteration diagnostics from the most recent RunAdaptive(). Empty when
+    // AMR is disabled. Consumed by the regression tests and useful for logging.
+    const std::vector<amr::AmrIterationInfo>& GetAmrHistory() const { return amr_history; }
+
+    // Fold the current solution's local error over every solve scenario using an
+    // element-wise maximum, then return its global L2 norm. Concrete solvers own
+    // the physics-specific solve and estimator; the shared scenario policy lives
+    // here alongside BuildSolveScenarios().
+    template <typename SolveScenario, typename EstimateCurrentSolution>
+    double EstimateScenarioMaximumError(
+        mfem::Vector& combined,
+        SolveScenario&& solve_scenario,
+        EstimateCurrentSolution&& estimate_current_solution) {
+        const int ne = mesh.GetNE();
+        combined.SetSize(ne);
+        combined = 0.0;
+
+        mfem::Vector current;
+        for (const auto& [name, scenario] : BuildSolveScenarios()) {
+            solve_scenario(scenario);
+            estimate_current_solution(current);
+            MFEM_VERIFY(current.Size() == ne,
+                "AMR estimator returned the wrong number of element errors.");
+            for (int element = 0; element < ne; ++element) {
+                combined(element) = std::max(combined(element), current(element));
+            }
+        }
+
+        double sum_squared = 0.0;
+        for (int element = 0; element < ne; ++element) {
+            sum_squared += combined(element) * combined(element);
+        }
+        return std::sqrt(sum_squared);
+    }
+
+    virtual void BuildOperators() = 0;
+    virtual void RunOnCurrentMesh() = 0;
+    virtual double EstimateCombinedError(mfem::Vector& errors) = 0;
+    virtual double ComputePeakFieldMagnitude() const = 0;
+
+private:
+    const char* PeakFieldLabel() const {
+        return config.PhysicsType == PhysicsType::Electrostatics ? "|E|" : "|B|";
+    }
+
+    void RunAdaptive() {
+        const AmrSettings& settings = config.Amr;
+        amr_history.clear();
+
+        const int max_iterations = std::max(1, settings.MaxIterations);
+        for (int iteration = 0; iteration < max_iterations; ++iteration) {
+            const long true_dofs = fespace->GetTrueVSize();
+
+            mfem::Vector errors;
+            const double global_error = EstimateCombinedError(errors);
+            const double peak_field = ComputePeakFieldMagnitude();
+            amr_history.push_back({ true_dofs, global_error, peak_field });
+
+            std::ostringstream diagnostic;
+            diagnostic << "AMR iteration " << iteration
+                << ": elements=" << mesh.GetNE()
+                << ", true_dofs=" << true_dofs
+                << ", global_error=" << std::scientific << std::setprecision(6)
+                << global_error
+                << ", peak" << PeakFieldLabel() << "=" << peak_field;
+            Reporter().Diagnostic(diagnostic.str());
+
+            if (settings.ErrorTolerance > 0.0 &&
+                global_error < settings.ErrorTolerance) {
+                Reporter().Diagnostic("AMR: global error below tolerance. Stop.");
+                break;
+            }
+            if (settings.MaxDofs > 0 && true_dofs > settings.MaxDofs) {
+                Reporter().Diagnostic("AMR: reached the maximum number of DOFs. Stop.");
+                break;
+            }
+            if (iteration + 1 >= max_iterations) {
+                Reporter().Diagnostic("AMR: reached the maximum number of iterations. Stop.");
+                break;
+            }
+
+            mfem::Array<int> marked;
+            amr::MarkElementsDorfler(errors, settings.ErrorFraction, marked);
+            if (marked.Size() == 0) {
+                Reporter().Diagnostic("AMR: no elements marked for refinement. Stop.");
+                break;
+            }
+
+            amr::RefineConforming(mesh, marked);
+            BuildOperators();
+        }
+
+        RunOnCurrentMesh();
     }
 
 private:
@@ -346,7 +447,15 @@ public:
     virtual ~PhysicsSolver() = default;
 
     virtual void Setup() = 0;
-    virtual void Run() = 0;
+    void Run() {
+        if (config.Amr.Enabled) {
+            RunAdaptive();
+        }
+        else {
+            amr_history.clear();
+            RunOnCurrentMesh();
+        }
+    }
     virtual void SaveAnalysis() = 0;
 
     // Post-solve field recovery: each solver declares WHAT to export for the

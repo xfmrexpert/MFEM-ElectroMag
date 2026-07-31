@@ -6,7 +6,6 @@
 #include <memory>
 #include <cmath>
 #include <algorithm>
-#include <iomanip>
 #include <sstream>
 
 #include "mfem.hpp"
@@ -37,17 +36,6 @@ private:
 	mfem::OperatorHandle A_op;
 
 	std::unique_ptr<mfem::DenseMatrix> L; // Inductance matrix (coupling matrix) for the current mesh
-
-public:
-	// One AMR iteration's diagnostics, recorded during RunAdaptive(). Exposed for
-	// tests (convergence / conformity assertions) and console logging.
-	struct AmrIterationInfo {
-		long   true_dofs;     // global true DOFs on that iteration's mesh
-		double global_error;  // sqrt(sum_k eta_k^2), combined over scenarios
-		double peak_absB;     // max |B| sampled over the mesh
-	};
-private:
-	std::vector<AmrIterationInfo> amr_history;
 
 public:
 	MagnetostaticSolver(mfem::Mesh& m, const ProblemConfig& c) : PhysicsSolver(m, c) {}
@@ -93,7 +81,7 @@ public:
 
 	}
 
-	void BuildOperators() {
+	void BuildOperators() override {
 		fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
 
 		A = std::make_unique<mfem::GridFunction>(fespace.get());
@@ -142,11 +130,7 @@ public:
 	//
 	// @param combined  Output: per-element max error indicator (sized to NE).
 	// @return Global error sqrt(sum_k combined_k^2).
-	double EstimateCombinedError(mfem::Vector& combined) {
-		const int ne = mesh.GetNE();
-		combined.SetSize(ne);
-		combined = 0.0;
-
+	double EstimateCombinedError(mfem::Vector& combined) override {
 		const int sdim = mesh.SpaceDimension();
 		std::unique_ptr<mfem::BilinearFormIntegrator> flux_integ(MakeStiffnessIntegrator());
 		mfem::FiniteElementSpace flux_fes(&mesh, fec.get(), sdim);
@@ -154,26 +138,15 @@ public:
 		estimator.SetWithCoeff(true);     // flux = nu * grad(A)
 		estimator.SetFluxAveraging(1);    // do not average across attribute interfaces
 
-		auto fold_current_solution = [&]() {
-			estimator.Reset(); // force recompute: same mesh, new solution in *A
-			const mfem::Vector& errs = estimator.GetLocalErrors();
-			for (int k = 0; k < ne; ++k) {
-				if (errs(k) > combined(k)) { combined(k) = errs(k); }
-			}
-			};
-
-		// Same scenario set as the real solves (authored scenarios for Field, or
-		// the synthetic per-terminal unit drives for CouplingMatrix), so the AMR
-		// indicator reflects exactly what will be exported.
-		for (const auto& [sc_name, sc] : BuildSolveScenarios()) {
-			ImprintScenario(sc);
-			SolveSystem();
-			fold_current_solution();
-		}
-
-		double sum_sq = 0.0;
-		for (int k = 0; k < ne; ++k) { sum_sq += combined(k) * combined(k); }
-		return std::sqrt(sum_sq);
+		return EstimateScenarioMaximumError(combined,
+			[this](const Scenario& scenario) {
+				ImprintScenario(scenario);
+				SolveSystem();
+			},
+			[&estimator](mfem::Vector& current) {
+				estimator.Reset();
+				current = estimator.GetLocalErrors();
+			});
 	}
 
 	// Peak flux density |B| over the current solution *A, sampled at element
@@ -184,7 +157,7 @@ public:
 	// Axisymmetric: B_r=-dA/dz, B_z=A/r+dA/dr, so the A/r term matters; reuse
 	// MagneticFieldCoefficient (same B reconstruction as the exporters, incl.
 	// the r->0 limit). Reflects whichever solution currently lives in *A.
-	double ComputePeakFieldMagnitude() const {
+	double ComputePeakFieldMagnitude() const override {
 		if (!A) { return 0.0; }
 
 		MagneticFieldCoefficient B_axi(A.get());
@@ -207,10 +180,6 @@ public:
 		}
 		return peak;
 	}
-
-	// AMR per-iteration diagnostics from the most recent RunAdaptive(). Empty when
-	// AMR is disabled. Consumed by the regression tests and useful for logging.
-	const std::vector<AmrIterationInfo>& GetAmrHistory() const { return amr_history; }
 
 	void ImprintScenario(const Scenario& sc) {
 		*A = 0.0; // Reset solution for new scenario
@@ -245,21 +214,12 @@ public:
 		b->Assemble();
 	}
 
-	void Run() override {
-		if (config.Amr.Enabled) {
-			RunAdaptive();
-		}
-		else {
-			RunFixed();
-		}
-	}
-
 	// Solve + save on the CURRENT mesh/operators. Both analysis types flow through
 	// ONE imprint -> solve -> save loop over BuildSolveScenarios() (authored
 	// scenarios for Field; synthetic per-terminal unit-current drives for
 	// CouplingMatrix). AMR calls this once more on the converged mesh so the
 	// exported fields match the exported mesh.
-	void RunFixed()
+	void RunOnCurrentMesh() override
 	{
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
 			L = std::make_unique<mfem::DenseMatrix>(config.Terminals.size());
@@ -293,65 +253,6 @@ public:
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
 			WriteCouplingMatrix();
 		}
-	}
-
-	// h-adaptive loop: estimate combined (max-over-scenarios) error on the current
-	// mesh, stop on iteration / DOF / error-tolerance caps, otherwise bulk-mark
-	// (Dorfler) and refine conformingly, rebuild operators, and repeat. A final
-	// RunFixed() on the converged mesh produces the saved fields / C matrix so the
-	// exported results correspond exactly to the exported (refined) mesh.
-	void RunAdaptive() {
-		const AmrSettings& amr = config.Amr;
-		amr_history.clear();
-
-		const int max_it = std::max(1, amr.MaxIterations);
-		for (int it = 0; it < max_it; ++it) {
-			const long cdofs = fespace->GetTrueVSize();
-
-			mfem::Vector errors;
-			const double global_err = EstimateCombinedError(errors);
-			const double peak_absB = ComputePeakFieldMagnitude();
-
-			amr_history.push_back({ cdofs, global_err, peak_absB });
-
-			std::ostringstream diagnostic;
-			diagnostic << "AMR iteration " << it
-				<< ": elements=" << mesh.GetNE()
-				<< ", true_dofs=" << cdofs
-				<< ", global_error=" << std::scientific << std::setprecision(6) << global_err
-				<< ", peak|B|=" << peak_absB;
-			Reporter().Diagnostic(diagnostic.str());
-
-			// Stopping criteria (any one stops): error tolerance, DOF budget, or
-			// this being the last permitted iteration.
-			if (amr.ErrorTolerance > 0.0 && global_err < amr.ErrorTolerance) {
-				Reporter().Diagnostic("AMR: global error below tolerance. Stop.");
-				break;
-			}
-			if (amr.MaxDofs > 0 && cdofs > amr.MaxDofs) {
-				Reporter().Diagnostic("AMR: reached the maximum number of DOFs. Stop.");
-				break;
-			}
-			if (it + 1 >= max_it) {
-				Reporter().Diagnostic("AMR: reached the maximum number of iterations. Stop.");
-				break;
-			}
-
-			// Mark and refine conformingly (throws if the mesh cannot refine
-			// without hanging nodes), then rebuild the FE space / operators.
-			mfem::Array<int> marked;
-			amr::MarkElementsDorfler(errors, amr.ErrorFraction, marked);
-			if (marked.Size() == 0) {
-				Reporter().Diagnostic("AMR: no elements marked for refinement. Stop.");
-				break;
-			}
-			amr::RefineConforming(mesh, marked);
-			BuildOperators();
-		}
-
-		// Authoritative final solve on the final mesh: produces the saved fields
-		// (Field) or the C matrix (CouplingMatrix) on the exported mesh.
-		RunFixed();
 	}
 
 	void SolveSystem() {
@@ -464,15 +365,5 @@ private:
 			}
 		}
 		return j_src;
-	}
-
-	void AssembleCurrentLoad(const Scenario& sc)
-	{
-
-	}
-
-	void AssembleCurrentLoad(const std::string& terminal_name)
-	{
-		
 	}
 };

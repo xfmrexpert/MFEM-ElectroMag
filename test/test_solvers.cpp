@@ -59,9 +59,70 @@ public:
     }
 
     void Setup() override {}
-    void Run() override {}
     void SaveAnalysis() override {}
     FieldExportSet CollectExportFields() const override { return {}; }
+
+protected:
+    void BuildOperators() override {}
+    void RunOnCurrentMesh() override {}
+    double EstimateCombinedError(mfem::Vector& errors) override {
+        errors.SetSize(mesh.GetNE());
+        errors = 0.0;
+        return 0.0;
+    }
+    double ComputePeakFieldMagnitude() const override { return 0.0; }
+};
+
+class AmrLifecycleProbe : public PhysicsSolver {
+public:
+    AmrLifecycleProbe(mfem::Mesh& mesh, const ProblemConfig& config)
+        : PhysicsSolver(mesh, config) {}
+
+    void Setup() override {
+        fec = std::make_unique<mfem::H1_FECollection>(1, mesh.Dimension());
+        BuildOperators();
+    }
+
+    void SaveAnalysis() override {}
+    FieldExportSet CollectExportFields() const override { return {}; }
+
+    int OperatorBuilds() const { return operator_builds; }
+    int ErrorEstimates() const { return error_estimates; }
+    int FinalRuns() const { return final_runs; }
+    const std::vector<amr::AmrIterationInfo>& AmrHistory() const {
+        return GetAmrHistory();
+    }
+
+protected:
+    void BuildOperators() override {
+        ++operator_builds;
+        fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
+    }
+
+    void RunOnCurrentMesh() override { ++final_runs; }
+
+    double EstimateCombinedError(mfem::Vector& errors) override {
+        ++error_estimates;
+        errors.SetSize(mesh.GetNE());
+        errors = 1.0;
+        return std::sqrt(static_cast<double>(mesh.GetNE()));
+    }
+
+    double ComputePeakFieldMagnitude() const override { return 2.5; }
+
+private:
+    int operator_builds = 0;
+    int error_estimates = 0;
+    int final_runs = 0;
+};
+
+class ElectrostaticAmrProbe : public ElectrostaticSolver {
+public:
+    using ElectrostaticSolver::ElectrostaticSolver;
+
+    const std::vector<amr::AmrIterationInfo>& AmrHistory() const {
+        return GetAmrHistory();
+    }
 };
 
 TEST_CASE("ElectrostaticSolver can be constructed", "[solvers]") {
@@ -105,6 +166,32 @@ TEST_CASE("ElectrostaticSolver can be constructed", "[solvers]") {
     REQUIRE_NOTHROW(ElectrostaticSolver(mesh, config));
 
     // Cleanup
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("PhysicsSolver owns the adaptive lifecycle", "[solvers][amr]") {
+    const std::string mesh_file = "test_amr_lifecycle.mesh";
+    CreateTestMesh(mesh_file);
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+
+    ProblemConfig config;
+    config.Amr.Enabled = true;
+    config.Amr.MaxIterations = 3;
+    config.Amr.MaxDofs = 0;
+    config.Amr.ErrorFraction = 1.0;
+
+    AmrLifecycleProbe probe(mesh, config);
+    probe.Setup();
+    probe.Run();
+
+    REQUIRE(probe.OperatorBuilds() == 3);
+    REQUIRE(probe.ErrorEstimates() == 3);
+    REQUIRE(probe.FinalRuns() == 1);
+    REQUIRE(probe.AmrHistory().size() == 3);
+    REQUIRE(probe.AmrHistory().back().peak_field_magnitude == 2.5);
+    REQUIRE(mesh.GetNE() > 1);
+    REQUIRE_FALSE(mesh.Nonconforming());
+
     fs::remove(mesh_file);
 }
 
@@ -1056,11 +1143,11 @@ TEST_CASE("AMR refines an axisymmetric coax and stays conforming", "[solvers][am
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
 
-    ElectrostaticSolver solver(mesh, DecodeConfig(config));
+    ElectrostaticAmrProbe solver(mesh, DecodeConfig(config));
     solver.Setup();
     REQUIRE_NOTHROW(solver.Run());
 
-    const auto& history = solver.GetAmrHistory();
+    const auto& history = solver.AmrHistory();
     REQUIRE(history.size() >= 2);
 
     // (1) Conforming throughout: a simplex mesh refined conformingly never
@@ -1085,7 +1172,7 @@ TEST_CASE("AMR refines an axisymmetric coax and stays conforming", "[solvers][am
     //     measure, NaN, or sign error, loose enough not to depend on the exact
     //     (Dorfler + bisection) refinement depth.
     const double analytic_peak = 1.0 / (1.0 * std::log(4.0));
-    const double last_peak = history.back().peak_absE;
+    const double last_peak = history.back().peak_field_magnitude;
     REQUIRE(std::isfinite(last_peak));
     REQUIRE(last_peak > 0.5 * analytic_peak);
     REQUIRE(last_peak < 1.2 * analytic_peak);
