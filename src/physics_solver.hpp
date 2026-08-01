@@ -13,6 +13,7 @@
 #include "matrix_writer.hpp"
 #include "status_reporter.hpp"
 #include "amr_support.hpp"
+#include "axisymmetric_mesh.hpp"
 
 /**
  * @brief Base class for physics solvers using MFEM
@@ -29,6 +30,10 @@ protected:
     GeometryType geometry = GeometryType::Planar;
     mfem::Array<int> ess_bdr;
     mfem::Array<int> ess_tdof_list;
+
+    // Setup-time axisymmetric mesh classification and axis boundary marker.
+    // Planar problems leave it at its default.
+    axisym::MeshInfo axisymmetric_mesh;
 
     std::vector<amr::AmrIterationInfo> amr_history;
 
@@ -399,41 +404,24 @@ public:
         Reporter().Diagnostic("Wrote ParaView collection " + collection_name);
     }
 
-    // Geometric fallback: find boundary attributes whose boundary elements lie on r=0 and mark them essential.
-    // This is intentionally conservative. Best practice is to tag the axis in your mesh and handle it in InputParser.
-    void MarkAxisBoundaryAttributesGeometric()
+    // Inspect the mesh's radial extent once, at setup, for axisymmetric runs.
+    // Rejects meshes reaching a materially negative radius and records whether
+    // the domain closure actually touches r = 0. Annular domains (r_min > 0)
+    // need no axis regularity handling at all.
+    void ValidateAxisymmetricGeometry()
     {
-        const double tol = Constants::AXIS_TOLERANCE;
-        if (!mesh.bdr_attributes.Size()) { return; }
+        if (geometry != GeometryType::Axisymmetric) { return; }
 
-        mfem::Array<int> axis_attr(mesh.bdr_attributes.Max());
-        axis_attr = 0;
+        axisymmetric_mesh = axisym::ValidateMesh(mesh);
 
-        for (int be = 0; be < mesh.GetNBE(); be++)
-        {
-            mfem::Element* bEl = mesh.GetBdrElement(be);
-            const int attr = bEl->GetAttribute();
-            mfem::Array<int> v;
-            bEl->GetVertices(v);
-
-            bool on_axis = true;
-            for (int i = 0; i < v.Size(); i++)
-            {
-                const double* vx = mesh.GetVertex(v[i]);
-                if (std::abs(vx[0]) > tol) { on_axis = false; break; }
-            }
-
-            if (on_axis)
-            {
-                axis_attr[attr - 1] = 1; // attributes are 1-based
-            }
-        }
-
-        // Merge axis boundary attributes into ess_bdr
-        for (int i = 0; i < axis_attr.Size(); i++)
-        {
-            if (axis_attr[i]) { ess_bdr[i] = 1; }
-        }
+        std::ostringstream msg;
+        msg << std::setprecision(6)
+            << "Axisymmetric mesh radial extent: r in [" << axisymmetric_mesh.min_r
+            << ", " << axisymmetric_mesh.max_r << "]; "
+            << (axisymmetric_mesh.TouchesAxis()
+                    ? "domain touches the symmetry axis (axis regularity enforced)."
+                    : "domain is annular (no axis condition required).");
+        Reporter().Diagnostic(msg.str());
     }
 
     double CalculateRegionArea(const std::vector<int>& attribute_ids) const {

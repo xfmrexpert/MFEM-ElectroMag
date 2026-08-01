@@ -1169,8 +1169,14 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
 TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
           "[solvers][mqs][coupling][regions]") {
     const std::string mesh_file = "test_mqs_open_current_region.mesh";
-    const std::string inductance_file = "inductance_matrix_point_1000Hz.csv";
-    const std::string resistance_file = "resistance_matrix_point_1000Hz.csv";
+    const std::string inductance_file = "inductance_matrix_point_f1_1000Hz.csv";
+    const std::string resistance_file = "resistance_matrix_point_f1_1000Hz.csv";
+    const std::string legacy_inductance_file =
+        "inductance_matrix_point_f1_1000Hz_1000Hz.csv";
+    const std::string legacy_resistance_file =
+        "resistance_matrix_point_f1_1000Hz_1000Hz.csv";
+    fs::remove(legacy_inductance_file);
+    fs::remove(legacy_resistance_file);
     CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 4, 1, 2);
 
     json config = MakePlanarStripConfig(
@@ -1178,7 +1184,10 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
         {{"mu_r", 1.0}, {"sigma", 1.0e6}}, 0.0, 0.0);
     config["simulation"]["analysis_type"] = "coupling_matrix";
     config["scenarios"] = json::array({
-        {{"name", "point"}, {"frequency", 1000.0}, {"excitations", json::array()}}
+        {{"name", "point"},
+         {"frequency", {{"scale", "linear"}, {"start", 1000.0},
+                          {"stop", 1000.0}, {"points", 1}}},
+         {"excitations", json::array()}}
     });
     config["entity_groups"].push_back(
         {{"name", "DriveDomain"}, {"dim", 2}, {"attribute_ids", {1}}});
@@ -1215,6 +1224,8 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
     REQUIRE(constrained_resistance.labels == expected_labels);
     REQUIRE(constrained_inductance.values.size() == 1);
     REQUIRE(constrained_resistance.values.size() == 1);
+    REQUIRE_FALSE(fs::exists(legacy_inductance_file));
+    REQUIRE_FALSE(fs::exists(legacy_resistance_file));
     const double inductance_change = std::abs(
         constrained_inductance.values[0][0] - baseline_inductance.values[0][0]);
     const double resistance_change = std::abs(

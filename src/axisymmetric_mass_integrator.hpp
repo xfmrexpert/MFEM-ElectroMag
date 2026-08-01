@@ -8,14 +8,18 @@
 
 /**
  * @brief Axisymmetric Mass Integrator for Eddy Currents
- * Solves: Integral( sigma * A * v * 2*pi*r * dr * dz )
+ * Solves: Integral( sigma * A * v * r * dr * dz ), with the global 2*pi omitted.
  * Used for the mass term in time-harmonic problems (j * omega * sigma * A)
+ *
+ * The 2*pi factor is deliberately omitted so this term shares the convention of
+ * AxisymmetricCurlCurlIntegrator and AxisymmetricLFIntegrator. Including it here
+ * only would scale the conductivity term of K + j*omega*M_sigma by a spurious
+ * 2*pi relative to the stiffness term.
  */
 class AxisymmetricMassIntegrator : public mfem::BilinearFormIntegrator
 {
 private:
    mfem::Coefficient *Q; // Conductivity (sigma)
-   static constexpr double factor = Constants::TWO_PI;
 
 public:
    explicit AxisymmetricMassIntegrator(
@@ -62,9 +66,9 @@ public:
          double r = pos(0);
 
          double val = Q->Eval(Trans, ip); // Conductivity sigma
-         
-         // Weight = w * det(J) * (2*pi*r) * sigma
-         double w = ip.weight * Trans.Weight() * (factor * r) * val;
+
+         // Weight = w * det(J) * r * sigma (global 2*pi omitted)
+         double w = ip.weight * Trans.Weight() * r * val;
 
          el.CalcShape(ip, shape);
 

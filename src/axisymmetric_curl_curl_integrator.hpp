@@ -12,19 +12,32 @@
  * @brief Thread-safe axisymmetric curl-curl bilinear form integrator for magnetostatics
  *        with A = A_phi(r,z) e_phi.
  *
- * Assembles (up to a global 2π factor, omitted consistently):
+ * Assembles the following form, with the global 2*pi factor omitted:
  *
- *   ∫ ν [ (∂A/∂r)(∂v/∂r) + (∂A/∂z)(∂v/∂z) + (A/r)(v/r) ] * r dr dz
+ *   integral nu * [dA/dz * dv/dz
+ *                  + (dA/dr + A/r) * (dv/dr + v/r)] * r dr dz
  *
- * where ν = 1/μ.
+ * This follows from
+ *
+ *   curl(A_phi e_phi) = -dA_phi/dz e_r
+ *                       + (dA_phi/dr + A_phi/r) e_z.
  *
  * IMPORTANT:
  *   Enforce the essential BC A_phi = 0 on the symmetry axis r = 0 (regularity).
+ *   This is required whenever the domain closure reaches r = 0; annular domains
+ *   (r_min > 0) need no axis condition at all.
  *
  * Notes:
  *   - This class is THREAD-SAFE: all scratch storage is local to AssembleElementMatrix().
- *   - A tiny r clamp is used only as a safety net against pathological quadrature/mappings.
- *     Proper behavior near the axis should come from essential BC elimination.
+ *   - Assembly does NOT clamp r. Standard interior quadrature keeps r > 0 even for
+ *     elements touching the axis, so a zero radius there signals a bad custom rule
+ *     or a bad mesh and is reported rather than papered over. The 1/r term must be
+ *     kept exact per basis function: individual shape functions need not vanish on
+ *     the axis, so no per-basis limit exists. Regularity is a property of the
+ *     constrained solution and is delivered by essential BC elimination.
+ *   - Flux/energy recovery, which does see the constrained solution, uses the exact
+ *     limit B_z -> 2 dA/dr on the axis (see ComputeElementFlux). MagneticFieldCoefficient
+ *     applies the same limit for postprocessing; keep the two in step.
  */
 class AxisymmetricCurlCurlIntegrator : public mfem::BilinearFormIntegrator
 {
@@ -85,24 +98,26 @@ public:
 
          // Physical coordinates: pos(0)=r, pos(1)=z
          Trans.Transform(ip, pos);
-         const double r_raw = pos(0);
+         const double r = pos(0);
 
-         // Safety net only: avoids division by zero in pathological cases.
-         // Using a larger tolerance (e.g. 1e-12) prevents Infinity in the matrix
-         // which can cause solver crashes. (1e-12)^(-2) = 1e24 which fits in double.
-         const double r = std::max(r_raw, 1e-12);
+         // Interior quadrature keeps r > 0 even for elements touching the axis.
+         // A non-positive radius here means an invalid mesh or a custom rule
+         // with boundary points; clamping would silently deform the geometry.
+         MFEM_VERIFY(r > 0.0,
+            "AxisymmetricCurlCurlIntegrator evaluated at a non-positive radius (r = "
+            << r << "). The 1/r term is singular there: use an interior "
+            "integration rule and a mesh with non-negative radii.");
 
          const double nu = nu_->Eval(Trans, ip);
 
-         // Axisymmetric weight (global 2π omitted): ip.weight * detJ * r * nu
+         // Axisymmetric weight (global 2*pi omitted): ip.weight * detJ * r * nu
          const double w = ip.weight * Trans.Weight() * r * nu;
 
          el.CalcShape(ip, shape);
          el.CalcDShape(ip, dshape_ref);
 
-         // Map reference derivatives -> physical derivatives.
-         // This assumes MFEM convention: dshape_phys = dshape_ref * InvJ.
-         // If your unit test shows transpose, switch to InvJ^T.
+         // Map row-oriented reference derivatives to physical derivatives
+         // using MFEM's dshape_phys = dshape_ref * InvJ convention.
          Mult(dshape_ref, Trans.InverseJacobian(), dshape_phys);
 
          for (int j = 0; j < nd; j++)
@@ -167,7 +182,8 @@ public:
 
        mfem::Vector shape(nd);
        mfem::DenseMatrix dshape_ref(nd, dim);
-       mfem::DenseMatrix dshape_phys(nd, space_dim);
+       // Inverse Jacobian: (dim x space_dim), NOT shaped like dshape.
+       mfem::DenseMatrix inv_jacobian(dim, space_dim);
        mfem::Vector grad_ref(dim);
        mfem::Vector grad_phys(space_dim);
        mfem::Vector pos(space_dim);
@@ -181,16 +197,22 @@ public:
            el.CalcDShape(ip, dshape_ref);
 
            dshape_ref.MultTranspose(u, grad_ref);
-           mfem::CalcInverse(Trans.Jacobian(), dshape_phys);
-           dshape_phys.MultTranspose(grad_ref, grad_phys);
+           mfem::CalcInverse(Trans.Jacobian(), inv_jacobian);
+           inv_jacobian.MultTranspose(grad_ref, grad_phys);
 
            Trans.Transform(ip, pos);
-           const double r = std::max(pos(0), 1e-12);
+           const double r = pos(0);
            const double A_phi = shape * u;
 
-           // curl(A_phi e_phi) in the (r,z) component ordering.
+           // curl(A_phi e_phi) in the (r,z) component ordering. Regularity
+           // forces A_phi -> 0 linearly as r -> 0, so l'Hopital gives the
+           // finite limit B_z -> 2 dA/dr instead of dividing by zero. This is
+           // only valid for the constrained SOLUTION, never for individual
+           // basis functions before essential elimination.
            double B_r = -grad_phys(1);
-           double B_z = grad_phys(0) + A_phi / r;
+           double B_z = (r == 0.0)
+                            ? (2.0 * grad_phys(0))
+                            : (grad_phys(0) + A_phi / r);
 
            if (with_coef)
            {
@@ -256,7 +278,9 @@ public:
            }
 
            Trans.Transform(ip, pos);
-           const double r = std::max(pos(0), 1e-12);
+           // No clamp needed: this term carries the measure r, never 1/r, so
+           // the contribution simply vanishes on the axis.
+           const double r = pos(0);
            const double nu = nu_->Eval(Trans, ip);
            const double weight = ip.weight * Trans.Weight() * r;
 

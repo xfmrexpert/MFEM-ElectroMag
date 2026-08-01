@@ -4,22 +4,32 @@
 #include "constants.hpp"
 
 // Custom coefficient for axisymmetric G_dc = sigma / (2 * pi * r)
+//
+// This integrand is genuinely singular on the symmetry axis: a toroidal massive
+// conductor whose cross-section reaches r = 0 has no finite DC conductance, and
+// there is no limit to substitute. Rather than silently returning zero (which
+// would quietly under-report the conductance of the whole port), an axis-touching
+// evaluation is reported as the modelling error it is. Callers are expected to
+// reject such ports up front using the mesh radial extent.
 class AxisymmetricConductanceCoeff : public mfem::Coefficient
 {
 private:
     double sigma;
 public:
-    AxisymmetricConductanceCoeff(double s) : sigma(s) { }
+    explicit AxisymmetricConductanceCoeff(double s) : sigma(s) { }
 
     virtual double Eval(mfem::ElementTransformation &T, const mfem::IntegrationPoint &ip) override
     {
+        T.SetIntPoint(&ip);
         mfem::Vector transip;
         T.Transform(ip, transip);
         double r = transip(0); // Assuming 'r' is mapped to the first coordinate (x)
-        
-        // Prevent division by zero if the domain touches the axis of symmetry
-        if (r < 1e-12) return 0.0; 
-        
+
+        MFEM_VERIFY(r > 0.0,
+            "Axisymmetric port conductance sigma/(2*pi*r) is singular at r = "
+            << r << ". A massive azimuthal conductor cannot touch the symmetry "
+            "axis; remodel the port or use a different conductor type.");
+
         return sigma / (Constants::TWO_PI * r);
     }
 };

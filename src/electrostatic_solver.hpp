@@ -45,6 +45,10 @@ public:
 		// Axisymmetric or Planar
 		geometry = config.GeometryType;
 
+		// Reject negative radii. Electrostatics needs no axis condition: the
+		// natural condition dV/dr = 0 on r = 0 is already the correct one.
+		ValidateAxisymmetricGeometry();
+
 		// FE collection
 		fec = std::make_unique<mfem::H1_FECollection>(order, dim);
 

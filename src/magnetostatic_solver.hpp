@@ -48,6 +48,9 @@ public:
 		// Axisymmetric or Planar
 		geometry = config.GeometryType;
 
+		// Reject negative radii and record whether the domain reaches r = 0.
+		ValidateAxisymmetricGeometry();
+
 		// FE collection
 		fec = std::make_unique<mfem::H1_FECollection>(order, dim);
 
@@ -62,15 +65,16 @@ public:
 		for (const auto& [marker, val] : bcs) ess_markers.push_back(marker);
 		ess_bdr = EssentialBdrFrom(ess_markers);
 
-		// Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
-		// Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
-		// If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
+		// Axis regularity: the setup-time mesh inspection identifies a dedicated
+		// r=0 boundary attribute. Merge it into the essential marker so A_phi = 0.
 		if (geometry == GeometryType::Axisymmetric)
 		{
-			// Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
-			// that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
-			// If your mesh already has an "axis" boundary attribute, prefer using that instead.
-			MarkAxisBoundaryAttributesGeometric();
+			MFEM_VERIFY(ess_bdr.Size() == axisymmetric_mesh.axis_boundary.Size(),
+				"Axis boundary marker does not match the mesh boundary attributes.");
+			for (int i = 0; i < ess_bdr.Size(); ++i)
+			{
+				ess_bdr[i] = ess_bdr[i] || axisymmetric_mesh.axis_boundary[i];
+			}
 		}
 
 		// Build the FE space and everything bound to it for the starting mesh.
@@ -106,7 +110,8 @@ public:
 	mfem::BilinearFormIntegrator* MakeStiffnessIntegrator() const {
 		if (geometry == GeometryType::Axisymmetric)
 		{
-			return new AxisymmetricCurlCurlIntegrator(*nu_coeff);
+			auto* integ = new AxisymmetricCurlCurlIntegrator(*nu_coeff);
+			return integ;
 		}
 		else
 		{

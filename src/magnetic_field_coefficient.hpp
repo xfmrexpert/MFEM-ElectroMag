@@ -8,45 +8,38 @@
 /**
  * @brief Computes B = Curl(A) in 2D Axisymmetry
  * B_r = -dA/dz
- * B_z = A/r + dA/dr
+ * B_z = A/r + dA/dr, with the exact axis limit B_z -> 2 dA/dr at r = 0.
  */
 class MagneticFieldCoefficient : public mfem::VectorCoefficient
 {
 private:
    mfem::GridFunction *A; // The solution (Magnetic Vector Potential)
-   static constexpr double r_tol = 1e-12;
 
 public:
-   MagneticFieldCoefficient(mfem::GridFunction* a_gf) 
+   explicit MagneticFieldCoefficient(mfem::GridFunction* a_gf)
       : mfem::VectorCoefficient(2), A(a_gf) { }
 
    void Eval(mfem::Vector &B, mfem::ElementTransformation &T, 
              const mfem::IntegrationPoint &ip) override
    {
+      T.SetIntPoint(&ip);
+
       mfem::Vector pos(2); // 2D axisymmetric
       T.Transform(ip, pos);
-      double r = pos(0);
+      const double r = pos(0);
 
       // Get Value (A) and Gradient (dA/dr, dA/dz)
-      double A_val = A->GetValue(T, ip);
-      
+      const double A_val = A->GetValue(T, ip);
+
       mfem::Vector grad_A(2);
       A->GetGradient(T, grad_A);
-      double dA_dr = grad_A(0);
-      double dA_dz = grad_A(1);
 
       B.SetSize(2);
-
-      // B_r = -dA/dz
-      B(0) = -dA_dz;
-
-      // B_z = A/r + dA/dr
-      if (r > r_tol) {
-         B(1) = (A_val / r) + dA_dr;
-      } else {
-         // Limit r->0
-         B(1) = 2.0 * dA_dr;
-      }
+      // Regularity forces A_phi -> 0 linearly as r -> 0, so l'Hopital gives
+      // the finite limit B_z -> 2 dA/dr on the axis.
+      B(0) = -grad_A(1);
+      B(1) = (r == 0.0) ? (2.0 * grad_A(0))
+                        : (grad_A(0) + A_val / r);
    }
 };
 

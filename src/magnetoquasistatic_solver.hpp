@@ -5,7 +5,9 @@
 
 #include <cctype>
 #include <iomanip>
+#include <limits>
 #include <memory> // Required for smart pointers
+#include <set>
 #include <sstream>
 #include "mfem.hpp"
 #include "physics_solver.hpp"
@@ -100,6 +102,29 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
         return port_vector;
     }
 
+    // Smallest physical radius attained by the elements carrying any of
+    // @p attribute_ids, sampled through the element transformations so curved
+    // geometry is respected.
+    double MinRadiusOverAttributes(const std::vector<int>& attribute_ids) const
+    {
+        std::set<int> attrs(attribute_ids.begin(), attribute_ids.end());
+        double min_r = std::numeric_limits<double>::max();
+        mfem::Vector pos(mesh.SpaceDimension());
+
+        for (int e = 0; e < mesh.GetNE(); ++e) {
+            if (!attrs.count(mesh.GetAttribute(e))) { continue; }
+            mfem::ElementTransformation* T = mesh.GetElementTransformation(e);
+            const mfem::IntegrationRule& nodes = fespace->GetFE(e)->GetNodes();
+            for (int i = 0; i < nodes.GetNPoints(); ++i) {
+                const mfem::IntegrationPoint& ip = nodes.IntPoint(i);
+                T->SetIntPoint(&ip);
+                T->Transform(ip, pos);
+                min_r = std::min(min_r, pos(0));
+            }
+        }
+        return min_r;
+    }
+
     // Function to compute G_dc for a specific port
     double ComputePortConductance(std::vector<int> port_attributes, double sigma)
     {
@@ -191,6 +216,9 @@ public:
         // Axisymmetric or Planar
         geometry = config.GeometryType;
 
+        // Reject negative radii and record whether the domain reaches r = 0.
+        ValidateAxisymmetricGeometry();
+
         // FE spaces
         fec = std::make_unique<mfem::H1_FECollection>(order, mesh.Dimension());
         
@@ -212,15 +240,16 @@ public:
             ess_markers.push_back(marker);
         ess_bdr = EssentialBdrFrom(ess_markers);
 
-        // Axis regularity: enforce A_phi = 0 on r=0 as ESSENTIAL.
-        // Best practice: mark the axis as an essential boundary via boundary attributes if your mesh has it tagged.
-        // If you *don't* have the axis tagged as a boundary attribute, do a geometric fallback:
+        // Axis regularity: the setup-time mesh inspection identifies a dedicated
+        // r=0 boundary attribute. Merge it into the essential marker so A_phi = 0.
         if (geometry == GeometryType::Axisymmetric)
         {
-            // Geometric fallback: force A=0 on axis boundary vertices by marking the boundary attributes
-            // that lie on r=0. This requires detecting boundary elements on the axis and marking their attribute.
-            // If your mesh already has an "axis" boundary attribute, prefer using that in InputParser instead.
-            MarkAxisBoundaryAttributesGeometric();
+            MFEM_VERIFY(ess_bdr.Size() == axisymmetric_mesh.axis_boundary.Size(),
+                "Axis boundary marker does not match the mesh boundary attributes.");
+            for (int i = 0; i < ess_bdr.Size(); ++i)
+            {
+                ess_bdr[i] = ess_bdr[i] || axisymmetric_mesh.axis_boundary[i];
+            }
         }
 
         // Build the FE space and everything bound to it for the starting mesh.
@@ -271,6 +300,15 @@ public:
         port_conductances.clear();
         port_conductances.reserve(massive_ports.size());
         for (const MassivePortDefinition& port : massive_ports) {
+            if (geometry == GeometryType::Axisymmetric) {
+                // G_dc = integral sigma/(2*pi*r) diverges for a toroidal massive
+                // conductor whose cross-section reaches the symmetry axis.
+                MFEM_VERIFY(
+                    MinRadiusOverAttributes(port.AttributeIds) > axisymmetric_mesh.tolerance,
+                    "Massive port '" + port.Name + "' touches the symmetry axis. "
+                    "Its DC conductance integral sigma/(2*pi*r) is divergent; "
+                    "model it as a stranded conductor or move it off the axis.");
+            }
             port_loads.push_back(
                 BuildPortVector(fespace.get(), port.AttributeIds, port.Conductivity));
             double G_dc = ComputePortConductance(port.AttributeIds, port.Conductivity);
@@ -297,7 +335,8 @@ public:
 
 	mfem::BilinearFormIntegrator* MakeStiffnessIntegrator() {
 		if (geometry == GeometryType::Axisymmetric) {
-			return new AxisymmetricCurlCurlIntegrator(*nu_coeff);
+			auto* integ = new AxisymmetricCurlCurlIntegrator(*nu_coeff);
+			return integ;
 		}
 		else {
 			return new mfem::DiffusionIntegrator(*nu_coeff);
@@ -558,9 +597,9 @@ public:
 		if (geometry == GeometryType::Axisymmetric) {
 			// Axisymmetric B = Curl(A_phi) = (-dA/dz, 1/r*d(rA)/dr)
 			b_re = &fields.AddVector("B_Real",
-				std::make_unique<MagneticFieldCoefficient>(&A->real()));
+                std::make_unique<MagneticFieldCoefficient>(&A->real()));
 			b_im = &fields.AddVector("B_Imag",
-				std::make_unique<MagneticFieldCoefficient>(&A->imag()));
+                std::make_unique<MagneticFieldCoefficient>(&A->imag()));
 		}
 		else {
 			// Planar B = Curl(A_z) = (dA/dy, -dA/dx)
@@ -646,7 +685,11 @@ public:
 
         for (const CouplingResult& result : coupling_results) {
             const std::string frequency_label = FrequencyOutputToken(result.Frequency) + "Hz";
-            const std::string output_tag = SafeOutputToken(result.Name) + "_" + frequency_label;
+            std::string output_tag = SafeOutputToken(result.Name);
+            if (output_tag.size() < 2 ||
+                output_tag.compare(output_tag.size() - 2, 2, "Hz") != 0) {
+                output_tag += "_" + frequency_label;
+            }
             SaveCouplingMatrix(*result.Inductance,
                 "Inductance Matrix at " + frequency_label + " [H]",
                 "inductance_matrix_" + output_tag + ".csv");

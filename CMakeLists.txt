@@ -132,6 +132,7 @@ if(BUILD_TESTING)
     # Create test executable
     add_executable(mfem_tests
         test/test_main.cpp
+        test/test_axisymmetric_axis.cpp
         test/test_axisymmetric_quadrature.cpp
         test/test_config_validator.cpp
         test/test_input_parser.cpp
