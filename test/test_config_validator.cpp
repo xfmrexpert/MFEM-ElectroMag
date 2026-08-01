@@ -3,8 +3,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include "../src/config_validator.hpp"
+#include "../src/boundary_validation.hpp"
+#include <limits>
 
 namespace {
+
+bool HasError(const ConfigValidator& validator, const std::string& field);
 
 json ValidConfig() {
 	return json{
@@ -37,6 +41,125 @@ json ValidConfig() {
 			})}}
 		})}
 	};
+}
+
+TEST_CASE("BoundaryConditionValidator distinguishes essential and weak closures",
+		  "[boundary_validation]") {
+	mfem::Mesh mesh = mfem::Mesh::MakeCartesian2D(
+		1, 1, mfem::Element::QUADRILATERAL, true, 1.0, 1.0);
+	for (int i = 0; i < mesh.GetNBE(); ++i) {
+		mesh.GetBdrElement(i)->SetAttribute(i + 1);
+	}
+
+	mfem::H1_FECollection fec(1, mesh.Dimension());
+	mfem::FiniteElementSpace fespace(&mesh, &fec);
+	BoundaryConditionValidator validator(mesh, fespace);
+	const std::unordered_map<std::string, mfem::Array<int>> no_terminals;
+
+	auto marker = [&](int attribute) {
+		mfem::Array<int> result(mesh.GetNBE());
+		result = 0;
+		result[attribute - 1] = 1;
+		return result;
+	};
+	int adjacent_attribute = -1;
+	mfem::Array<int> first_vertices;
+	mesh.GetBdrElementVertices(0, first_vertices);
+	for (int boundary = 1; boundary < mesh.GetNBE() && adjacent_attribute < 0;
+		 ++boundary) {
+		mfem::Array<int> candidate_vertices;
+		mesh.GetBdrElementVertices(boundary, candidate_vertices);
+		for (int i = 0; i < first_vertices.Size(); ++i) {
+			for (int j = 0; j < candidate_vertices.Size(); ++j) {
+				if (first_vertices[i] == candidate_vertices[j]) {
+					adjacent_attribute = boundary + 1;
+				}
+			}
+		}
+	}
+	REQUIRE(adjacent_attribute > 0);
+
+	const BoundaryCondition dirichlet_zero(
+		BoundaryConditionType::Dirichlet, "First", 0.0);
+	const BoundaryCondition dirichlet_one(
+		BoundaryConditionType::Dirichlet, "Second", 1.0);
+	const BoundaryCondition neumann(
+		BoundaryConditionType::Neumann, "Second", 2.0);
+
+	SECTION("allows a Dirichlet and Neumann boundary junction") {
+		const std::vector<MarkedBoundaryCondition> closures = {
+			{marker(1), dirichlet_zero}, {marker(adjacent_attribute), neumann}
+		};
+		REQUIRE_NOTHROW(validator.ValidateBoundaryConditions(
+			closures, no_terminals));
+	}
+
+	SECTION("rejects different Dirichlet values at a shared corner") {
+		const std::vector<MarkedBoundaryCondition> closures = {
+			{marker(1), dirichlet_zero},
+			{marker(adjacent_attribute), dirichlet_one}
+		};
+		REQUIRE_THROWS(validator.ValidateBoundaryConditions(
+			closures, no_terminals));
+	}
+
+	SECTION("rejects duplicate assignments on one boundary attribute") {
+		const std::vector<MarkedBoundaryCondition> closures = {
+			{marker(1), dirichlet_zero}, {marker(1), neumann}
+		};
+		REQUIRE_THROWS(validator.ValidateBoundaryConditions(
+			closures, no_terminals));
+	}
+}
+
+TEST_CASE("ConfigValidator validates boundary values and Robin metadata",
+		  "[config_validator][boundaries]") {
+	SECTION("accepts Neumann without a Robin coefficient") {
+		json config = ValidConfig();
+		config["boundaries"][0]["type"] = "Neumann";
+		config["boundaries"][0]["value"] = -2.5;
+
+		ConfigValidator validator;
+		REQUIRE(validator.Validate(config));
+	}
+
+	SECTION("rejects non-finite boundary values") {
+		json config = ValidConfig();
+		config["boundaries"][0]["value"] =
+			std::numeric_limits<double>::infinity();
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "boundaries[0].value"));
+	}
+
+	SECTION("requires a finite coefficient for Robin") {
+		json missing = ValidConfig();
+		missing["boundaries"][0]["type"] = "Robin";
+
+		ConfigValidator missing_validator;
+		REQUIRE_FALSE(missing_validator.Validate(missing));
+		REQUIRE(HasError(missing_validator,
+						 "boundaries[0].robin_coefficient"));
+
+		json non_finite = missing;
+		non_finite["boundaries"][0]["robin_coefficient"] =
+			std::numeric_limits<double>::infinity();
+
+		ConfigValidator finite_validator;
+		REQUIRE_FALSE(finite_validator.Validate(non_finite));
+		REQUIRE(HasError(finite_validator,
+						 "boundaries[0].robin_coefficient"));
+	}
+
+	SECTION("rejects a Robin coefficient on non-Robin boundaries") {
+		json config = ValidConfig();
+		config["boundaries"][0]["robin_coefficient"] = 1.0;
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "boundaries[0].robin_coefficient"));
+	}
 }
 
 json ValidMqsConfig() {

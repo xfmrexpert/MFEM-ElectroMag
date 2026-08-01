@@ -13,7 +13,7 @@ This example calculates the magnetostatic field of a current-carrying solenoid c
 
 **Boundary Conditions:**
 - Far field: A_φ = 0 (Dirichlet)
-- Axis (r = 0): Natural boundary (∂A/∂r = 0)
+- Axis (r = 0): A_φ = 0 regularity condition, imposed automatically
 
 **Materials:**
 - Coil region: Current density J_φ = N × I / A_coil

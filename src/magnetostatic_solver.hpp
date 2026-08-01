@@ -28,6 +28,7 @@ private:
 
 	std::unique_ptr<mfem::LinearForm> b;
 	std::unique_ptr<mfem::BilinearForm> a;
+	mfem::Vector neumann_rhs;
 
 	// Cached constrained system for the CURRENT mesh. The matrix is identical
 	// for every solve on a given mesh (same bilinear form and essential DOFs),
@@ -58,11 +59,11 @@ public:
 		nu_coeff = MaterialCoefficient(1.0 / Constants::MU_0, [](const Material& m) {
 			return 1.0 / (Constants::MU_0 * m.RelPermeability); });
 
-		// All closures essential; values lifted from *A by FormLinearSystem.
-		auto bcs = BuildClosureBcs();
+		closure_bcs = BuildClosureBcs();
+		ValidateMagneticAxisBoundaryValues();
 
-		std::vector<mfem::Array<int>> ess_markers;
-		for (const auto& [marker, val] : bcs) ess_markers.push_back(marker);
+		std::vector<mfem::Array<int>> ess_markers =
+			DirichletClosureMarkers(closure_bcs);
 		ess_bdr = EssentialBdrFrom(ess_markers);
 
 		// Axis regularity: the setup-time mesh inspection identifies a dedicated
@@ -81,7 +82,8 @@ public:
 		BuildOperators();
 
 		BoundaryConditionValidator validator(mesh, *fespace);
-		validator.ValidateBoundaryConditions(bcs, /*terminals=*/{}, /*allow_overlap=*/false);
+		validator.ValidateBoundaryConditions(
+			closure_bcs, /*terminals=*/{}, /*allow_overlap=*/false);
 
 	}
 
@@ -90,6 +92,7 @@ public:
 
 		A = std::make_unique<mfem::GridFunction>(fespace.get());
 		*A = 0.0;
+		neumann_rhs = AssembleNeumannBoundaryLoad();
 
 		a = std::make_unique<mfem::BilinearForm>(fespace.get());
 		a->AddDomainIntegrator(MakeStiffnessIntegrator()); // a takes ownership
@@ -193,7 +196,7 @@ public:
 		// ess_tdof values are lifted into the RHS by FormLinearSystem at solve time,
 		// so they must be set AFTER the *A = 0.0 reset, every scenario.
 		for (const auto& bc : config.BoundaryConditions) {
-			if (bc.Value != 0.0) {
+			if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
 				const EntityGroup& group = config.EntityGroups.at(bc.EntityGroupName);
 				auto marker = MarkerFromAttrs(group.AttributeIds);
 				mfem::ConstantCoefficient c(bc.Value);
@@ -217,6 +220,7 @@ public:
 			b->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
 		}
 		b->Assemble();
+		*b += neumann_rhs;
 	}
 
 	// Solve + save on the CURRENT mesh/operators. Both analysis types flow through

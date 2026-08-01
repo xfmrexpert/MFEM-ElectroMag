@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include "../src/input_parser.hpp"
 #include "../src/electrostatic_solver.hpp"
 #include "../src/magnetostatic_solver.hpp"
@@ -21,6 +22,30 @@
 #include <functional>
 
 namespace fs = std::filesystem;
+
+ProblemConfig DecodeConfig(const json& config);
+
+namespace {
+void CreatePlanarStripMesh(const std::string& filename,
+                           double length, double height, int nx, int ny);
+json MakePlanarStripConfig(const std::string& physics,
+                           const std::string& mesh_file,
+                           int order,
+                           const json& material_properties,
+                           double left_value,
+                           double right_value);
+const FieldExport& FindField(const FieldExportSet& fields,
+                             const std::string& name);
+mfem::IntegrationPoint TriangleCenter();
+mfem::Vector PhysicalPoint(const mfem::GridFunction& field, int element,
+                           const mfem::IntegrationPoint& point);
+double SamplePrimaryScalar(const FieldExportSet& fields,
+                           const std::string& name, int element,
+                           const mfem::IntegrationPoint& point);
+mfem::Vector SampleDerivedVector(const FieldExportSet& fields,
+                                 const std::string& name, int element,
+                                 const mfem::IntegrationPoint& point);
+} // namespace
 
 // Helper function to create a minimal test mesh file
 void CreateTestMesh(const std::string& filename) {
@@ -41,8 +66,224 @@ void CreateTestMesh(const std::string& filename) {
     mesh_file.close();
 }
 
+TEST_CASE("Electrostatic solver applies natural-flux Neumann data",
+          "[solvers][analytic][electrostatic][neumann]") {
+    const std::string mesh_file = "test_electrostatic_neumann.mesh";
+    constexpr double length = 0.2;
+    constexpr double height = 0.05;
+    constexpr double relative_permittivity = 2.5;
+    constexpr double gradient = 3.0;
+    constexpr int nx = 8;
+    constexpr int ny = 2;
+    CreatePlanarStripMesh(mesh_file, length, height, nx, ny);
+
+    const double permittivity = Constants::EPSILON_0 * relative_permittivity;
+    json config = MakePlanarStripConfig(
+        "electrostatics", mesh_file, 1,
+        {{"epsilon_r", relative_permittivity}}, 0.0, 0.0);
+    config["boundaries"][1]["type"] = "Neumann";
+    config["boundaries"][1]["value"] = permittivity * gradient;
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    ElectrostaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    const FieldExportSet fields = solver.CollectExportFields();
+    const mfem::IntegrationPoint point = TriangleCenter();
+    const int element = 2 * (nx / 2);
+    const FieldExport& potential_field = FindField(fields, "V");
+    const mfem::Vector physical =
+        PhysicalPoint(*potential_field.primary, element, point);
+
+    REQUIRE(SamplePrimaryScalar(fields, "V", element, point) ==
+        Catch::Approx(gradient * physical(0)).epsilon(1.0e-7));
+    const mfem::Vector electric_field =
+        SampleDerivedVector(fields, "E", element, point);
+    REQUIRE(electric_field(0) == Catch::Approx(-gradient).epsilon(1.0e-7));
+    REQUIRE(electric_field(1) == Catch::Approx(0.0).margin(1.0e-6));
+
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Boundary closures and voltage terminals have distinct ownership",
+          "[solvers][boundaries][overlap]") {
+    const std::string mesh_file = "test_boundary_ownership.mesh";
+    CreatePlanarStripMesh(mesh_file, 0.2, 0.05, 2, 1);
+
+    auto terminal_config = [&]() {
+        json config = MakePlanarStripConfig(
+            "electrostatics", mesh_file, 1, {{"epsilon_r", 1.0}}, 0.0, 0.0);
+        config["terminals"] = json::array({
+            {{"name", "LeftTerminal"}, {"excitation", "voltage"},
+             {"entity_group", "Left"}}
+        });
+        config["boundaries"].erase(config["boundaries"].begin());
+        return config;
+    };
+
+    SECTION("same boundary attribute is rejected") {
+        json config = terminal_config();
+        config["boundaries"].push_back(
+            {{"name", "LeftFlux"}, {"type", "Neumann"},
+             {"entity_group", "Left"}, {"value", 1.0}});
+
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        ElectrostaticSolver solver(mesh, DecodeConfig(config));
+        REQUIRE_THROWS_WITH(solver.Setup(),
+            Catch::Matchers::ContainsSubstring("one physical role"));
+    }
+
+    SECTION("different attributes may meet at a corner") {
+        json config = terminal_config();
+        config["entity_groups"].push_back(
+            {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
+        config["boundaries"].push_back(
+            {{"name", "HorizontalFlux"}, {"type", "Neumann"},
+             {"entity_group", "Horizontal"}, {"value", 0.0}});
+
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        ElectrostaticSolver solver(mesh, DecodeConfig(config));
+        REQUIRE_NOTHROW(solver.Setup());
+    }
+
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Axisymmetric magnetic solvers enforce zero A_phi on the axis",
+          "[solvers][axisymmetric][axis][boundaries]") {
+    const std::string mesh_file = "test_magnetic_axis_boundary.mesh";
+    CreatePlanarStripMesh(mesh_file, 0.2, 0.05, 2, 1);
+
+    auto magnetic_config = [&](const std::string& physics, double axis_value) {
+        const json material = physics == "magnetoquasistatics"
+            ? json{{"mu_r", 1.0}, {"sigma", 0.0}}
+            : json{{"mu_r", 1.0}};
+        json config = MakePlanarStripConfig(
+            physics, mesh_file, 1, material, axis_value, 0.0);
+        config["simulation"]["geometry_type"] = "axisymmetric";
+        return config;
+    };
+
+    SECTION("magnetostatics rejects a nonzero axis value") {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetostaticSolver solver(
+            mesh, DecodeConfig(magnetic_config("magnetostatics", 1.0)));
+        REQUIRE_THROWS_WITH(solver.Setup(),
+            Catch::Matchers::ContainsSubstring("Axis regularity requires A_phi = 0"));
+    }
+
+    SECTION("magnetoquasistatics rejects a nonzero axis value") {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetoquasistaticSolver solver(
+            mesh, DecodeConfig(magnetic_config("magnetoquasistatics", 1.0)));
+        REQUIRE_THROWS_WITH(solver.Setup(),
+            Catch::Matchers::ContainsSubstring("Axis regularity requires A_phi = 0"));
+    }
+
+    SECTION("an explicit zero axis value is accepted") {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetostaticSolver solver(
+            mesh, DecodeConfig(magnetic_config("magnetostatics", 0.0)));
+        REQUIRE_NOTHROW(solver.Setup());
+    }
+
+    SECTION("annular domains may use a nonzero inner-boundary value") {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        for (int v = 0; v < mesh.GetNV(); ++v) {
+            mesh.GetVertex(v)[0] += 1.0;
+        }
+        MagnetostaticSolver solver(
+            mesh, DecodeConfig(magnetic_config("magnetostatics", 1.0)));
+        REQUIRE_NOTHROW(solver.Setup());
+    }
+
+    fs::remove(mesh_file);
+}
+
 ProblemConfig DecodeConfig(const json& config) {
     return InputParser(config).GetProblemConfig();
+}
+
+TEST_CASE("Magnetoquasistatic Neumann data loads only the real field",
+          "[solvers][analytic][mqs][neumann]") {
+    const std::string mesh_file = "test_mqs_neumann.mesh";
+    constexpr double length = 0.1;
+    constexpr double height = 0.02;
+    constexpr double gradient = 0.75;
+    constexpr int nx = 8;
+    constexpr int ny = 2;
+    CreatePlanarStripMesh(mesh_file, length, height, nx, ny);
+
+    const double reluctivity = 1.0 / Constants::MU_0;
+    json config = MakePlanarStripConfig(
+        "magnetoquasistatics", mesh_file, 1,
+        {{"mu_r", 1.0}, {"sigma", 0.0}}, 0.0, 0.0);
+    config["boundaries"][1]["type"] = "Neumann";
+    config["boundaries"][1]["value"] = reluctivity * gradient;
+    config["scenarios"][0]["frequency"] = 60.0;
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    const FieldExportSet fields = solver.CollectExportFields();
+    const mfem::IntegrationPoint point = TriangleCenter();
+    const int element = 2 * (nx / 2);
+    const FieldExport& real_field = FindField(fields, "A_Real");
+    const mfem::Vector physical = PhysicalPoint(*real_field.primary, element, point);
+
+    REQUIRE(SamplePrimaryScalar(fields, "A_Real", element, point) ==
+        Catch::Approx(gradient * physical(0)).epsilon(1.0e-8));
+    REQUIRE(SamplePrimaryScalar(fields, "A_Imag", element, point) ==
+        Catch::Approx(0.0).margin(1.0e-10));
+
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Solvers reject reserved Robin boundary conditions during setup",
+          "[solvers][boundaries][robin]") {
+    const std::string mesh_file = "test_robin_rejection.mesh";
+    CreatePlanarStripMesh(mesh_file, 0.1, 0.02, 2, 1);
+
+    auto robin_config = [&](const std::string& physics, const json& material) {
+        json config = MakePlanarStripConfig(
+            physics, mesh_file, 1, material, 0.0, 0.0);
+        config["boundaries"][1]["type"] = "Robin";
+        config["boundaries"][1]["robin_coefficient"] = 1.0;
+        if (physics == "magnetoquasistatics") {
+            config["scenarios"][0]["frequency"] = 60.0;
+        }
+        return config;
+    };
+
+    SECTION("electrostatics") {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        ElectrostaticSolver solver(mesh, DecodeConfig(
+            robin_config("electrostatics", {{"epsilon_r", 1.0}})));
+        REQUIRE_THROWS_WITH(solver.Setup(),
+            Catch::Matchers::ContainsSubstring("reserved but not implemented"));
+    }
+
+    SECTION("magnetostatics") {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetostaticSolver solver(mesh, DecodeConfig(
+            robin_config("magnetostatics", {{"mu_r", 1.0}})));
+        REQUIRE_THROWS_WITH(solver.Setup(),
+            Catch::Matchers::ContainsSubstring("reserved but not implemented"));
+    }
+
+    SECTION("magnetoquasistatics") {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetoquasistaticSolver solver(mesh, DecodeConfig(
+            robin_config("magnetoquasistatics",
+                         {{"mu_r", 1.0}, {"sigma", 0.0}})));
+        REQUIRE_THROWS_WITH(solver.Setup(),
+            Catch::Matchers::ContainsSubstring("reserved but not implemented"));
+    }
+
+    fs::remove(mesh_file);
 }
 
 class ScenarioOrderProbe : public PhysicsSolver {

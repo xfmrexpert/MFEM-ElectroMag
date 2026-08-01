@@ -22,6 +22,7 @@ class ElectrostaticSolver : public PhysicsSolver {
 	std::unique_ptr<mfem::PWConstCoefficient> epsilon_coeff;
 
 	std::unique_ptr<mfem::LinearForm> b;
+	mfem::Vector neumann_rhs;
 	std::unique_ptr<mfem::BilinearForm> a;
 
 	std::unique_ptr<mfem::SparseMatrix> K0;
@@ -60,14 +61,16 @@ public:
 			return m.RelPermittivity * Constants::EPSILON_0; });
 
 		// Closures + voltage terminals are all essential (Dirichlet).
-		auto bcs = BuildClosureBcs();
+		closure_bcs = BuildClosureBcs();
 
 		terminal_markers.clear();
 		for (const auto& [term_name, term] : config.Terminals)
 			terminal_markers[term_name] = MarkerFromGroup(term.EntityGroupName);
 
 		std::vector<mfem::Array<int>> ess_markers;
-		for (const auto& [marker, val] : bcs) ess_markers.push_back(marker);
+		for (const auto& marker : DirichletClosureMarkers(closure_bcs)) {
+			ess_markers.push_back(marker);
+		}
 		for (const auto& [name, marker] : terminal_markers) ess_markers.push_back(marker);
 		ess_bdr = EssentialBdrFrom(ess_markers);
 
@@ -78,7 +81,7 @@ public:
 		// invariant) mesh topology / attributes; it merely needs an FE space for
 		// DOF queries, so running it after the first BuildOperators() is correct.
 		BoundaryConditionValidator validator(mesh, *fespace);
-		validator.ValidateBoundaryConditions(bcs, terminal_markers, /*allow_overlap=*/false);
+		validator.ValidateBoundaryConditions(closure_bcs, terminal_markers, /*allow_overlap=*/false);
 	}
 
 	// (Re)build the FE space and every object bound to it for the CURRENT mesh.
@@ -107,6 +110,7 @@ public:
 
 		// Linear Form (RHS)
 		b = std::make_unique<mfem::LinearForm>(fespace.get());
+		neumann_rhs = AssembleNeumannBoundaryLoad();
 
 		fespace->GetEssentialTrueDofs(ess_bdr, ess_tdof_list);
 
@@ -188,10 +192,10 @@ public:
 
 	void ImprintScenario(const Scenario& sc) {
 		*x = 0.0; // Reset solution for new scenario
-		*b = 0.0; // Reset RHS for new scenario
+		*b = neumann_rhs;
 		
 		for (const auto& bc : config.BoundaryConditions) {
-			if (bc.Value != 0.0) {
+			if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
 				auto marker = MarkerFromGroup(bc.EntityGroupName);
 				mfem::ConstantCoefficient c(bc.Value);
 				x->ProjectBdrCoefficient(c, marker);

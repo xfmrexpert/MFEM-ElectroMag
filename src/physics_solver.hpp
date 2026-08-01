@@ -14,6 +14,8 @@
 #include "status_reporter.hpp"
 #include "amr_support.hpp"
 #include "axisymmetric_mesh.hpp"
+#include "axisymmetric_boundary_lf_integrator.hpp"
+#include "marked_boundary_condition.hpp"
 
 /**
  * @brief Base class for physics solvers using MFEM
@@ -34,6 +36,7 @@ protected:
     // Setup-time axisymmetric mesh classification and axis boundary marker.
     // Planar problems leave it at its default.
     axisym::MeshInfo axisymmetric_mesh;
+    std::vector<MarkedBoundaryCondition> closure_bcs;
 
     std::vector<amr::AmrIterationInfo> amr_history;
 
@@ -55,14 +58,72 @@ protected:
         return MarkerFromAttrs(config.EntityGroups.at(group_name).AttributeIds);
     }
 
-    // Closure boundary conditions as (marker, value) pairs, in config order.
-    // Shared by ess_bdr construction and BoundaryConditionValidator.
-    std::vector<std::pair<mfem::Array<int>, double>> BuildClosureBcs() const {
-        std::vector<std::pair<mfem::Array<int>, double>> bcs;
+    std::vector<MarkedBoundaryCondition> BuildClosureBcs() const {
+        std::vector<MarkedBoundaryCondition> bcs;
         bcs.reserve(config.BoundaryConditions.size());
-        for (const auto& bc : config.BoundaryConditions)
-            bcs.push_back({ MarkerFromGroup(bc.EntityGroupName), bc.Value });
+        for (const auto& bc : config.BoundaryConditions) {
+            MFEM_VERIFY(bc.Type != BoundaryConditionType::Robin,
+                "Robin boundary conditions are reserved but not implemented. "
+                "Use Dirichlet or Neumann for boundary group '" +
+                bc.EntityGroupName + "'.");
+            bcs.push_back({ MarkerFromGroup(bc.EntityGroupName), bc });
+        }
         return bcs;
+    }
+
+    std::vector<mfem::Array<int>> DirichletClosureMarkers(
+        const std::vector<MarkedBoundaryCondition>& bcs) const {
+        std::vector<mfem::Array<int>> markers;
+        for (const auto& bc : bcs) {
+            if (bc.Condition.Type == BoundaryConditionType::Dirichlet) {
+                markers.push_back(bc.Marker);
+            }
+        }
+        return markers;
+    }
+
+    void ValidateMagneticAxisBoundaryValues() const {
+        if (geometry != GeometryType::Axisymmetric ||
+            !axisymmetric_mesh.TouchesAxis()) return;
+
+        for (const auto& bc : closure_bcs) {
+            if (bc.Condition.Type != BoundaryConditionType::Dirichlet ||
+                bc.Condition.Value == 0.0) continue;
+
+            const int marker_size =
+                std::min(bc.Marker.Size(), axisymmetric_mesh.axis_boundary.Size());
+            for (int attr = 0; attr < marker_size; ++attr) {
+                MFEM_VERIFY(!bc.Marker[attr] || !axisymmetric_mesh.axis_boundary[attr],
+                    "Boundary group '" + bc.Condition.EntityGroupName +
+                    "' assigns a nonzero Dirichlet value on magnetic symmetry-axis "
+                    "attribute " + std::to_string(attr + 1) +
+                    ". Axis regularity requires A_phi = 0 at r = 0.");
+            }
+        }
+    }
+
+    mfem::Vector AssembleNeumannBoundaryLoad() {
+        mfem::LinearForm load(fespace.get());
+        std::vector<std::unique_ptr<mfem::ConstantCoefficient>> coefficients;
+
+        for (auto& bc : closure_bcs) {
+            if (bc.Condition.Type != BoundaryConditionType::Neumann ||
+                bc.Condition.Value == 0.0) continue;
+            coefficients.push_back(
+                std::make_unique<mfem::ConstantCoefficient>(bc.Condition.Value));
+            if (geometry == GeometryType::Axisymmetric) {
+                load.AddBoundaryIntegrator(
+                    new AxisymmetricBoundaryLFIntegrator(*coefficients.back()),
+                    bc.Marker);
+            } else {
+                load.AddBoundaryIntegrator(
+                    new mfem::BoundaryLFIntegrator(*coefficients.back()),
+                    bc.Marker);
+            }
+        }
+
+        load.Assemble();
+        return mfem::Vector(load);
     }
 
     // The ordered list of (name, scenario) solves for the active analysis, so

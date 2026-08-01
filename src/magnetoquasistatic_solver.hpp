@@ -45,6 +45,7 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     std::unique_ptr<mfem::PWConstCoefficient> sigma_coeff;
     std::unique_ptr<mfem::PWConstCoefficient> j_coeff;     
     mfem::Vector conductivity_values;
+    mfem::Vector neumann_rhs;
     std::vector<mfem::real_t> port_conductances;
     
     mfem::Array<int> ess_mesh_tdofs;   // scalar-space essential mesh true DOFs
@@ -231,13 +232,11 @@ public:
         conductivity_values = MaterialVector(0.0, Conductivity);
         sigma_coeff = std::make_unique<mfem::PWConstCoefficient>(conductivity_values);
 
-        auto bcs = BuildClosureBcs();
+        closure_bcs = BuildClosureBcs();
+        ValidateMagneticAxisBoundaryValues();
 
-        // All closures are essential (Dirichlet). Non-zero values are lifted into
-        // x_combined in ImprintScenario() so FormLinearSystem constrains to them.
-        std::vector<mfem::Array<int>> ess_markers;
-        for (const auto& [marker, val] : bcs)
-            ess_markers.push_back(marker);
+        std::vector<mfem::Array<int>> ess_markers =
+            DirichletClosureMarkers(closure_bcs);
         ess_bdr = EssentialBdrFrom(ess_markers);
 
         // Axis regularity: the setup-time mesh inspection identifies a dedicated
@@ -257,12 +256,14 @@ public:
 
         // Validate that BCs don't create physical conflicts
         BoundaryConditionValidator validator(mesh, *fespace);
-        validator.ValidateBoundaryConditions(bcs, /*terminals=*/{}, false);  // Strict mode - reject conflicts
+        validator.ValidateBoundaryConditions(
+            closure_bcs, /*terminals=*/{}, false);  // Strict mode - reject conflicts
     }
 
     void BuildOperators() override {
 		// Build the FE space and everything bound to it for the starting mesh.
 		fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
+        neumann_rhs = AssembleNeumannBoundaryLoad();
 
         // Setup Complex Billinear Form
         S_AA = std::make_unique<mfem::SesquilinearForm>(fespace.get(), mfem::ComplexOperator::HERMITIAN);
@@ -368,7 +369,7 @@ public:
         // ess_tdof values are lifted into the RHS by FormLinearSystem at solve time,
         // so they must be set AFTER the *A = 0.0 reset, every scenario.
         for (const auto& bc : config.BoundaryConditions) {
-            if (bc.Value != 0.0) {
+            if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
                 const EntityGroup& group = config.EntityGroups.at(bc.EntityGroupName);
                 auto marker = MarkerFromAttrs(group.AttributeIds);
                 mfem::ConstantCoefficient c_re(bc.Value);
@@ -401,7 +402,7 @@ public:
         b_source.Assemble();
         const mfem::real_t* b_source_data = b_source.GetData();   // bypass LinearForm::operator()
         for (int d = 0; d < port_operator->Layout().NDofs(); ++d) {
-            b.ReMesh(d) += b_source_data[d];
+            b.ReMesh(d) += b_source_data[d] + neumann_rhs[d];
         }
 
         // Drive the active port(s) via the imaginary port block Im_Port.

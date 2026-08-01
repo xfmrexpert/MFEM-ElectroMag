@@ -101,7 +101,8 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
     REQUIRE(config.Terminals.at("Coil").Conductor == ConductorType::Stranded);
     REQUIRE(config.Terminals.at("Coil").EntityGroupName == "Conductor");
     REQUIRE(config.BoundaryConditions.size() == 1);
-    REQUIRE(config.BoundaryConditions[0].Type == "Robin");
+    REQUIRE(config.BoundaryConditions[0].Type == BoundaryConditionType::Robin);
+    REQUIRE(config.BoundaryConditions[0].Value == Catch::Approx(4.0));
     REQUIRE(config.BoundaryConditions[0].RobinCoeff == Catch::Approx(2.0));
 
     REQUIRE(config.Scenarios.size() == 2);
@@ -109,6 +110,21 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
     REQUIRE(config.Scenarios[0].second.Frequency == Catch::Approx(50.0));
     REQUIRE(config.Scenarios[0].second.Excitations[0].Value == Catch::Approx(20.0));
     REQUIRE(config.Scenarios[1].first == "First");
+}
+
+TEST_CASE("InputParser decodes typed Dirichlet and Neumann boundaries",
+          "[input_parser][boundaries]") {
+    json source = CanonicalConfig();
+    source["boundaries"] = json::array({
+        {{"type", "Dirichlet"}, {"entity_group", "FarField"}, {"value", 3.0}},
+        {{"type", "Neumann"}, {"entity_group", "FarField"}, {"value", -2.0}}
+    });
+
+    const auto boundaries = InputParser(source).GetProblemConfig().BoundaryConditions;
+    REQUIRE(boundaries.size() == 2);
+    REQUIRE(boundaries[0].Type == BoundaryConditionType::Dirichlet);
+    REQUIRE(boundaries[1].Type == BoundaryConditionType::Neumann);
+    REQUIRE(boundaries[1].Value == Catch::Approx(-2.0));
 }
 
 TEST_CASE("InputParser expands MQS frequency sweeps", "[input_parser][mqs]") {

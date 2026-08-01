@@ -570,10 +570,19 @@ private:
 
             if (!bc.contains("type")) {
                 AddError(prefix + ".type", "Missing required field 'type'");
-            } else {
+            } else if (bc["type"].is_string()) {
                 std::string bc_type = bc["type"];
                 if (bc_type != "Dirichlet" && bc_type != "Neumann" && bc_type != "Robin") {
                     AddError(prefix + ".type", "Invalid boundary type '" + bc_type + "'. Must be 'Dirichlet', 'Neumann', or 'Robin'");
+                }
+
+                if (bc_type == "Robin" && !bc.contains("robin_coefficient")) {
+                    AddError(prefix + ".robin_coefficient",
+                             "Robin boundaries require 'robin_coefficient'");
+                }
+                if (bc_type != "Robin" && bc.contains("robin_coefficient")) {
+                    AddError(prefix + ".robin_coefficient",
+                             "'robin_coefficient' is only valid for Robin boundaries");
                 }
             }
 
@@ -585,6 +594,20 @@ private:
 
             if (!bc.contains("value")) {
                 AddError(prefix + ".value", "Missing required field 'value'");
+            } else if (bc["value"].is_number()) {
+                const double value = bc["value"].get<double>();
+                if (!std::isfinite(value)) {
+                    AddError(prefix + ".value", "Boundary value must be finite");
+                }
+            }
+
+            if (bc.contains("robin_coefficient") &&
+                bc["robin_coefficient"].is_number()) {
+                const double coefficient = bc["robin_coefficient"].get<double>();
+                if (!std::isfinite(coefficient)) {
+                    AddError(prefix + ".robin_coefficient",
+                             "Robin coefficient must be finite");
+                }
             }
         }
     }

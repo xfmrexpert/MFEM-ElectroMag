@@ -27,6 +27,8 @@ enum class ConductorType { Massive, Stranded };
 
 enum class RegionCurrentConstraint { None, Open };
 
+enum class BoundaryConditionType { Dirichlet, Neumann, Robin };
+
 struct EntityGroup {
 	EntityDim Dim;              // boundary or domain
 	std::vector<int> AttributeIds;   // mesh attribute ids (boundary or domain, depending on context)
@@ -60,15 +62,17 @@ struct Material {
 	double RelPermeability = 1.0;   // mu_r     (vacuum default)
 };
 
-// A "closure" condition that makes the BVP well-posed (far-field, symmetry,
-// axis regularity). Terminals are NOT modeled here.
+// A boundary closure condition. For Neumann data, Value is the prescribed
+// outward natural flux n.material_flux; zero is the implicit natural condition.
+// Robin metadata is retained for forward compatibility but is not yet assembled.
+// Terminals and magnetic axis regularity are modeled separately.
 struct BoundaryCondition {
-	std::string Type;                // "Dirichlet", "Neumann", "Robin"
+	BoundaryConditionType Type;
 	std::string EntityGroupName;     // mesh boundary group name (validated)
 	double Value = 0.0;
-	double RobinCoeff = 0.0;         // Robin: alpha*u + beta*du/dn = value
+	double RobinCoeff = 0.0;         // Reserved: natural_flux + RobinCoeff*u = Value
 
-	BoundaryCondition(const std::string& t, const std::string& g,
+	BoundaryCondition(BoundaryConditionType t, const std::string& g,
 					  double v, double rc = 0.0)
 		: Type(t), EntityGroupName(g), Value(v), RobinCoeff(rc) {}
 };

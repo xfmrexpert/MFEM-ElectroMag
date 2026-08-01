@@ -436,10 +436,18 @@ private:
                 double val = bc["value"];
                 double robin_coeff = bc.value("robin_coefficient", 1.0);
 
-                bcs.emplace_back(bc_type, group_name, val, robin_coeff);
+                bcs.emplace_back(ParseBoundaryConditionType(bc_type), group_name,
+                                  val, robin_coeff);
             }
         }
         return bcs;
+    }
+
+    static BoundaryConditionType ParseBoundaryConditionType(const std::string& type) {
+        if (type == "Dirichlet") return BoundaryConditionType::Dirichlet;
+        if (type == "Neumann") return BoundaryConditionType::Neumann;
+        if (type == "Robin") return BoundaryConditionType::Robin;
+        throw std::invalid_argument("Unsupported boundary condition type: " + type);
     }
 
     // --------------------------------------------------------

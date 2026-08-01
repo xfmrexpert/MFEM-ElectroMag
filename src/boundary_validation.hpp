@@ -11,13 +11,15 @@
 #include <unordered_map>
 #include <string>
 #include <algorithm>
+#include "marked_boundary_condition.hpp"
 
 /// Validates that boundary constraints (closures + terminals) are well-posed.
 ///
-/// Two independent checks are performed:
-///   1. Closure value conflicts - a DOF pinned by closure conditions (far-field,
-///      symmetry, axis) to two DIFFERENT fixed values is ill-posed.
-///   2. Terminal ownership/overlap - terminal values are scenario-dependent, so a
+/// Three checks are performed:
+///   1. Dirichlet value conflicts - a DOF pinned to two different fixed values
+///      is ill-posed. Weak Neumann conditions do not participate in this check.
+///   2. Duplicate closure assignments on the same boundary attributes.
+///   3. Terminal ownership/overlap - terminal values are scenario-dependent, so a
 ///      DOF may be owned by at most ONE terminal and must not also be a closure
 ///      DOF. Any shared DOF is guaranteed to conflict in some scenario.
 class BoundaryConditionValidator {
@@ -84,21 +86,24 @@ public:
     BoundaryConditionValidator(mfem::Mesh& m, mfem::FiniteElementSpace& fes)
         : mesh(m), fespace(fes) {}
 
-    /// @param closures      (boundary_marker, value) pairs for closure conditions.
+    /// @param closures      Typed closure conditions with boundary markers.
     /// @param terminals     terminal name -> boundary marker for voltage terminals.
     /// @param allow_overlap If true, warn but don't throw on detected problems.
     /// @throws std::runtime_error if problems are detected and !allow_overlap.
     void ValidateBoundaryConditions(
-        const std::vector<std::pair<mfem::Array<int>, double>>& closures,
+        const std::vector<MarkedBoundaryCondition>& closures,
         const std::unordered_map<std::string, mfem::Array<int>>& terminals,
         bool allow_overlap = false)
     {
         std::vector<std::string> problems;
         const double tolerance = 1e-10;
 
-        // (1) Closure value conflicts: same DOF pinned to different fixed values.
+        // (1) Dirichlet value conflicts: weak conditions do not pin DOFs.
         std::map<int, std::vector<std::tuple<double, int, int>>> dof_values;
-        for (const auto& [marker, value] : closures) {
+        for (const auto& closure : closures) {
+            if (closure.Condition.Type != BoundaryConditionType::Dirichlet) continue;
+            const auto& marker = closure.Marker;
+            const double value = closure.Condition.Value;
             for (int i = 0; i < fespace.GetNBE(); ++i) {
                 int attr = mesh.GetBdrAttribute(i);
                 if (attr < 1 || attr > marker.Size() || !marker[attr - 1]) continue;
@@ -137,19 +142,59 @@ public:
             problems.push_back(oss.str());
         }
 
-        // (2) Terminal ownership/overlap: each DOF owned by at most one terminal,
-        //     and never shared with a closure. Terminal values vary per scenario,
-        //     so any shared DOF is guaranteed to conflict in some scenario.
-        std::map<int, int> closure_dofs;  // dof -> touching bdr element
-        for (const auto& [marker, value] : closures) {
-            (void)value;
-            CollectMarkerDofs(marker, closure_dofs);
+        // Two configured conditions may meet at vertices, but they must not claim
+        // the same boundary attribute (and therefore the same boundary elements).
+        for (size_t i = 0; i < closures.size(); ++i) {
+            for (size_t j = i + 1; j < closures.size(); ++j) {
+                const auto& lhs = closures[i];
+                const auto& rhs = closures[j];
+                const int marker_size = std::min(lhs.Marker.Size(), rhs.Marker.Size());
+                for (int attr = 0; attr < marker_size; ++attr) {
+                    if (!lhs.Marker[attr] || !rhs.Marker[attr]) continue;
+                    std::ostringstream oss;
+                    oss << "Boundary attribute " << (attr + 1)
+                        << " is assigned to both '" << lhs.Condition.EntityGroupName
+                        << "' and '" << rhs.Condition.EntityGroupName
+                        << "'. Each boundary entity must have one closure condition.";
+                    problems.push_back(oss.str());
+                    break;
+                }
+            }
         }
 
         std::vector<std::string> term_names;
         term_names.reserve(terminals.size());
         for (const auto& kv : terminals) term_names.push_back(kv.first);
         std::sort(term_names.begin(), term_names.end());  // deterministic output
+
+        // A boundary attribute has one physical owner. In particular, a weak
+        // Neumann load on a voltage-terminal attribute would be silently removed
+        // when the terminal's essential DOFs are eliminated.
+        for (const auto& closure : closures) {
+            for (const auto& name : term_names) {
+                const auto& terminal = terminals.at(name);
+                const int marker_size = std::min(closure.Marker.Size(), terminal.Size());
+                for (int attr = 0; attr < marker_size; ++attr) {
+                    if (!closure.Marker[attr] || !terminal[attr]) continue;
+                    std::ostringstream oss;
+                    oss << "Boundary attribute " << (attr + 1)
+                        << " is assigned to closure '"
+                        << closure.Condition.EntityGroupName
+                        << "' and voltage terminal '" << name
+                        << "'. Each boundary entity must have one physical role.";
+                    problems.push_back(oss.str());
+                    break;
+                }
+            }
+        }
+
+        // (2) Terminal ownership/overlap: only Dirichlet closures are essential.
+        std::map<int, int> closure_dofs;  // dof -> touching bdr element
+        for (const auto& closure : closures) {
+            if (closure.Condition.Type == BoundaryConditionType::Dirichlet) {
+                CollectMarkerDofs(closure.Marker, closure_dofs);
+            }
+        }
 
         std::map<int, std::vector<std::string>> dof_terminals;  // dof -> terminal names
         std::map<int, int> terminal_dof_be;                     // dof -> touching bdr element
@@ -194,7 +239,7 @@ public:
         msg << (allow_overlap ? "WARNING" : "ERROR")
             << ": Conflicting Boundary Constraints Detected!\n";
         msg << "========================================\n\n";
-        msg << "The same DOF is constrained by incompatible essential conditions.\n";
+        msg << "Boundary entities or DOFs have incompatible assignments.\n";
         msg << "This typically indicates:\n";
         msg << "  1. Mesh: boundaries/terminals with different roles share nodes\n";
         msg << "  2. Config: a node is driven to two values at once (now or per-scenario)\n\n";

@@ -62,8 +62,14 @@ u = ½ ε |E⃗|²
 ### Boundary Conditions
 
 - **Dirichlet:** `V = V₀` on `∂Ω_D` (e.g., electrode surfaces)
-- **Neumann:** `n̂ · (ε ∇V) = σ` on `∂Ω_N` (e.g., surface charge density)
-- **Robin:** `α V + β n̂ · ∇V = g` on `∂Ω_R`
+- **Neumann:** `n̂ · (ε ∇V) = g` on `∂Ω_N`. The configured `value`
+  is this outward natural flux and is added to the weak-form boundary RHS.
+  A zero value is the implicit natural condition and requires no assembled term.
+- **Robin:** Reserved in the input schema but not yet implemented by the solvers.
+
+For axisymmetric problems, a nonzero Neumann load is integrated with the
+meridional boundary measure `2πr ds` (the implementation omits the common
+global `2π` factor consistently from every term).
 
 ## 2. Magnetostatics
 
@@ -136,7 +142,17 @@ u = ½ B⃗ · H⃗ = ½ ν |B⃗|²
 ### Boundary Conditions
 
 - **Dirichlet:** `A_φ = A₀` on `∂Ω_D` (e.g., far-field boundaries, symmetry planes)
-- **Neumann:** `n̂ · (ν ∇ × A⃗) = 0` on `∂Ω_N` (e.g., magnetic insulation)
+- **Neumann:** The configured `value` is the outward natural flux `g`; zero is
+  implicit and nonzero data contributes to the boundary RHS. In the planar
+  scalar formulation, `g = ν n̂ · ∇A_z`. In the axisymmetric curl-curl
+  formulation,
+  `g = ν[n_r(∂A_φ/∂r + A_φ/r) + n_z ∂A_φ/∂z]`. The `A_φ/r` contribution is
+  part of the radial natural flux and cannot be replaced by `n̂ · (ν∇A_φ)`.
+- **Robin:** Reserved in the input schema but not yet implemented.
+
+For an axisymmetric magnetic problem that reaches `r = 0`, regularity requires
+`A_φ = 0` on the axis. The solver detects that boundary and applies this
+essential constraint automatically; it is not a natural Neumann condition.
 
 ## 3. Magnetoquasistatics (Eddy Currents)
 
@@ -219,9 +235,12 @@ P = ½ σ ω² |A⃗|²
 
 ### Boundary Conditions
 
-Same as magnetostatics, but with complex values:
-- **Dirichlet:** `A_φ = A₀,real + j A₀,imag` on `∂Ω_D`
-- **Neumann:** Natural boundary (tangential `H⃗ = 0`)
+Same essential/natural split as magnetostatics:
+- **Dirichlet:** The configured real value constrains `A_φ`; the imaginary
+  boundary value is currently zero.
+- **Neumann:** The configured real outward natural flux is assembled into the
+  real field RHS. A zero value remains implicit.
+- **Robin:** Reserved in the input schema but not yet implemented.
 
 ## Finite Element Discretization
 
@@ -235,4 +254,5 @@ All three formulations use H¹-conforming (Lagrange) finite elements:
 
 1. **Axis handling:** Near `r = 0`, use L'Hôpital's rule to evaluate `A/r` limits
 2. **Integration weight:** Include `2πr` factor in all volume integrals
-3. **Boundary conditions:** No special treatment needed on the axis (`r = 0`) for Neumann BCs
+3. **Boundary conditions:** Electrostatic axis symmetry is natural, while the
+   magnetic `A_φ` formulation automatically enforces `A_φ = 0` on `r = 0`

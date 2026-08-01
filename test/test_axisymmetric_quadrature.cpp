@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "../src/axisymmetric_curl_curl_integrator.hpp"
 #include "../src/axisymmetric_diffusion_integrator.hpp"
 #include "../src/axisymmetric_lf_integrator.hpp"
 #include "../src/axisymmetric_mass_integrator.hpp"
+#include "../src/axisymmetric_boundary_lf_integrator.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -54,6 +56,7 @@ double RelativeDifference(const mfem::DenseMatrix &actual,
 		 reference_squared += reference(row, column) * reference(row, column);
 	  }
    }
+
    return std::sqrt(difference_squared / reference_squared);
 }
 
@@ -133,4 +136,20 @@ TEST_CASE("Axisymmetric quadrature accounts for element transformations",
    {
 	  CheckAutomaticQuadrature(true);
    }
+}
+
+TEST_CASE("Axisymmetric boundary load includes radial measure",
+		  "[axisymmetric][quadrature][boundary]")
+{
+   auto mesh = MakeAxisymmetricMesh(false); // unit square shifted to 1 <= r <= 2
+   mfem::H1_FECollection collection(1, mesh->Dimension());
+   mfem::FiniteElementSpace space(mesh.get(), &collection);
+   mfem::ConstantCoefficient unit_load(1.0);
+   mfem::LinearForm load(&space);
+   load.AddBoundaryIntegrator(new AxisymmetricBoundaryLFIntegrator(unit_load));
+   load.Assemble();
+
+   // Partition of unity gives integral_boundary r ds:
+   // bottom + top + left + right = 3/2 + 3/2 + 1 + 2 = 6.
+   REQUIRE(load.Sum() == Catch::Approx(6.0).epsilon(1.0e-12));
 }
