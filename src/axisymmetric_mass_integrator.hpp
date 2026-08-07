@@ -4,17 +4,15 @@
 #pragma once
 
 #include "mfem.hpp"
-#include "constants.hpp"
+#include "axisymmetric_measure.hpp"
 
 /**
  * @brief Axisymmetric Mass Integrator for Eddy Currents
- * Solves: Integral( sigma * A * v * r * dr * dz ), with the global 2*pi omitted.
+ * Solves: Integral( sigma * A * v * 2*pi*r * dr * dz )
  * Used for the mass term in time-harmonic problems (j * omega * sigma * A)
  *
- * The 2*pi factor is deliberately omitted so this term shares the convention of
- * AxisymmetricCurlCurlIntegrator and AxisymmetricLFIntegrator. Including it here
- * only would scale the conductivity term of K + j*omega*M_sigma by a spurious
- * 2*pi relative to the stiffness term.
+ * Carries the full axisymmetric measure (see axisymmetric_measure.hpp), matching
+ * AxisymmetricCurlCurlIntegrator so K + j*omega*M_sigma is physical throughout.
  */
 class AxisymmetricMassIntegrator : public mfem::BilinearFormIntegrator
 {
@@ -67,8 +65,8 @@ public:
 
          double val = Q->Eval(Trans, ip); // Conductivity sigma
 
-         // Weight = w * det(J) * r * sigma (global 2*pi omitted)
-         double w = ip.weight * Trans.Weight() * r * val;
+         // Weight = w * det(J) * 2*pi*r * sigma
+         double w = ip.weight * Trans.Weight() * Axisymmetric::Measure(r) * val;
 
          el.CalcShape(ip, shape);
 

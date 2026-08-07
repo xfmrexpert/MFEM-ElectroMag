@@ -4,12 +4,14 @@
 #pragma once
 
 #include "mfem.hpp"
+#include "axisymmetric_measure.hpp"
 
 /**
  * @brief Integrates an axisymmetric natural boundary load.
  *
- * Assembles integral(q * v * r ds) on the meridional boundary. The global
- * 2*pi factor is omitted consistently with the other axisymmetric integrators.
+ * Assembles integral(q * v * 2*pi*r ds) on the meridional boundary, carrying the
+ * full axisymmetric measure (see axisymmetric_measure.hpp) so the load pairs
+ * correctly with the stiffness operator.
  */
 class AxisymmetricBoundaryLFIntegrator : public mfem::LinearFormIntegrator
 {
@@ -44,7 +46,8 @@ public:
 
 			const double r = pos(0);
 			const double value = load->Eval(trans, ip);
-			const double weight = ip.weight * trans.Weight() * r * value;
+			const double weight = ip.weight * trans.Weight()
+				* Axisymmetric::Measure(r) * value;
 
 			el.CalcShape(ip, shape);
 			elvect.Add(weight, shape);

@@ -7,15 +7,16 @@
 #include <limits>
 
 #include "mfem.hpp"
+#include "axisymmetric_measure.hpp"
 
 /**
  * @brief Thread-safe axisymmetric curl-curl bilinear form integrator for magnetostatics
  *        with A = A_phi(r,z) e_phi.
  *
- * Assembles the following form, with the global 2*pi factor omitted:
+ * Assembles, with the full axisymmetric measure (see axisymmetric_measure.hpp):
  *
  *   integral nu * [dA/dz * dv/dz
- *                  + (dA/dr + A/r) * (dv/dr + v/r)] * r dr dz
+ *                  + (dA/dr + A/r) * (dv/dr + v/r)] * 2*pi*r dr dz
  *
  * This follows from
  *
@@ -110,8 +111,9 @@ public:
 
          const double nu = nu_->Eval(Trans, ip);
 
-         // Axisymmetric weight (global 2*pi omitted): ip.weight * detJ * r * nu
-         const double w = ip.weight * Trans.Weight() * r * nu;
+         // Axisymmetric weight: ip.weight * detJ * 2*pi*r * nu
+         const double w = ip.weight * Trans.Weight()
+            * Axisymmetric::Measure(r) * nu;
 
          el.CalcShape(ip, shape);
          el.CalcDShape(ip, dshape_ref);
@@ -282,7 +284,8 @@ public:
            // the contribution simply vanishes on the axis.
            const double r = pos(0);
            const double nu = nu_->Eval(Trans, ip);
-           const double weight = ip.weight * Trans.Weight() * r;
+           const double weight = ip.weight * Trans.Weight()
+               * Axisymmetric::Measure(r);
 
            energy += weight * nu * (point_flux * point_flux);
        }

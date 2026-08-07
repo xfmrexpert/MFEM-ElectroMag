@@ -76,6 +76,12 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     }
 
     // Function to build the port vector for a specific port attribute
+    //
+    // The massive-port row is physical as written and needs no normalization
+    // adjustment: the field-row blocks (curl-curl K, sigma mass M_sigma, domain
+    // load) all carry the full 2*pi*r measure. Weighting the field source
+    // sigma*V/(2*pi*r) by that measure leaves exactly V * integral(sigma*v dr dz),
+    // which is this plain (unweighted) domain form.
     std::unique_ptr<mfem::Vector> BuildPortVector(mfem::FiniteElementSpace* fespace,
                             std::vector<int> port_attributes,
                             double sigma)
@@ -760,11 +766,10 @@ public:
         }
         winding_functional.Assemble();
 
-        const double geometry_scale =
-            geometry == GeometryType::Axisymmetric ? Constants::TWO_PI : 1.0;
+        // Both integrators carry the full geometric measure, so these are webers.
         return {
-            geometry_scale * (winding_functional * A->real()),
-            geometry_scale * (winding_functional * A->imag())
+            winding_functional * A->real(),
+            winding_functional * A->imag()
         };
     }
 

@@ -9,6 +9,7 @@
 #include "../src/axisymmetric_lf_integrator.hpp"
 #include "../src/axisymmetric_mass_integrator.hpp"
 #include "../src/axisymmetric_boundary_lf_integrator.hpp"
+#include "../src/constants.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -149,7 +150,8 @@ TEST_CASE("Axisymmetric boundary load includes radial measure",
    load.AddBoundaryIntegrator(new AxisymmetricBoundaryLFIntegrator(unit_load));
    load.Assemble();
 
-   // Partition of unity gives integral_boundary r ds:
-   // bottom + top + left + right = 3/2 + 3/2 + 1 + 2 = 6.
-   REQUIRE(load.Sum() == Catch::Approx(6.0).epsilon(1.0e-12));
+   // Partition of unity gives the full measure integral_boundary 2*pi*r ds:
+   // bottom + top + left + right = 3/2 + 3/2 + 1 + 2 = 6, times 2*pi.
+   REQUIRE(load.Sum()
+           == Catch::Approx(Constants::TWO_PI * 6.0).epsilon(1.0e-12));
 }

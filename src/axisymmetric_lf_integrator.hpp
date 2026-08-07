@@ -4,12 +4,13 @@
 #pragma once
 
 #include "mfem.hpp"
-#include "constants.hpp"
+#include "axisymmetric_measure.hpp"
 
 // -----------------------------------------------------------------------------
 // 2. Linear Form Integrator: Current Density (J_phi)
 // -----------------------------------------------------------------------------
-// Solves: Integral( J_phi * v * r * dr * dz )
+// Solves: Integral( J_phi * v * 2*pi*r * dr * dz )
+// Carries the full axisymmetric measure (see axisymmetric_measure.hpp).
 class AxisymmetricLFIntegrator : public mfem::LinearFormIntegrator
 {
 private:
@@ -60,7 +61,7 @@ public:
          const double r = pos(0);
          const double val = src->Eval(Trans, ip);
 
-         const double w = ip.weight * Trans.Weight() * r * val;
+         const double w = ip.weight * Trans.Weight() * Axisymmetric::Measure(r) * val;
 
          el.CalcShape(ip, shape);
          elvect.Add(w, shape);

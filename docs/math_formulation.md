@@ -43,7 +43,8 @@ In cylindrical coordinates with axisymmetry:
 ∫₀^{z_max} ∫₀^{r_max} ε (∂V/∂r · ∂v/∂r + ∂V/∂z · ∂v/∂z) · 2πr dr dz
 ```
 
-The factor `2πr` comes from the volume element in cylindrical coordinates when integrating over the full azimuthal angle.
+The factor `2πr` comes from the volume element in cylindrical coordinates when integrating over the full azimuthal angle. The implementation applies this measure
+in full; see [Integration Measure Convention](#integration-measure-convention).
 
 ### Derived Quantities
 
@@ -68,8 +69,8 @@ u = ½ ε |E⃗|²
 - **Robin:** Reserved in the input schema but not yet implemented by the solvers.
 
 For axisymmetric problems, a nonzero Neumann load is integrated with the
-meridional boundary measure `2πr ds` (the implementation omits the common
-global `2π` factor consistently from every term).
+meridional boundary measure `2πr ds`, the same full measure carried by the
+stiffness operator.
 
 ## 2. Magnetostatics
 
@@ -248,11 +249,46 @@ All three formulations use H¹-conforming (Lagrange) finite elements:
 
 - **Basis functions:** `φ_i(r, z)` with `C⁰` continuity
 - **Degrees of freedom:** Nodal values
-- **Integration:** Gauss quadrature with elevated order to handle the `1/r` and `2πr` terms
+- **Integration:** Gauss quadrature with elevated order to handle the `1/r` and `2*pi*r` weight terms
 
 ### Special Considerations for Axisymmetry
 
-1. **Axis handling:** Near `r = 0`, use L'Hôpital's rule to evaluate `A/r` limits
-2. **Integration weight:** Include `2πr` factor in all volume integrals
+1. **Axis handling:** Near `r = 0`, use L'Hopital's rule to evaluate `A/r` limits
+2. **Integration weight:** Include the full `2*pi*r` factor in all volume integrals
 3. **Boundary conditions:** Electrostatic axis symmetry is natural, while the
-   magnetic `A_φ` formulation automatically enforces `A_φ = 0` on `r = 0`
+   magnetic `A_phi` formulation automatically enforces `A_phi = 0` on `r = 0`
+
+### Integration Measure Convention
+
+Revolving a meridional `(r, z)` domain through the full azimuthal angle gives the
+volume element `2*pi*r dr dz` and the boundary element `2*pi*r ds`. **Every
+axisymmetric integrator applies the full measure**, obtained from the single
+definition `Axisymmetric::Measure(r)` in `src/axisymmetric_measure.hpp`:
+
+| Term | File |
+|---|---|
+| ES stiffness | `axisymmetric_diffusion_integrator.hpp` |
+| MS/MQS curl-curl | `axisymmetric_curl_curl_integrator.hpp` |
+| MQS sigma mass | `axisymmetric_mass_integrator.hpp` |
+| Domain source | `axisymmetric_lf_integrator.hpp` |
+| Neumann load | `axisymmetric_boundary_lf_integrator.hpp` |
+
+Nothing is factored out and restored later. Consequently every assembled matrix,
+every right-hand side, and every derived quantity is in SI units and is directly
+comparable to a hand calculation: a gathered terminal charge is coulombs, `G_dc`
+is siemens, a flux linkage is webers. Adding a new derived quantity requires no
+knowledge of any normalization convention.
+
+Two `2*pi` factors in the code are **not** part of this measure and must not be
+routed through the helper:
+
+- `AxisymmetricConductanceCoeff`'s `1/(2*pi*r)`, which is physical - it comes
+  from `E_phi = V/(2*pi*r)` for an azimuthal conductor.
+- `omega = 2*pi*f`, a temporal frequency conversion.
+
+The historical alternative - omitting the global `2*pi` from every integrator and
+reintroducing it in each derived quantity - is mathematically equivalent but was
+abandoned: it required six separate scale factors at call sites (some multiplying
+by `2*pi`, some dividing), left intermediate quantities in non-physical units,
+and was the direct cause of findings 1, 2, 3 and 5 in
+`docs/math_review_findings.md`.

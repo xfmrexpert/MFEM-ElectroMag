@@ -1187,6 +1187,90 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
     fs::remove(mesh_file);
 }
 
+// Guards the axisymmetric 2*pi normalization end to end: the stiffness
+// integrator omits the global 2*pi and GatherChargeColumn restores it exactly
+// once. Applying it twice (or zero times) shifts every entry by a factor of
+// 2*pi, which this analytic comparison catches.
+TEST_CASE("Axisymmetric capacitance matches the analytic coaxial value",
+          "[solvers][analytic][electrostatic][coupling][axisymmetric]") {
+    const std::string mesh_file = "test_coax_capacitance.mesh";
+    const std::string matrix_file = "capacitance_matrix.csv";
+    constexpr double r_inner = 0.01;
+    constexpr double r_outer = 0.03;
+    constexpr double height = 0.05;
+    CreateCoaxMesh(mesh_file, r_inner, r_outer, height, 64, 1);
+
+    json config = MakeCoaxAmrConfig(mesh_file, 1);
+    config["simulation"]["amr"]["enabled"] = false;
+    config["simulation"]["analysis_type"] = "coupling_matrix";
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    ElectrostaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+    solver.SaveAnalysis();
+
+    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    REQUIRE(matrix.labels == std::vector<std::string>{"Inner", "Outer"});
+
+    // Coaxial annulus of axial extent `height` closed by symmetry planes:
+    //   C = 2*pi*eps*height / ln(r_outer / r_inner)
+    const double analytic_capacitance = Constants::TWO_PI * Constants::EPSILON_0 *
+        height / std::log(r_outer / r_inner);
+
+    REQUIRE(matrix.values[0][0] == Catch::Approx(analytic_capacitance).epsilon(0.01));
+    REQUIRE(matrix.values[1][1] == Catch::Approx(analytic_capacitance).epsilon(0.01));
+    REQUIRE(matrix.values[0][1] == Catch::Approx(-analytic_capacitance).epsilon(0.01));
+    // Tolerance is set by the CSV's 6 significant digits, not by the solve.
+    REQUIRE(matrix.values[0][1] == Catch::Approx(matrix.values[1][0]).epsilon(1e-5));
+
+    fs::remove(matrix_file);
+    fs::remove(mesh_file);
+}
+
+// The inductance matrix must be built from each MEASURED terminal's winding
+// functional, not from the driving scenario's source. Reusing the drive makes
+// every row of a column identical, which the asymmetry checks below reject.
+TEST_CASE("Magnetostatic inductance matrix is reciprocal and distinguishes rows",
+          "[solvers][magnetostatic][coupling][reciprocity]") {
+    const std::string mesh_file = "test_magnetostatic_two_coil.mesh";
+    const std::string matrix_file = "inductance_matrix.csv";
+    CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 4, 2, 2);
+
+    json config = MakePlanarStripConfig(
+        "magnetostatics", mesh_file, 1, {{"mu_r", 1.0}}, 0.0, 0.0);
+    config["simulation"]["analysis_type"] = "coupling_matrix";
+    config["entity_groups"].push_back(
+        {{"name", "CoilA"}, {"dim", 2}, {"attribute_ids", {1}}});
+    config["entity_groups"].push_back(
+        {{"name", "CoilB"}, {"dim", 2}, {"attribute_ids", {2}}});
+    config["regions"] = json::array({
+        {{"name", "CoilA"}, {"entity_group", "CoilA"}, {"material", 1}},
+        {{"name", "CoilB"}, {"entity_group", "CoilB"}, {"material", 1}}
+    });
+    config["terminals"] = json::array({
+        {{"name", "CoilA"}, {"excitation", "current"}, {"entity_group", "CoilA"}},
+        {{"name", "CoilB"}, {"excitation", "current"}, {"entity_group", "CoilB"}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetostaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+    solver.SaveAnalysis();
+
+    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    REQUIRE(matrix.labels == std::vector<std::string>{"CoilA", "CoilB"});
+    REQUIRE(matrix.values[0][0] > 0.0);
+    REQUIRE(matrix.values[1][1] > 0.0);
+    REQUIRE(matrix.values[0][1] == Catch::Approx(matrix.values[1][0]).epsilon(1e-7));
+    REQUIRE(matrix.values[1][0] < matrix.values[0][0]);
+    REQUIRE(matrix.values[0][1] < matrix.values[1][1]);
+
+    fs::remove(matrix_file);
+    fs::remove(mesh_file);
+}
+
 TEST_CASE("Magnetostatic solver reproduces the field of a uniform current slab",
           "[solvers][analytic][magnetostatic]") {
     const std::string mesh_file = "test_analytic_magnetostatic.mesh";

@@ -255,7 +255,7 @@ public:
 					config.Terminals.find(sc.Excitations[0].TerminalName));
 				for (int row = 0; row < L->Height(); ++row) {
 					const std::string& row_term = std::next(config.Terminals.begin(), row)->first;
-					(*L)(row, col) = ComputeFluxLinkage(row_term, sc);
+					(*L)(row, col) = ComputeFluxLinkage(row_term);
 				}
 			}
 		}
@@ -334,16 +334,53 @@ public:
 
 private:
 
-	double ComputeFluxLinkage(const std::string& terminal_name, const Scenario& sc) const
+	// Flux linkage of terminal `terminal_name` for the solution currently in *A.
+	//
+	//   lambda_k = integral over terminal k of (N_k/area_k) * A dV
+	//
+	// i.e. the winding functional of the MEASURED terminal applied to the field,
+	// NOT the source of the driving scenario. With a unit-current drive on
+	// terminal i, lambda_k is directly L(k,i) - the mutual inductance for k != i.
+	// Mirrors MagnetoquasistaticSolver::ComputeStrandedFluxLinkage.
+	double ComputeFluxLinkage(const std::string& terminal_name) const
 	{
-		const mfem::Vector unit_source = BuildCurrentDensity(sc);
+		mfem::Vector unit_density = BuildTerminalCurrentDensity(terminal_name, 1.0);
+		mfem::PWConstCoefficient unit_density_coeff(unit_density);
 
-		const double geometry_scale =
-			geometry == GeometryType::Axisymmetric
-			? Constants::TWO_PI
-			: 1.0;
+		mfem::LinearForm winding_functional(fespace.get());
+		if (geometry == GeometryType::Axisymmetric) {
+			winding_functional.AddDomainIntegrator(
+				new AxisymmetricLFIntegrator(unit_density_coeff));
+		}
+		else {
+			winding_functional.AddDomainIntegrator(
+				new mfem::DomainLFIntegrator(unit_density_coeff));
+		}
+		winding_functional.Assemble();
 
-		return geometry_scale * (unit_source * *A);
+		// Both integrators carry the full geometric measure, so this is webers.
+		return winding_functional * *A;
+	}
+
+	// Uniform current density I/area over the terminal's domain attributes,
+	// laid out per mesh attribute for a PWConstCoefficient.
+	mfem::Vector BuildTerminalCurrentDensity(
+		const std::string& terminal_name, double current) const {
+		const Terminal& term = config.Terminals.at(terminal_name);
+		const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
+		const double area = CalculateRegionArea(group.AttributeIds);
+		MFEM_VERIFY(area > 0.0,
+			"Current terminal '" + terminal_name + "' has zero cross-section.");
+
+		mfem::Vector current_density(mesh.attributes.Max());
+		current_density = 0.0;
+		const double density = current / area;
+		for (int attr : group.AttributeIds) {
+			if (attr > 0 && attr <= current_density.Size()) {
+				current_density[attr - 1] = density;
+			}
+		}
+		return current_density;
 	}
 
 	mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
@@ -360,17 +397,7 @@ private:
 				}
 
 				if (I == 0.0) continue;
-				const std::string& group_name = term.EntityGroupName;
-				const EntityGroup& group = config.EntityGroups.at(group_name);
-				const double A = CalculateRegionArea(group.AttributeIds);
-				MFEM_VERIFY(A > 0.0, "Current terminal '" + term_name + "' has zero cross-section.");
-				const double J = I / A; // Current density = current / area
-
-				for (int attr : group.AttributeIds) {
-					if (attr > 0 && attr <= mesh.attributes.Max()) {
-						j_src[attr - 1] = J;
-					}
-				}
+				j_src += BuildTerminalCurrentDensity(term_name, I);
 			}
 		}
 		return j_src;

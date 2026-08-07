@@ -290,9 +290,11 @@ private:
 	// potential in *x (terminal `col` driven at 1 V, the rest grounded by the
 	// synthesized scenario), gather the induced charge Q = K0 * x onto every
 	// conductor's boundary DOFs and write column `col` of C. Off-diagonals are
-	// negative, diagonals positive; 2*pi scaling accounts for the axisymmetric
-	// measure omitted in the integrators. Terminal order matches
-	// BuildSolveScenarios() / WriteCouplingMatrix() (config.Terminals order).
+	// negative, diagonals positive. K0 carries the full geometric measure in
+	// both planar and axisymmetric mode, so Q is already in coulombs and needs
+	// no geometry-dependent scaling here.
+	// Terminal order matches BuildSolveScenarios() / WriteCouplingMatrix()
+	// (config.Terminals order).
 	void GatherChargeColumn(int col) {
 		std::vector<const std::pair<const std::string, Terminal>*> terms;
 		terms.reserve(config.Terminals.size());
@@ -301,7 +303,6 @@ private:
 		mfem::Vector Q(fespace->GetVSize());
 		K0->Mult(*x, Q);
 
-		const double charge_scale = (geometry == GeometryType::Axisymmetric) ? Constants::TWO_PI : 1.0;
 		for (int k = 0; k < static_cast<int>(terms.size()); ++k) {
 			mfem::Array<int> vdofs_k;
 			fespace->GetEssentialVDofs(terminal_markers[terms[k]->first], vdofs_k);
@@ -309,7 +310,7 @@ private:
 			for (int n = 0; n < vdofs_k.Size(); ++n) {
 				if (vdofs_k[n]) Qk += Q(n);
 			}
-			(*C)(k, col) = charge_scale * Qk;
+			(*C)(k, col) = Qk;
 		}
 	}
 

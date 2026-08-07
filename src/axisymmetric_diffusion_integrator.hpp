@@ -4,12 +4,16 @@
 #pragma once
 
 #include "mfem.hpp"
-#include "constants.hpp"
+#include "axisymmetric_measure.hpp"
 
 // -----------------------------------------------------------------------------
 // 1. Stiffness Integrator: -div( eps * grad(u) )
 // -----------------------------------------------------------------------------
 // Solves: Integral( eps * grad(u) . grad(v) * 2*pi*r * dr * dz )
+//
+// Carries the full axisymmetric measure (see axisymmetric_measure.hpp), so the
+// assembled operator is physical: the gathered terminal charge is in coulombs
+// with no post-hoc scaling.
 //
 // Implements the Zienkiewicz-Zhu flux/energy hooks (ComputeElementFlux /
 // ComputeFluxEnergy) so MFEM's recovery-based error estimators
@@ -21,7 +25,6 @@ class AxisymmetricDiffusionIntegrator : public mfem::BilinearFormIntegrator
 {
 private:
    mfem::Coefficient *Q;
-   static constexpr double factor = Constants::TWO_PI;
 
 public:
    explicit AxisymmetricDiffusionIntegrator(
@@ -73,13 +76,14 @@ public:
 
          double r = pos(0); // Radius is X
 
-         // Weight = quad_weight * det(J) * (2 * pi * r) * epsilon
-         w = ip.weight * Trans.Weight() * (factor * r) * Q->Eval(Trans, ip);
+         // Weight = quad_weight * det(J) * 2*pi*r * epsilon
+         w = ip.weight * Trans.Weight() * Axisymmetric::Measure(r)
+            * Q->Eval(Trans, ip);
 
          el.CalcDShape(ip, dshape);
          // dN/ds * J^-1
          Mult(dshape, Trans.InverseJacobian(), dshapedxt);
-         // Integral of grad u dot grad v r dr dz
+         // Integral of grad u dot grad v 2*pi*r dr dz
          AddMult_a_AAt(w, dshapedxt, elmat);
       }
    }
@@ -136,7 +140,7 @@ public:
 
    // Energy norm of a flux expansion: Integral( eps * |flux|^2 * 2*pi*r ).
    // Mirrors mfem::DiffusionIntegrator (scalar Q) but applies the axisymmetric
-   // 2*pi*r measure so the ZZ error indicator sqrt(energy) reflects the physical
+   // radial measure so the ZZ error indicator sqrt(energy) reflects the physical
    // r-z field. Anisotropic splitting (d_energy) is not supported.
    double ComputeFluxEnergy(const mfem::FiniteElement &fluxelem,
                             mfem::ElementTransformation &Trans,
@@ -179,8 +183,8 @@ public:
          Trans.Transform(ip, pos);
          const double r = pos(0); // Radius is X
 
-         // Axisymmetric measure: 2*pi*r, consistent with AssembleElementMatrix.
-         const double w = Trans.Weight() * ip.weight * (factor * r);
+         // Axisymmetric measure, consistent with AssembleElementMatrix.
+         const double w = Trans.Weight() * ip.weight * Axisymmetric::Measure(r);
 
          double e = (pointflux * pointflux);
          e *= Q->Eval(Trans, ip); // eps
