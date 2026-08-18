@@ -19,11 +19,11 @@
   "regions": [
     {
       "entity_group": "Air",
-      "material": 1
+      "material": "Air"
     },
     {
       "entity_group": "Dielectric",
-      "material": 2
+      "material": "Dielectric"
     }
   ],
   "materials": [
@@ -43,12 +43,12 @@
   "terminals": [
     {
       "name": "TopPlate",
-      "excitation": "voltage",
+      "excitation_type": "voltage",
       "entity_group": "TopPlate"
     },
     {
       "name": "BottomPlate",
-      "excitation": "voltage",
+      "excitation_type": "voltage",
       "entity_group": "BottomPlate"
     }
   ],

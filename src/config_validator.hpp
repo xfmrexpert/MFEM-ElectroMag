@@ -157,11 +157,12 @@ private:
 
         CheckObjectArrayTypes(config, "regions", [&](const json& region, const std::string& prefix) {
             CheckFieldType(region, "entity_group", prefix + ".entity_group", ExpectedType::String);
-            CheckFieldType(region, "material", prefix + ".material", ExpectedType::Integer);
+            CheckFieldType(region, "material", prefix + ".material", ExpectedType::String);
             CheckFieldType(region, "current_constraint", prefix + ".current_constraint", ExpectedType::String);
         });
 
         CheckObjectArrayTypes(config, "materials", [&](const json& material, const std::string& prefix) {
+            CheckFieldType(material, "name", prefix + ".name", ExpectedType::String);
             CheckFieldType(material, "properties", prefix + ".properties", ExpectedType::Object);
             if (material.contains("properties") && material["properties"].is_object()) {
                 const auto& props = material["properties"];
@@ -173,7 +174,7 @@ private:
 
         CheckObjectArrayTypes(config, "terminals", [&](const json& terminal, const std::string& prefix) {
             CheckFieldType(terminal, "name", prefix + ".name", ExpectedType::String);
-            CheckFieldType(terminal, "excitation", prefix + ".excitation", ExpectedType::String);
+            CheckFieldType(terminal, "excitation_type", prefix + ".excitation_type", ExpectedType::String);
             CheckFieldType(terminal, "conductor_type", prefix + ".conductor_type", ExpectedType::String);
             CheckFieldType(terminal, "entity_group", prefix + ".entity_group", ExpectedType::String);
         });
@@ -406,9 +407,14 @@ private:
             return;
         }
 
-        size_t num_materials = 0;
+        // Regions bind to materials by name, so the declared names (not an
+        // array position) are what a region reference must resolve against.
+        std::set<std::string> material_names;
         if (config.contains("materials") && config["materials"].is_array()) {
-            num_materials = config["materials"].size();
+            for (const auto& material : config["materials"]) {
+                const std::string name = material.value("name", std::string{});
+                if (!name.empty()) material_names.insert(name);
+            }
         }
 
         auto group_attributes = [&](const std::string& name) {
@@ -447,11 +453,11 @@ private:
 
             if (!reg.contains("material")) {
                 AddError(prefix + ".material", "Missing required field 'material'");
-            } else {
-                int mat_idx = reg["material"];
-                if (mat_idx < 1 || mat_idx > static_cast<int>(num_materials)) {
-                    AddError(prefix + ".material", "Material index " + std::to_string(mat_idx) +
-                             " is out of range [1, " + std::to_string(num_materials) + "]");
+            } else if (reg["material"].is_string()) {
+                const std::string material_name = reg["material"];
+                if (material_names.count(material_name) == 0) {
+                    AddError(prefix + ".material", "Unknown material '" + material_name +
+                             "'. No material with that name is declared");
                 }
             }
 
@@ -467,17 +473,23 @@ private:
                     "Region current constraints are supported only for magnetoquasistatics");
             }
 
-            const int material = reg.contains("material")
-                ? reg["material"].get<int>() - 1 : -1;
-            if (material >= 0 && material < static_cast<int>(num_materials) &&
-                config["materials"][material].contains("properties") &&
-                config["materials"][material]["properties"].is_object()) {
-                const auto& properties = config["materials"][material]["properties"];
+            const std::string material_name =
+                reg.contains("material") && reg["material"].is_string()
+                    ? reg["material"].get<std::string>() : std::string{};
+            static const json no_materials = json::array();
+            const json& declared_materials =
+                (config.contains("materials") && config["materials"].is_array())
+                    ? config["materials"] : no_materials;
+            for (const auto& material : declared_materials) {
+                if (material.value("name", std::string{}) != material_name) continue;
+                if (!material.contains("properties") || !material["properties"].is_object()) break;
+                const auto& properties = material["properties"];
                 const double conductivity = properties.value("sigma", 0.0);
                 if (!std::isfinite(conductivity) || conductivity <= 0.0) {
                     AddError(prefix + ".current_constraint",
                         "An open-current region requires a material with positive conductivity");
                 }
+                break;
             }
 
             const auto attributes = reg.contains("entity_group")
@@ -511,9 +523,22 @@ private:
 
         std::string type = PhysicsType(config);
 
+        // Regions bind to materials by name, so a missing or duplicated name
+        // makes the reference either unresolvable or silently ambiguous.
+        std::set<std::string> material_names;
+
         for (size_t i = 0; i < materials.size(); ++i) {
             const auto& mat = materials[i];
             std::string prefix = "materials[" + std::to_string(i) + "]";
+
+            if (!mat.contains("name") || mat["name"].get<std::string>().empty()) {
+                AddError(prefix + ".name", "Missing required field 'name'");
+            } else {
+                const std::string name = mat["name"];
+                if (!material_names.insert(name).second) {
+                    AddError(prefix + ".name", "Duplicate material name '" + name + "'");
+                }
+            }
 
             if (!mat.contains("properties")) {
                 AddError(prefix + ".properties", "Missing required field 'properties'");
@@ -645,9 +670,21 @@ private:
                 }
             }
 
-            std::string excitation = t.value("excitation", "voltage");
+            // 'excitation_type' is required rather than defaulting to voltage: a
+            // silent default turns a renamed or misspelled key into a confusing
+            // downstream "must be a boundary group" error instead of naming the
+            // real problem. The legacy spelling gets the actionable message on
+            // its own so the two errors do not stack.
+            if (t.contains("excitation")) {
+                AddError(prefix + ".excitation", "Unsupported field; use 'excitation_type'");
+            }
+            else if (!t.contains("excitation_type")) {
+                AddError(prefix + ".excitation_type", "Missing required field 'excitation_type'");
+            }
+
+            std::string excitation = t.value("excitation_type", "voltage");
             if (excitation != "voltage" && excitation != "current") {
-                AddError(prefix + ".excitation", "Invalid excitation '" + excitation + "'. Must be 'voltage' or 'current'");
+                AddError(prefix + ".excitation_type", "Invalid excitation_type '" + excitation + "'. Must be 'voltage' or 'current'");
             }
 
             const std::string conductor = t.value("conductor_type", "massive");
@@ -694,7 +731,7 @@ private:
                 std::string name = t.value("name", "");
                 if (!name.empty()) {
                     terminal_names.insert(name);
-                    if (t.value("excitation", "voltage") == "current") {
+                    if (t.value("excitation_type", "voltage") == "current") {
                         current_terminals.insert(name);
                     }
                 }

@@ -202,7 +202,7 @@ public:
 			}
 		}
 		for (const auto& [term_name, term] : config.Terminals) {
-			if (term.Excitation == Quantity::Voltage) {
+			if (term.ExcitationType == Quantity::Voltage) {
 				for (const auto& exc : sc.Excitations) {
 					if (!exc.Floating) {
 						if (term_name == exc.TerminalName) {

@@ -83,15 +83,13 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     // sigma*V/(2*pi*r) by that measure leaves exactly V * integral(sigma*v dr dz),
     // which is this plain (unweighted) domain form.
     std::unique_ptr<mfem::Vector> BuildPortVector(mfem::FiniteElementSpace* fespace,
-                            std::vector<int> port_attributes,
-                            double sigma)
+                            const std::vector<int>& port_attributes,
+                            double sigma,
+                            const std::string& port_name)
     {
-        // Restrict integration to this specific port's attribute
-        mfem::Array<int> port_marker(fespace->GetMesh()->attributes.Max());
-        port_marker = 0;
-        for (auto port_attribute : port_attributes) {
-            port_marker[port_attribute - 1] = 1; // MFEM attributes are 1-indexed
-        }
+        // Restrict integration to this specific port's attributes
+        mfem::Array<int> port_marker =
+            DomainMarkerFromAttrs(port_attributes, "massive port '" + port_name + "'");
 
         // Constant coefficient restricted to this port (axisymmetric and planar
         // alike); referenced only while we assemble below.
@@ -133,18 +131,16 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     }
 
     // Function to compute G_dc for a specific port
-    double ComputePortConductance(std::vector<int> port_attributes, double sigma)
+    double ComputePortConductance(const std::vector<int>& port_attributes, double sigma,
+                                  const std::string& port_name)
     {
         // Setup an L2 space of order 0 for pure volumetric integration
         mfem::L2_FECollection l2_fec(0, mesh.Dimension());
         mfem::FiniteElementSpace l2_fes(&mesh, &l2_fec);
 
-        // Create the restriction array for the port attribute
-        mfem::Array<int> port_marker(mesh.attributes.Max());
-        port_marker = 0;
-        for (auto port_attribute : port_attributes) {
-            port_marker[port_attribute - 1] = 1; // MFEM attributes are 1-indexed
-        }
+        // Create the restriction array for the port attributes
+        mfem::Array<int> port_marker =
+            DomainMarkerFromAttrs(port_attributes, "massive port '" + port_name + "'");
 
         // Define the appropriate coefficient
         mfem::Coefficient* base_coeff = nullptr;
@@ -296,7 +292,7 @@ public:
             if (region.CurrentConstraint != RegionCurrentConstraint::Open) continue;
             const EntityGroup& group = config.EntityGroups.at(region.EntityGroupName);
             massive_ports.push_back({ region.EntityGroupName, group.AttributeIds,
-                config.Materials[region.Material].Conductivity });
+                config.Materials.at(region.MaterialName).Conductivity });
         }
 
         // Explicit massive terminals come first so their solved voltage indices
@@ -316,9 +312,16 @@ public:
                     "Its DC conductance integral sigma/(2*pi*r) is divergent; "
                     "model it as a stranded conductor or move it off the axis.");
             }
+            MFEM_VERIFY(port.Conductivity > 0.0,
+                "Massive port '" + port.Name + "' has non-positive conductivity " +
+                std::to_string(port.Conductivity) +
+                ". Assign a material with a positive 'sigma' or model the region "
+                "as a non-conducting region.");
             port_loads.push_back(
-                BuildPortVector(fespace.get(), port.AttributeIds, port.Conductivity));
-            double G_dc = ComputePortConductance(port.AttributeIds, port.Conductivity);
+                BuildPortVector(fespace.get(), port.AttributeIds, port.Conductivity,
+                                port.Name));
+            double G_dc = ComputePortConductance(port.AttributeIds, port.Conductivity,
+                                                 port.Name);
             MFEM_VERIFY(G_dc > 0.0,
                 "Massive port '" + port.Name + "' has zero conductance.");
             port_conductances.push_back(G_dc);
@@ -651,7 +654,7 @@ public:
 	void PrepareAnalysis() {
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
             for (const auto& [term_name, term] : config.Terminals) {
-                MFEM_VERIFY(term.Excitation == Quantity::Current,
+                MFEM_VERIFY(term.ExcitationType == Quantity::Current,
                     "MQS CouplingMatrix terminal '" + term_name +
                     "' must be a Current terminal.");
             }
@@ -778,7 +781,7 @@ public:
         j_src = 0.0;
 
         for (const auto& [term_name, term] : config.Terminals) {
-            if (term.Excitation == Quantity::Current && term.Conductor == ConductorType::Stranded) {
+            if (term.ExcitationType == Quantity::Current && term.Conductor == ConductorType::Stranded) {
                 double I = 0.0;
                 for (const auto& exc : sc.Excitations) {
                     if (exc.TerminalName == term_name) {

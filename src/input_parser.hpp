@@ -5,13 +5,16 @@
 #include "json.hpp" // nlohmann/json
 #include "constants.hpp"
 #include "problem_config.hpp"
-#include "status_reporter.hpp"
 #include <fstream>
 #include <iostream>
 #include <unordered_map>
 #include <optional>
 #include <memory>
 #include <filesystem> // C++17
+#include <algorithm>
+#include <initializer_list>
+#include <string_view>
+#include <utility>
 #include <iterator>
 #include <cctype>
 #include <cmath>
@@ -24,6 +27,7 @@ namespace fs = std::filesystem;
 
 class InputParser {
     std::unique_ptr<json> owned_config;
+    std::string config_text;   // Source text, retained for error diagnostics
 
 public:
     const json& config;
@@ -37,7 +41,14 @@ public:
         if (!f.is_open()) {
             throw std::runtime_error("Could not open config file: " + filename);
         }
-        f >> *owned_config;
+        // Read the file once: the text is retained so error diagnostics can map
+        // byte offsets to line/column without re-opening the file. Text mode
+        // (no std::ios::binary) collapses CRLF to LF, matching the coordinate
+        // system nlohmann uses while parsing; otherwise the column would be
+        // skewed by one byte per preceding CRLF line ending on Windows.
+        config_text.assign((std::istreambuf_iterator<char>(f)),
+                           std::istreambuf_iterator<char>());
+        *owned_config = json::parse(config_text);
 
         // Store directory and path of config file (path used for diagnostics)
         config_path = filename;
@@ -129,30 +140,22 @@ private:
 		return prefix + ": " + what;
 	}
 
-	// Translate a 0-based byte offset in the config file into a 1-based
-	// (line, column). Returns {0, 0} when the file can't be read or the offset
-	// is out of range (e.g. for in-memory configs with no backing file).
-	// The file is read in text mode (no std::ios::binary) so CRLF is collapsed
-	// to LF, matching the coordinate system nlohmann used while parsing (the
-	// constructor reads via a text-mode ifstream); otherwise the column would
-	// be skewed by one byte per preceding CRLF line ending on Windows.
+	// Translate a 0-based byte offset in the config source into a 1-based
+	// (line, column). Returns {0, 0} when no source text was retained (e.g. for
+	// in-memory configs with no backing file). The text was read in text mode by
+	// the constructor, so CRLF is already collapsed to LF and the offsets match
+	// the coordinate system nlohmann used while parsing.
 	[[nodiscard]] std::pair<int, int> ByteOffsetToLineCol(std::size_t byte_off) const {
-		if (config_path.empty()) {
+		if (config_text.empty()) {
 			return {0, 0};
 		}
-		std::ifstream f(config_path);
-		if (!f.is_open()) {
-			return {0, 0};
-		}
-		const std::string contents((std::istreambuf_iterator<char>(f)),
-								   std::istreambuf_iterator<char>());
-		if (byte_off >= contents.size()) {
-			byte_off = contents.empty() ? 0 : contents.size() - 1;
+		if (byte_off >= config_text.size()) {
+			byte_off = config_text.size() - 1;
 		}
 		int line = 1;
 		int col = 1;
 		for (std::size_t i = 0; i < byte_off; ++i) {
-			if (contents[i] == '\n') {
+			if (config_text[i] == '\n') {
 				++line;
 				col = 1;
 			} else {
@@ -162,170 +165,150 @@ private:
 		return {line, col};
 	}
 
-    // "simulation.physics": electrostatics | magnetostatics | magnetoquasistatics.
+    // --------------------------------------------------------
+    // Lookup primitives
+    // --------------------------------------------------------
+
+    // The "simulation" object, or a shared empty object when the section is
+    // absent or malformed. Lets the getters below index a single node instead
+    // of repeating a contains/is_object guard chain.
+    [[nodiscard]] const json& Sim() const {
+        static const json empty = json::object();
+        const auto it = config.find("simulation");
+        return (it != config.end() && it->is_object()) ? *it : empty;
+    }
+
+    // Typed lookup with a fallback. A missing or null key yields the fallback;
+    // a key that is present but of the wrong type throws json::type_error,
+    // which GetProblemConfig() turns into a located error message. This is
+    // deliberately stricter than json::value(), which silently absorbs some
+    // mismatches and would let a typo like "order": "2" pass unnoticed.
+    template <typename T>
+    [[nodiscard]] static T Get(const json& obj, const char* key, T fallback) {
+        const auto it = obj.find(key);
+        if (it == obj.end() || it->is_null()) return fallback;
+        return it->get<T>();
+    }
+
+    // String-keyed enum lookup. Unknown values fall back rather than throwing,
+    // because ConfigValidator reports them with the full list of valid options.
+    template <typename E>
+    [[nodiscard]] static E ParseEnum(const json& obj, const char* key, E fallback,
+                                     std::initializer_list<std::pair<std::string_view, E>> table) {
+        const auto it = obj.find(key);
+        if (it == obj.end() || it->is_null()) return fallback;
+        const auto value = it->template get<std::string>();
+        for (const auto& [name, mapped] : table) {
+            if (value == name) return mapped;
+        }
+        return fallback;
+    }
+
+    // As ParseEnum, but the key must be present. Used where no default is
+    // defensible: silently substituting one would turn a renamed or misspelled
+    // key into a physically different problem that still solves, producing
+    // plausible-looking but wrong results. Unknown *values* still fall back so
+    // ConfigValidator can report them with the full list of valid options.
+    template <typename E>
+    [[nodiscard]] static E ParseRequiredEnum(const json& obj, const char* key, E fallback,
+                                            const std::string& context,
+                                            std::initializer_list<std::pair<std::string_view, E>> table) {
+        const auto it = obj.find(key);
+        if (it == obj.end() || it->is_null()) {
+            throw std::runtime_error(context + ": missing required field '" + key + "'");
+        }
+        return ParseEnum(obj, key, fallback, table);
+    }
+
+    // "simulation.physics_type": electrostatics | magnetostatics | magnetoquasistatics.
     // Tolerant default; ConfigValidator enforces presence and validity.
     [[nodiscard]] ::PhysicsType GetPhysicsType() const {
-        if (config.contains("simulation") && config["simulation"].is_object()) {
-            const auto& sim = config["simulation"];
-            if (sim.contains("physics_type") && sim["physics_type"].is_string()) {
-                const std::string s = sim["physics_type"];
-                if (s == "electrostatics")      return ::PhysicsType::Electrostatics;
-                if (s == "magnetostatics")      return ::PhysicsType::Magnetostatics;
-                if (s == "magnetoquasistatics") return ::PhysicsType::Magnetoquasistatics;
-            }
-        }
-        return ::PhysicsType::Electrostatics; // Default
+        return ParseEnum(Sim(), "physics_type", ::PhysicsType::Electrostatics,
+                         {{"electrostatics",      ::PhysicsType::Electrostatics},
+                          {"magnetostatics",      ::PhysicsType::Magnetostatics},
+                          {"magnetoquasistatics", ::PhysicsType::Magnetoquasistatics}});
     }
 
+    // "simulation.geometry_type": axisymmetric | planar.
     [[nodiscard]] ::GeometryType GetGeometryType() const {
-        if (config.contains("simulation") && config["simulation"].is_object()) {
-            const auto& sim = config["simulation"];
-
-            // "geometry_type": "axisymmetric" | "planar"
-            if (sim.contains("geometry_type") && sim["geometry_type"].is_string()) {
-                std::string type_str = sim["geometry_type"];
-                if (type_str == "axisymmetric") {
-                    return ::GeometryType::Axisymmetric;
-                } else if (type_str == "planar") {
-                    return ::GeometryType::Planar;
-                }
-            }
-        }
-        return ::GeometryType::Planar; // Default
+        return ParseEnum(Sim(), "geometry_type", ::GeometryType::Planar,
+                         {{"axisymmetric", ::GeometryType::Axisymmetric},
+                          {"planar",       ::GeometryType::Planar}});
     }
 
+    // "simulation.analysis_type": field | coupling_matrix.
     [[nodiscard]] ::AnalysisType GetAnalysisType() const {
-        if (config.contains("simulation") && config["simulation"].is_object()) {
-            const auto& sim = config["simulation"];
-            if (sim.contains("analysis_type") && sim["analysis_type"].is_string()) {
-                std::string s = sim["analysis_type"];
-                if (s == "field")           return ::AnalysisType::Field;
-                if (s == "coupling_matrix") return ::AnalysisType::CouplingMatrix;
-            }
-        }
-        return ::AnalysisType::Field; // Default
+        return ParseEnum(Sim(), "analysis_type", ::AnalysisType::Field,
+                         {{"field",           ::AnalysisType::Field},
+                          {"coupling_matrix", ::AnalysisType::CouplingMatrix}});
     }
 
+    // Range checking lives in ConfigValidator; the parser only reads the value.
     [[nodiscard]] int GetOrder() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("order")) {
-            int order = config["simulation"]["order"];
-            if (order < 1) {
-                StatusReporter::Global().Warning(
-                    "'order' must be >= 1, got " + std::to_string(order)
-                    + ". Using order = 1.");
-                return 1;
-            }
-            return order;
-        }
-        return 1; // Default
+        return Get(Sim(), "order", 1);
     }
 
     [[nodiscard]] bool GetOutputParaview() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("output_paraview") &&
-            config["simulation"]["output_paraview"].is_boolean()) {
-            return config["simulation"]["output_paraview"].get<bool>();
-        }
-        return false;
+        return Get(Sim(), "output_paraview", false);
     }
 
     [[nodiscard]] bool GetOutputGmsh() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("output_gmsh") &&
-            config["simulation"]["output_gmsh"].is_boolean()) {
-            return config["simulation"]["output_gmsh"].get<bool>();
-        }
-        return false;
+        return Get(Sim(), "output_gmsh", false);
     }
 
+    // Relative paths resolve against the directory holding the config file.
     [[nodiscard]] std::string GetResultsDirectory() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("results_path")) {
-            std::string p = config["simulation"]["results_path"];
-            if (p.empty()) return {};
-            fs::path pp(p);
-            if (pp.is_absolute()) return pp.string();
-            return (fs::path(config_dir) / pp).string();
-        }
-        return {};
+        const std::string p = Get(Sim(), "results_path", std::string{});
+        if (p.empty()) return {};
+        const fs::path pp(p);
+        return pp.is_absolute() ? pp.string() : (fs::path(config_dir) / pp).string();
     }
 
-    [[nodiscard]] int GetExportRefine() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("export_refine")) {
-            int n = config["simulation"]["export_refine"];
-            if (n < 1) return 1;
-            return n;
-        }
-        return -1; // Sentinel: caller should default to Order.
+    // Absent means "follow Order"; the caller decides via value_or.
+    [[nodiscard]] std::optional<int> GetExportRefine() const {
+        const auto& sim = Sim();
+        if (sim.find("export_refine") == sim.end()) return std::nullopt;
+        return std::max(1, Get(sim, "export_refine", 1));
     }
 
     // Parse the optional "simulation.amr" block. Missing keys fall back to the
     // AmrSettings defaults and unknown future keys are ignored, so the two sides
-    // (C# requester / solver) can evolve independently. nlohmann::json::value()
-    // parses numbers with the invariant '.' separator regardless of locale.
+    // (C# requester / solver) can evolve independently. Numbers parse with the
+    // invariant '.' separator regardless of locale.
     [[nodiscard]] AmrSettings GetAmrSettings() const {
         AmrSettings amr; // defaults (disabled)
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("amr") &&
-            config["simulation"]["amr"].is_object()) {
-            const auto& a = config["simulation"]["amr"];
-            amr.Enabled        = a.value("enabled",         amr.Enabled);
-            amr.MaxIterations  = a.value("max_iterations",  amr.MaxIterations);
-            amr.MaxDofs        = a.value("max_dofs",         amr.MaxDofs);
-            amr.ErrorFraction  = a.value("error_fraction",  amr.ErrorFraction);
-            amr.ErrorTolerance = a.value("error_tolerance", amr.ErrorTolerance);
-            amr.Conforming     = a.value("conforming",       amr.Conforming);
-        }
+        const auto it = Sim().find("amr");
+        if (it == Sim().end() || !it->is_object()) return amr;
+
+        const auto& a = *it;
+        amr.Enabled        = Get(a, "enabled",         amr.Enabled);
+        amr.MaxIterations  = Get(a, "max_iterations",  amr.MaxIterations);
+        amr.MaxDofs        = Get(a, "max_dofs",        amr.MaxDofs);
+        amr.ErrorFraction  = Get(a, "error_fraction",  amr.ErrorFraction);
+        amr.ErrorTolerance = Get(a, "error_tolerance", amr.ErrorTolerance);
+        amr.Conforming     = Get(a, "conforming",      amr.Conforming);
         return amr;
     }
 
-// Get solver parameters with defaults
+    // Solver parameters, defaulted from Constants.
     [[nodiscard]] double GetSolverTolerance() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("solver_tolerance")) {
-            return config["simulation"]["solver_tolerance"];
-        }
-        return Constants::DEFAULT_SOLVER_TOLERANCE;
+        return Get(Sim(), "solver_tolerance", Constants::DEFAULT_SOLVER_TOLERANCE);
     }
 
     [[nodiscard]] int GetSolverMaxIter() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("solver_max_iter")) {
-            return config["simulation"]["solver_max_iter"];
-        }
-        return Constants::DEFAULT_SOLVER_MAX_ITER;
+        return Get(Sim(), "solver_max_iter", Constants::DEFAULT_SOLVER_MAX_ITER);
     }
 
     [[nodiscard]] int GetSolverPrintLevel() const {
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("solver_print_level")) {
-            return config["simulation"]["solver_print_level"];
-        }
-        return Constants::DEFAULT_SOLVER_PRINT_LEVEL;
+        return Get(Sim(), "solver_print_level", Constants::DEFAULT_SOLVER_PRINT_LEVEL);
     }
-    
+
+    // Relative mesh paths resolve against the directory holding the config file.
     [[nodiscard]] std::string GetMeshPath() const {
-        std::string mesh_path;
-
-        if (config.contains("simulation") && config["simulation"].is_object() &&
-            config["simulation"].contains("mesh")) {
-            mesh_path = config["simulation"]["mesh"];
-            fs::path p(mesh_path);
-
-            // If path is absolute, use it directly
-            if (p.is_absolute()) {
-                mesh_path = p.string();
-            } else {
-                // Otherwise, make it relative to the config file location
-                mesh_path = (fs::path(config_dir) / p).string();
-            }
-        } else {
-            mesh_path = "default.msh";
-        }
-
-        return mesh_path;
+        const std::string mesh = Get(Sim(), "mesh", std::string{});
+        if (mesh.empty()) return "default.msh";
+        const fs::path p(mesh);
+        return p.is_absolute() ? p.string() : (fs::path(config_dir) / p).string();
     }
 
 	std::unordered_map<std::string, EntityGroup> GetEntityGroups() const {
@@ -353,23 +336,17 @@ private:
         std::map<std::string, Terminal> terminals;
         if (config.contains("terminals")) {
             for (auto& t : config["terminals"]) {
-                Terminal terminal;
-				std::string name = t.value("name", std::string{});
-                // "excitation": "voltage" (default) | "current"
-                if (t.contains("excitation") && t["excitation"].is_string()) {
-                    std::string d = t["excitation"];
-                    terminal.Excitation = (d == "current") ? Quantity::Current
-                                                           : Quantity::Voltage;
-                }
-				if (t.contains("conductor_type") && t["conductor_type"].is_string()) {
-					std::string c = t["conductor_type"];
-					terminal.Conductor = (c == "stranded") ? ConductorType::Stranded
-						: ConductorType::Massive;
-				}
-                if (t.contains("entity_group")) {
-                    terminal.EntityGroupName = t["entity_group"];
-                }
-                terminals.emplace(std::move(name), std::move(terminal));
+				Terminal terminal;
+				std::string name = Get(t, "name", std::string{});
+				terminal.ExcitationType = ParseRequiredEnum(t, "excitation_type", Quantity::Voltage,
+															"terminal '" + name + "'",
+															{{"voltage", Quantity::Voltage},
+															 {"current", Quantity::Current}});
+				terminal.Conductor = ParseEnum(t, "conductor_type", ConductorType::Massive,
+											   {{"massive",  ConductorType::Massive},
+												{"stranded", ConductorType::Stranded}});
+				terminal.EntityGroupName = Get(t, "entity_group", std::string{});
+				terminals.emplace(std::move(name), std::move(terminal));
             }
         }
         return terminals;
@@ -380,26 +357,24 @@ private:
         if (config.contains("regions")) {
             for (auto &region : config["regions"]) {
                 Region _region;
-                if (region.contains("entity_group")) {
-                    _region.EntityGroupName = region["entity_group"];
-                }
-                if (region.contains("material")) {
-                    _region.Material = (int)region["material"] - 1; // Convert 1-based to 0-based
-                }
-                if (region.value("current_constraint", std::string{}) == "open") {
-                    _region.CurrentConstraint = RegionCurrentConstraint::Open;
-                }
+                _region.EntityGroupName = Get(region, "entity_group", std::string{});
+                _region.MaterialName = Get(region, "material", std::string{});
+                _region.CurrentConstraint =
+                    ParseEnum(region, "current_constraint", RegionCurrentConstraint::None,
+                              {{"none", RegionCurrentConstraint::None},
+                               {"open", RegionCurrentConstraint::Open}});
                 regions.push_back(_region);
             }
         }
         return regions;
     }
 
-    std::vector<Material> GetMaterials() const {
-        std::vector<Material> materials;
+    std::map<std::string, Material> GetMaterials() const {
+        std::map<std::string, Material> materials;
         if (config.contains("materials")) {
             for (auto &material : config["materials"]) {
                 Material _material;
+                std::string name = Get(material, "name", std::string{});
                 if (material.contains("properties")) {
                     auto& props = material["properties"];
                     if (props.contains("sigma")) {
@@ -412,7 +387,7 @@ private:
                         _material.RelPermeability = props["mu_r"];
                     }
                 }
-                materials.push_back(_material);
+                materials.emplace(std::move(name), std::move(_material));
             }
         }
         return materials;

@@ -235,7 +235,7 @@ public:
 			// CouplingMatrix synthesizes a unit-current scenario per terminal, so
 			// every terminal must be current-driven for the drive to be meaningful.
 			for (const auto& [term_name, term] : config.Terminals) {
-				MFEM_VERIFY(term.Excitation == Quantity::Current,
+				MFEM_VERIFY(term.ExcitationType == Quantity::Current,
 					"CouplingMatrix terminal '" + term_name +
 					"' must be a Current terminal for the magnetostatic solver.");
 
@@ -388,7 +388,7 @@ private:
 		j_src = 0.0;
 
 		for (const auto& [term_name, term] : config.Terminals) {
-			if (term.Excitation == Quantity::Current) {
+			if (term.ExcitationType == Quantity::Current) {
 				double I = 0.0;
 				for (const auto& exc : sc.Excitations) {
 					if (exc.TerminalName == term_name) {

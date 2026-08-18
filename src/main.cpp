@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include "build_info.hpp"
 #include "input_parser.hpp"
 #include "physics_solver.hpp"
 #include "solver_factory.hpp"
@@ -22,6 +23,7 @@ void PrintUsage(const char* prog) {
         "  --export-vector-space <L2|H1>  Reserved; L2 is currently the only supported choice\n"
         "  --verbosity <0|1|2>        0=status/timing, 1=solver output, 2=diagnostics\n"
         "  --machine-readable         Emit flushed JSON Lines progress on stdout\n"
+        "  --version                  Print version/build information and exit\n"
         "  -h, --help                 Show this help\n";
 }
 
@@ -68,6 +70,9 @@ int main(int argc, char *argv[]) {
             if (a == "-h" || a == "--help") {
                 PrintUsage(argv[0]);
                 return 0;
+            } else if (a == "--version") {
+                std::cout << build_info::Describe() << '\n';
+                return 0;
             } else if (a == "--results-path") {
                 cli_results_path = need_value(a);
             } else if (a == "--export-refine") {
@@ -103,6 +108,12 @@ int main(int argc, char *argv[]) {
         if (machine_readable_requested) {
             mfem::out.SetStream(reporter.SolverOutput());
         }
+
+        // Report build identity up front so a run can always be traced back to
+        // a specific binary; a stale executable is otherwise only detectable by
+        // the confusing downstream errors it produces. Routed through the
+        // reporter so --machine-readable still emits well-formed JSON Lines.
+        reporter.Status(build_info::Describe());
 
         // 1. Shared Infrastructure
         std::error_code config_ec;

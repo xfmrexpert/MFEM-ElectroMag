@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include "../src/input_parser.hpp"
 #include <fstream>
 #include <filesystem>
@@ -39,14 +40,15 @@ json CanonicalConfig() {
             {{"name", "FarField"}, {"dim", 1}, {"attribute_ids", {3}}}
         })},
         {"regions", json::array({
-            {{"entity_group", "Conductor"}, {"material", 1},
+            {{"entity_group", "Conductor"}, {"material", "Copper"},
              {"current_constraint", "open"}}
         })},
         {"materials", json::array({
-            {{"properties", {{"sigma", 5.8e7}, {"epsilon_r", 2.5}, {"mu_r", 1.2}}}}
+            {{"name", "Copper"},
+             {"properties", {{"sigma", 5.8e7}, {"epsilon_r", 2.5}, {"mu_r", 1.2}}}}
         })},
         {"terminals", json::array({
-            {{"name", "Coil"}, {"excitation", "current"},
+            {{"name", "Coil"}, {"excitation_type", "current"},
              {"conductor_type", "stranded"}, {"entity_group", "Conductor"}}
         })},
         {"boundaries", json::array({
@@ -92,12 +94,12 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
     REQUIRE(config.Regions[0].CurrentConstraint == RegionCurrentConstraint::Open);
     REQUIRE(config.Regions.size() == 1);
     REQUIRE(config.Regions[0].EntityGroupName == "Conductor");
-    REQUIRE(config.Regions[0].Material == 0);
-    REQUIRE(config.Materials[0].Conductivity == Catch::Approx(5.8e7));
-    REQUIRE(config.Materials[0].RelPermittivity == Catch::Approx(2.5));
-    REQUIRE(config.Materials[0].RelPermeability == Catch::Approx(1.2));
+    REQUIRE(config.Regions[0].MaterialName == "Copper");
+    REQUIRE(config.Materials.at("Copper").Conductivity == Catch::Approx(5.8e7));
+    REQUIRE(config.Materials.at("Copper").RelPermittivity == Catch::Approx(2.5));
+    REQUIRE(config.Materials.at("Copper").RelPermeability == Catch::Approx(1.2));
 
-    REQUIRE(config.Terminals.at("Coil").Excitation == Quantity::Current);
+    REQUIRE(config.Terminals.at("Coil").ExcitationType == Quantity::Current);
     REQUIRE(config.Terminals.at("Coil").Conductor == ConductorType::Stranded);
     REQUIRE(config.Terminals.at("Coil").EntityGroupName == "Conductor");
     REQUIRE(config.BoundaryConditions.size() == 1);
@@ -231,4 +233,33 @@ TEST_CASE("InputParser wraps decoding type failures", "[input_parser]") {
     json source = CanonicalConfig();
     source["simulation"]["order"] = "second";
     REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
+}
+
+TEST_CASE("InputParser requires terminal excitation_type", "[input_parser]") {
+    SECTION("missing key is rejected") {
+        json source = CanonicalConfig();
+        source["terminals"][0].erase("excitation_type");
+        REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
+    }
+
+    SECTION("null value is rejected") {
+        json source = CanonicalConfig();
+        source["terminals"][0]["excitation_type"] = nullptr;
+        REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
+    }
+
+    SECTION("the legacy 'excitation' spelling does not satisfy the requirement") {
+        json source = CanonicalConfig();
+        source["terminals"][0].erase("excitation_type");
+        source["terminals"][0]["excitation"] = "current";
+        REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
+    }
+
+    SECTION("the error names the offending terminal") {
+        json source = CanonicalConfig();
+        source["terminals"][0].erase("excitation_type");
+        REQUIRE_THROWS_WITH(InputParser(source).GetProblemConfig(),
+                            Catch::Matchers::ContainsSubstring("Coil") &&
+                            Catch::Matchers::ContainsSubstring("excitation_type"));
+    }
 }

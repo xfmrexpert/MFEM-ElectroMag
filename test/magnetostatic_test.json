@@ -13,11 +13,11 @@
   "regions": [
     {
       "entity_group": "Vacuum",
-      "material": 1
+      "material": "Vacuum"
     },
     {
       "entity_group": "Coil_Source",
-      "material": 2
+      "material": "Copper"
     }
   ],
   "materials": [
@@ -41,7 +41,7 @@
   "terminals": [
     {
       "name": "Loop_Current",
-      "excitation": "current",
+      "excitation_type": "current",
       "entity_group": "Coil_Source"
     }
   ],

@@ -53,6 +53,31 @@ protected:
         return m;
     }
 
+    // Marker (1/0 over domain attributes) for a set of element attribute ids.
+    // Unlike the boundary variant, a domain attribute that the mesh does not
+    // carry is a configuration error: silently dropping it yields an empty
+    // integration region and downstream results of exactly zero, which are much
+    // harder to diagnose than a failure here.
+    mfem::Array<int> DomainMarkerFromAttrs(const std::vector<int>& attrs,
+                                           const std::string& context) const {
+        MFEM_VERIFY(!attrs.empty(),
+            "No domain attribute ids are associated with " + context + ".");
+        mfem::Array<int> m(mesh.attributes.Max());
+        m = 0;
+        for (int a : attrs) {
+            const bool is_bdr_attr = mesh.bdr_attributes.Find(a) >= 0;
+            MFEM_VERIFY(a > 0 && a <= m.Size() && mesh.attributes.Find(a) >= 0,
+                "Domain attribute " + std::to_string(a) + " referenced by " +
+                context + " does not exist in the mesh (mesh domain attributes "
+                "run up to " + std::to_string(m.Size()) + ")." +
+                (is_bdr_attr ? " It is a boundary attribute of this mesh; the "
+                               "entity group most likely names a curve physical "
+                               "group instead of the surface one." : ""));
+            m[a - 1] = 1;
+        }
+        return m;
+    }
+
     // Marker (1/0 over bdr attributes) for a named entity group.
     mfem::Array<int> MarkerFromGroup(const std::string& group_name) const {
         return MarkerFromAttrs(config.EntityGroups.at(group_name).AttributeIds);
@@ -162,7 +187,7 @@ protected:
             const EntityGroup& group = config.EntityGroups.at(region.EntityGroupName);
             if (std::find(group.AttributeIds.begin(), group.AttributeIds.end(), attr)
                 != group.AttributeIds.end())
-                return &config.Materials[region.Material];
+                return &config.Materials.at(region.MaterialName);
         }
         return nullptr;
     }
@@ -347,8 +372,7 @@ private:
             : fs::path(config.ResultsDirectory);
         const fs::path out_path = results_dir / (scenario_name + ".results.msh");
 
-        const int ref_factor = (config.ExportRefine > 0) ? config.ExportRefine
-            : std::max(1, config.Order);
+        const int ref_factor = config.ExportRefine.value_or(std::max(1, config.Order));
         mfem::Mesh export_mesh(&mesh, ref_factor, mfem::BasisType::ClosedUniform);
 
         const int dim = export_mesh.Dimension();

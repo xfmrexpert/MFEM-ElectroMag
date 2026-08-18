@@ -17,15 +17,15 @@
   "regions": [
     {
       "entity_group": "Air",
-      "material": 1
+      "material": "Air"
     },
     {
       "entity_group": "AluminumConductor",
-      "material": 2
+      "material": "AluminumConductor"
     },
     {
       "entity_group": "Coil",
-      "material": 3
+      "material": "Coil"
     }
   ],
   "materials": [
@@ -54,7 +54,7 @@
   "terminals": [
     {
       "name": "ExcitationCoil",
-      "excitation": "current",
+      "excitation_type": "current",
       "entity_group": "Coil"
     }
   ],

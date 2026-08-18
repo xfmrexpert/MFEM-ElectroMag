@@ -7,6 +7,7 @@
 #include <string>
 #include <map>
 #include <unordered_map>
+#include <optional>
 #include <utility>
 #include "enums.hpp"      // PhysicsType, GeometryType
 #include "constants.hpp"  // Constants::DEFAULT_SOLVER_*
@@ -36,7 +37,7 @@ struct EntityGroup {
 
 struct Region {
 	std::string EntityGroupName;   // mesh domain (element) group name (validated)
-	int Material = -1;               // index into ProblemConfig::Materials
+	std::string MaterialName;      // must match a ProblemConfig::Materials key (validated)
 	RegionCurrentConstraint CurrentConstraint = RegionCurrentConstraint::None;
 };
 
@@ -44,7 +45,7 @@ struct Region {
 //   Excitation == Voltage -> AttributeIds are BOUNDARY attrs (essential BC)
 //   Excitation == Current -> AttributeIds are DOMAIN   attrs (RHS source)
 struct Terminal {
-    Quantity Excitation = Quantity::Voltage;
+    Quantity ExcitationType = Quantity::Voltage;
     ConductorType Conductor = ConductorType::Massive;
 	std::string EntityGroupName;   // mesh boundary (essential BC) or domain (RHS source) group name (validated)
 };
@@ -112,11 +113,11 @@ struct ProblemConfig {
 	bool OutputParaview = false;
 	bool OutputGmsh = false;
 	std::string ResultsDirectory;  // Optional Gmsh results directory (empty = mesh directory)
-	int ExportRefine = -1;         // Refinement factor for export mesh (<0 = default to Order)
+	std::optional<int> ExportRefine;  // Export mesh refinement factor (unset = default to Order)
 	AmrSettings Amr;               // Adaptive mesh refinement controls (disabled by default)
 	std::unordered_map<std::string, EntityGroup> EntityGroups;
 	std::vector<Region> Regions;
-	std::vector<Material> Materials;
+	std::map<std::string, Material> Materials;
 	std::map<std::string, Terminal> Terminals;
 	std::vector<BoundaryCondition> BoundaryConditions;
 	std::vector<std::pair<std::string, Scenario>> Scenarios;

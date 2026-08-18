@@ -14,8 +14,8 @@
     { "name": "FarField", "dim": 1, "attribute_ids": [101] }
   ],
   "regions": [
-    { "entity_group": "Air", "material": 1 },
-    { "entity_group": "Coil", "material": 2 }
+    { "entity_group": "Air", "material": "Air" },
+    { "entity_group": "Coil", "material": "Coil" }
   ],
   "materials": [
     {
@@ -34,7 +34,7 @@
   "terminals": [
     {
       "name": "CoilCurrent",
-      "excitation": "current",
+      "excitation_type": "current",
       "entity_group": "Coil"
     }
   ],

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14) # FetchContent requires 3.14+
-project(MFEM-ElectroMag CXX)
+project(MFEM-ElectroMag VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -82,6 +82,24 @@ FetchContent_MakeAvailable(mfem)
 
 add_executable(mfem-electromag src/main.cpp)
 target_link_libraries(mfem-electromag PRIVATE mfem)
+
+# Build identity banner: regenerate build_info.hpp on every build so a stale
+# executable is obvious at runtime. GenerateBuildInfo.cmake uses configure_file,
+# which only rewrites the header when the commit/dirty state actually changes,
+# so this does not trigger a rebuild on every invocation.
+add_custom_target(build_info ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DPROJECT_VERSION=${PROJECT_VERSION}
+        -DGIT_DIR=${CMAKE_SOURCE_DIR}
+        -DSRC=${CMAKE_SOURCE_DIR}/src/build_info.hpp.in
+        -DDST=${CMAKE_BINARY_DIR}/generated/build_info.hpp
+        -P ${CMAKE_SOURCE_DIR}/cmake/GenerateBuildInfo.cmake
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/build_info.hpp
+    COMMENT "Generating build info header"
+    VERBATIM
+)
+add_dependencies(mfem-electromag build_info)
+target_include_directories(mfem-electromag PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
 # nlohmann/json diagnostics: include the JSON pointer path (JSON_DIAGNOSTICS)
 # and byte positions (JSON_DIAGNOSTIC_POSITIONS) in exception messages so

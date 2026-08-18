@@ -24,13 +24,13 @@ json ValidConfig() {
 			{{"name", "Boundary"}, {"dim", 1}, {"attribute_ids", {1}}}
 		})},
 		{"regions", json::array({
-			{{"entity_group", "Domain"}, {"material", 1}}
+			{{"entity_group", "Domain"}, {"material", "Dielectric"}}
 		})},
 		{"materials", json::array({
-			{{"properties", {{"epsilon_r", 1.0}}}}
+			{{"name", "Dielectric"}, {"properties", {{"epsilon_r", 1.0}}}}
 		})},
 		{"terminals", json::array({
-			{{"name", "Drive"}, {"excitation", "voltage"}, {"entity_group", "Boundary"}}
+			{{"name", "Drive"}, {"excitation_type", "voltage"}, {"entity_group", "Boundary"}}
 		})},
 		{"boundaries", json::array({
 			{{"type", "Dirichlet"}, {"entity_group", "Boundary"}, {"value", 0.0}}
@@ -217,7 +217,7 @@ TEST_CASE("ConfigValidator validates open-current MQS regions",
 		config["materials"][0]["properties"]["sigma"] = 1.0e6;
 		config["regions"][0]["current_constraint"] = "open";
 		config["terminals"] = json::array({
-			{{"name", "Port"}, {"excitation", "current"},
+			{{"name", "Port"}, {"excitation_type", "current"},
 			 {"conductor_type", "massive"}, {"entity_group", "Domain"}}
 		});
 		config["scenarios"][0]["excitations"] = json::array();
@@ -225,6 +225,46 @@ TEST_CASE("ConfigValidator validates open-current MQS regions",
 		ConfigValidator validator;
 		REQUIRE_FALSE(validator.Validate(config));
 		REQUIRE(HasError(validator, "regions[0].current_constraint"));
+	}
+}
+
+TEST_CASE("ConfigValidator validates material names",
+		  "[config_validator][materials]") {
+	SECTION("requires a name") {
+		json config = ValidConfig();
+		config["materials"][0].erase("name");
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "materials[0].name"));
+	}
+
+	SECTION("rejects duplicate names") {
+		json config = ValidConfig();
+		config["materials"].push_back(
+			{{"name", "Dielectric"}, {"properties", {{"epsilon_r", 3.0}}}});
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "materials[1].name"));
+	}
+
+	SECTION("rejects a region referencing an undeclared material") {
+		json config = ValidConfig();
+		config["regions"][0]["material"] = "Missing";
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "regions[0].material"));
+	}
+
+	SECTION("rejects a non-string material reference") {
+		json config = ValidConfig();
+		config["regions"][0]["material"] = 1;
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "regions[0].material"));
 	}
 }
 
@@ -262,6 +302,28 @@ TEST_CASE("ConfigValidator enforces canonical simulation field names", "[config_
 	REQUIRE(HasError(validator, "simulation.results_file"));
 }
 
+TEST_CASE("ConfigValidator enforces canonical terminal field names", "[config_validator]") {
+	json config = ValidConfig();
+	config["terminals"][0].erase("excitation_type");
+	config["terminals"][0]["excitation"] = "voltage";
+
+	ConfigValidator validator;
+	REQUIRE_FALSE(validator.Validate(config));
+	REQUIRE(HasError(validator, "terminals[0].excitation"));
+	// The legacy spelling gets the actionable rename message on its own; the
+	// generic "missing required field" error would only add noise here.
+	REQUIRE_FALSE(HasError(validator, "terminals[0].excitation_type"));
+}
+
+TEST_CASE("ConfigValidator requires terminal excitation_type", "[config_validator]") {
+	json config = ValidConfig();
+	config["terminals"][0].erase("excitation_type");
+
+	ConfigValidator validator;
+	REQUIRE_FALSE(validator.Validate(config));
+	REQUIRE(HasError(validator, "terminals[0].excitation_type"));
+}
+
 TEST_CASE("ConfigValidator rejects duplicate names", "[config_validator]") {
 	SECTION("entity groups") {
 		json config = ValidConfig();
@@ -275,7 +337,7 @@ TEST_CASE("ConfigValidator rejects duplicate names", "[config_validator]") {
 	SECTION("terminals") {
 		json config = ValidConfig();
 		config["terminals"].push_back(
-			{{"name", "Drive"}, {"excitation", "voltage"}, {"entity_group", "Boundary"}});
+			{{"name", "Drive"}, {"excitation_type", "voltage"}, {"entity_group", "Boundary"}});
 		ConfigValidator validator;
 		REQUIRE_FALSE(validator.Validate(config));
 		REQUIRE(HasError(validator, "terminals[1].name"));

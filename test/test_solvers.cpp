@@ -115,7 +115,7 @@ TEST_CASE("Boundary closures and voltage terminals have distinct ownership",
         json config = MakePlanarStripConfig(
             "electrostatics", mesh_file, 1, {{"epsilon_r", 1.0}}, 0.0, 0.0);
         config["terminals"] = json::array({
-            {{"name", "LeftTerminal"}, {"excitation", "voltage"},
+            {{"name", "LeftTerminal"}, {"excitation_type", "voltage"},
              {"entity_group", "Left"}}
         });
         config["boundaries"].erase(config["boundaries"].begin());
@@ -382,7 +382,7 @@ TEST_CASE("ElectrostaticSolver can be constructed", "[solvers]") {
             {{"name", "Ground"}, {"dim", 1}, {"attribute_ids", {1}}}
         })},
         {"regions", json::array({
-            {{"entity_group", "Domain"}, {"material", 1}}
+            {{"entity_group", "Domain"}, {"material", "dielectric"}}
         })},
         {"materials", json::array({
             {
@@ -469,7 +469,7 @@ TEST_CASE("MagnetostaticSolver can be constructed", "[solvers]") {
             {{"name", "FarField"}, {"dim", 1}, {"attribute_ids", {1}}}
         })},
         {"regions", json::array({
-            {{"entity_group", "Domain"}, {"material", 1}}
+            {{"entity_group", "Domain"}, {"material", "iron"}}
         })},
         {"materials", json::array({
             {
@@ -513,7 +513,7 @@ TEST_CASE("MagnetoquasistaticSolver can be constructed", "[solvers]") {
             {{"name", "FarField"}, {"dim", 1}, {"attribute_ids", {1}}}
         })},
         {"regions", json::array({
-            {{"entity_group", "Domain"}, {"material", 1}}
+            {{"entity_group", "Domain"}, {"material", "conductor"}}
         })},
         {"materials", json::array({
             {
@@ -694,7 +694,7 @@ json MakePlanarStripConfig(const std::string& physics,
             {{"name", "Right"},  {"dim", 1}, {"attribute_ids", {2}}}
         })},
         {"regions", json::array({
-            {{"name", "Domain"}, {"entity_group", "Domain"}, {"material", 1}}
+            {{"name", "Domain"}, {"entity_group", "Domain"}, {"material", "Material"}}
         })},
         {"materials", json::array({
             {{"name", "Material"}, {"properties", material_properties}}
@@ -938,14 +938,14 @@ json MakeCoaxAmrConfig(const std::string& mesh_file, int max_iterations) {
             {{"name", "Outer"},      {"dim", 1}, {"attribute_ids", {2}}}
         })},
         {"regions", json::array({
-            {{"name", "Dielectric"}, {"entity_group", "Dielectric"}, {"material", 1}}
+            {{"name", "Dielectric"}, {"entity_group", "Dielectric"}, {"material", "Vacuum"}}
         })},
         {"materials", json::array({
             {{"name", "Vacuum"}, {"properties", {{"epsilon_r", 1.0}}}}
         })},
         {"terminals", json::array({
-            {{"name", "Inner"}, {"excitation", "voltage"}, {"entity_group", "Inner"}},
-            {{"name", "Outer"}, {"excitation", "voltage"}, {"entity_group", "Outer"}}
+            {{"name", "Inner"}, {"excitation_type", "voltage"}, {"entity_group", "Inner"}},
+            {{"name", "Outer"}, {"excitation_type", "voltage"}, {"entity_group", "Outer"}}
         })},
         {"scenarios", json::array({
             {{"name", "energized"}, {"excitations", json::array({
@@ -1098,8 +1098,8 @@ TEST_CASE("Electrostatic solver satisfies dielectric interface conditions",
             {{"name", "Right"}, {"dim", 1}, {"attribute_ids", {2}}}
         })},
         {"regions", json::array({
-            {{"name", "LeftDielectric"}, {"entity_group", "LeftDielectric"}, {"material", 1}},
-            {{"name", "RightDielectric"}, {"entity_group", "RightDielectric"}, {"material", 2}}
+            {{"name", "LeftDielectric"}, {"entity_group", "LeftDielectric"}, {"material", "LowPermittivity"}},
+            {{"name", "RightDielectric"}, {"entity_group", "RightDielectric"}, {"material", "HighPermittivity"}}
         })},
         {"materials", json::array({
             {{"name", "LowPermittivity"}, {"properties", {{"epsilon_r", epsilon_r_left}}}},
@@ -1159,8 +1159,8 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
     config["simulation"]["analysis_type"] = "coupling_matrix";
     config["boundaries"] = json::array();
     config["terminals"] = json::array({
-        {{"name", "Left"}, {"excitation", "voltage"}, {"entity_group", "Left"}},
-        {{"name", "Right"}, {"excitation", "voltage"}, {"entity_group", "Right"}}
+        {{"name", "Left"}, {"excitation_type", "voltage"}, {"entity_group", "Left"}},
+        {{"name", "Right"}, {"excitation_type", "voltage"}, {"entity_group", "Right"}}
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
@@ -1245,12 +1245,12 @@ TEST_CASE("Magnetostatic inductance matrix is reciprocal and distinguishes rows"
     config["entity_groups"].push_back(
         {{"name", "CoilB"}, {"dim", 2}, {"attribute_ids", {2}}});
     config["regions"] = json::array({
-        {{"name", "CoilA"}, {"entity_group", "CoilA"}, {"material", 1}},
-        {{"name", "CoilB"}, {"entity_group", "CoilB"}, {"material", 1}}
+        {{"name", "CoilA"}, {"entity_group", "CoilA"}, {"material", "Material"}},
+        {{"name", "CoilB"}, {"entity_group", "CoilB"}, {"material", "Material"}}
     });
     config["terminals"] = json::array({
-        {{"name", "CoilA"}, {"excitation", "current"}, {"entity_group", "CoilA"}},
-        {{"name", "CoilB"}, {"excitation", "current"}, {"entity_group", "CoilB"}}
+        {{"name", "CoilA"}, {"excitation_type", "current"}, {"entity_group", "CoilA"}},
+        {{"name", "CoilB"}, {"excitation_type", "current"}, {"entity_group", "CoilB"}}
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
@@ -1284,7 +1284,7 @@ TEST_CASE("Magnetostatic solver reproduces the field of a uniform current slab",
     json config = MakePlanarStripConfig(
         "magnetostatics", mesh_file, 2, {{"mu_r", 1.0}}, 0.0, 0.0);
     config["terminals"] = json::array({
-        {{"name", "Current"}, {"excitation", "current"},
+        {{"name", "Current"}, {"excitation_type", "current"},
          {"conductor_type", "stranded"}, {"entity_group", "Domain"}}
     });
     config["scenarios"][0]["excitations"] = json::array({
@@ -1446,14 +1446,14 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     });
     config["regions"] = json::array({
         {{"name", "StrandedRegion"}, {"entity_group", "StrandedDomain"},
-         {"material", 1}},
+         {"material", "StrandedMaterial"}},
         {{"name", "MassiveRegion"}, {"entity_group", "MassiveDomain"},
-         {"material", 2}}
+         {"material", "MassiveMaterial"}}
     });
     config["terminals"] = json::array({
-        {{"name", "Massive"}, {"excitation", "current"},
+        {{"name", "Massive"}, {"excitation_type", "current"},
          {"conductor_type", "massive"}, {"entity_group", "MassiveDomain"}},
-        {{"name", "Stranded"}, {"excitation", "current"},
+        {{"name", "Stranded"}, {"excitation_type", "current"},
          {"conductor_type", "stranded"}, {"entity_group", "StrandedDomain"}}
     });
 
@@ -1519,11 +1519,11 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
     config["entity_groups"].push_back(
         {{"name", "PassiveDomain"}, {"dim", 2}, {"attribute_ids", {2}}});
     config["regions"] = json::array({
-        {{"name", "DriveRegion"}, {"entity_group", "DriveDomain"}, {"material", 1}},
-        {{"name", "PassiveRegion"}, {"entity_group", "PassiveDomain"}, {"material", 1}}
+        {{"name", "DriveRegion"}, {"entity_group", "DriveDomain"}, {"material", "Material"}},
+        {{"name", "PassiveRegion"}, {"entity_group", "PassiveDomain"}, {"material", "Material"}}
     });
     config["terminals"] = json::array({
-        {{"name", "Drive"}, {"excitation", "current"},
+        {{"name", "Drive"}, {"excitation_type", "current"},
          {"conductor_type", "massive"}, {"entity_group", "DriveDomain"}}
     });
 
