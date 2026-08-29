@@ -316,14 +316,14 @@ TEST_CASE("ConfigValidator rejects wrong JSON types without throwing", "[config_
 	json config = ValidConfig();
 	config["simulation"]["order"] = "first";
 	config["entity_groups"][0]["attribute_ids"][0] = 1.5;
-	config["scenarios"][0]["excitations"][0]["floating"] = "false";
+	config["scenarios"][0]["excitations"][0]["value"] = "ten";
 
 	ConfigValidator validator;
 	REQUIRE_NOTHROW(validator.Validate(config));
 	REQUIRE_FALSE(validator.Validate(config));
 	REQUIRE(HasError(validator, "simulation.order"));
 	REQUIRE(HasError(validator, "entity_groups[0].attribute_ids[0]"));
-	REQUIRE(HasError(validator, "scenarios[0].excitations[0].floating"));
+	REQUIRE(HasError(validator, "scenarios[0].excitations[0].value"));
 }
 
 TEST_CASE("ConfigValidator enforces canonical simulation field names", "[config_validator]") {

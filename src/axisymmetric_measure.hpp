@@ -29,13 +29,10 @@
 //   - AxisymmetricConductanceCoeff's 1/(2*pi*r), which is physical: it comes
 //     from E_phi = V/(2*pi*r) for an azimuthal conductor, not from the volume
 //     element.
-//   - omega = 2*pi*f, which is a temporal frequency conversion.
-// Neither should be routed through this helper.
 namespace Axisymmetric
 {
    // Geometric measure at radius r, excluding the quadrature weight and the
-   // Jacobian determinant. Multiply by ip.weight * Trans.Weight() to form the
-   // full integration weight.
+   // Jacobian determinant. 
    inline double Measure(double r)
    {
 	  return Constants::TWO_PI * r;

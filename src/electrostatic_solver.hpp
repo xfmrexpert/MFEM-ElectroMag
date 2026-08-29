@@ -216,12 +216,10 @@ public:
 		for (const auto& [term_name, term] : config.Terminals) {
 			if (term.ExcitationType == Quantity::Voltage) {
 				for (const auto& exc : sc.Excitations) {
-					if (!exc.Floating) {
-						if (term_name == exc.TerminalName) {
-							auto marker = MarkerFromGroup(term.EntityGroupName);
-							mfem::ConstantCoefficient c(exc.Value);
-							x->ProjectBdrCoefficient(c, marker);
-						}
+					if (term_name == exc.TerminalName) {
+						auto marker = MarkerFromGroup(term.EntityGroupName);
+						mfem::ConstantCoefficient c(exc.Value);
+						x->ProjectBdrCoefficient(c, marker);
 					}
 				}
 			}

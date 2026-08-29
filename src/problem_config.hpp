@@ -62,7 +62,6 @@ struct Terminal {
 struct Excitation {
 	std::string TerminalName;   // must match a Terminal::Name (validated)
 	double Value = 0.0;         // volts (Voltage terminal) | amps (Current terminal)
-	bool Floating = false;      // explicit; Value ignored. Voltage terminals only.
 };
 
 struct Material {

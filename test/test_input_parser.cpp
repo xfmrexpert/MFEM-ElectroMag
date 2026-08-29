@@ -60,7 +60,7 @@ json CanonicalConfig() {
                 {{"terminal", "Coil"}, {"value", 20.0}}
             })}},
             {{"name", "First"}, {"frequency", 50.0}, {"excitations", json::array({
-                {{"terminal", "Coil"}, {"value", 10.0}, {"floating", false}}
+                {{"terminal", "Coil"}, {"value", 10.0}}
             })}}
         })}
     };

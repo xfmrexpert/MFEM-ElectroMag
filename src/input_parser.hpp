@@ -461,7 +461,6 @@ private:
                     excitation.TerminalName = d["terminal"];
                 }
                 excitation.Value = d.value("value", 0.0);
-                excitation.Floating = d.value("floating", false);
                 scenario.Excitations.push_back(excitation);
             }
         }
@@ -487,6 +486,16 @@ private:
                     scenario.Frequency = frequency.get<double>();
                     scenarios.emplace_back(name, std::move(scenario));
                     continue;
+                }
+                else if (frequency.is_array()) {
+					for (const auto& f : frequency) {
+						Scenario point_scenario = scenario;
+						point_scenario.Frequency = f.get<double>();
+						scenarios.emplace_back(
+							SweepScenarioName(name, static_cast<int>(scenarios.size()), point_scenario.Frequency),
+							std::move(point_scenario));
+					}
+					continue;
                 }
 
                 const std::string scale = frequency.at("scale").get<std::string>();

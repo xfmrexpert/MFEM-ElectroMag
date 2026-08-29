@@ -198,6 +198,13 @@ private:
                     CheckFieldType(frequency, "stop", prefix + ".frequency.stop", ExpectedType::Number);
                     CheckFieldType(frequency, "points", prefix + ".frequency.points", ExpectedType::Integer);
                 }
+				else if (frequency.is_array()) {
+					for (size_t i = 0; i < frequency.size(); ++i) {
+						if (!frequency[i].is_number()) {
+							AddError(prefix + ".frequency[" + std::to_string(i) + "]", "Must be a number");
+						}
+					}
+				}
                 else if (!frequency.is_number()) {
                     AddError(prefix + ".frequency", "Must be a number or a sweep object");
                 }
@@ -212,7 +219,6 @@ private:
                     }
                     CheckFieldType(excitation, "terminal", eprefix + ".terminal", ExpectedType::String);
                     CheckFieldType(excitation, "value", eprefix + ".value", ExpectedType::Number);
-                    CheckFieldType(excitation, "floating", eprefix + ".floating", ExpectedType::Boolean);
                 }
             }
         });
@@ -764,18 +770,14 @@ private:
             return;
         }
 
-        // Build the set of declared terminal names and which are current-driven,
-        // so excitations can be cross-checked (catches typo'd terminal references).
+        // Build the set of declared terminal names so excitations can be
+        // cross-checked (catches typo'd terminal references).
         std::set<std::string> terminal_names;
-        std::set<std::string> current_terminals;
         if (config.contains("terminals") && config["terminals"].is_array()) {
             for (const auto& t : config["terminals"]) {
                 std::string name = t.value("name", "");
                 if (!name.empty()) {
                     terminal_names.insert(name);
-                    if (t.value("excitation_type", "voltage") == "current") {
-                        current_terminals.insert(name);
-                    }
                 }
             }
         }
@@ -805,6 +807,27 @@ private:
                         AddError(prefix + ".frequency", "Frequency must be finite and positive");
                     }
                 }
+				else if (sc["frequency"].is_array()) {
+					// Frequency sweep as an array of numbers
+					const auto& freq_array = sc["frequency"];
+					if (freq_array.empty()) {
+						AddError(prefix + ".frequency", "Frequency array must not be empty");
+					}
+					else {
+						for (size_t j = 0; j < freq_array.size(); ++j) {
+							const auto& freq = freq_array[j];
+							if (!freq.is_number()) {
+								AddError(prefix + ".frequency[" + std::to_string(j) + "]", "Frequency must be a number");
+							}
+							else {
+								const double frequency = freq.get<double>();
+								if (!std::isfinite(frequency) || frequency <= 0.0) {
+									AddError(prefix + ".frequency[" + std::to_string(j) + "]", "Frequency must be finite and positive");
+								}
+							}
+						}
+					}
+				}
                 else if (sc["frequency"].is_object()) {
                     const auto& sweep = sc["frequency"];
                     const bool complete = sweep.contains("scale") && sweep.contains("start")
@@ -859,11 +882,6 @@ private:
                 if (terminal_names.find(tname) == terminal_names.end()) {
                     AddError(dprefix + ".terminal", "Unknown terminal '" + tname +
                             "'. No terminal with that name is declared");
-                }
-
-                if (d.value("floating", false) && current_terminals.count(tname)) {
-                    AddError(dprefix + ".floating", "Terminal '" + tname +
-                            "' is current-driven; 'floating' applies to voltage terminals only");
                 }
             }
         }
