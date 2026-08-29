@@ -734,6 +734,16 @@ private:
             if (excitation != "voltage" && excitation != "current") {
                 AddError(prefix + ".excitation_type", "Invalid excitation_type '" + excitation + "'. Must be 'voltage' or 'current'");
             }
+            else if (type == "electrostatics" && excitation != "voltage") {
+                AddError(prefix + ".excitation_type",
+                    "Electrostatic terminals must use excitation_type 'voltage'");
+            }
+            else if ((type == "magnetostatics" || type == "magnetoquasistatics") &&
+                     excitation != "current") {
+                AddError(prefix + ".excitation_type",
+                    "Magnetic terminals must use excitation_type 'current'; "
+                    "massive MQS terminal voltage is a solved output");
+            }
 
             const std::string conductor = t.value("conductor_type", "massive");
             if (conductor != "massive" && conductor != "stranded") {

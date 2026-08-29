@@ -166,6 +166,8 @@ json ValidMqsConfig() {
 	json config = ValidConfig();
 	config["simulation"]["physics_type"] = "magnetoquasistatics";
 	config["materials"][0]["properties"] = {{"mu_r", 1.0}, {"sigma", 0.0}};
+	config["terminals"][0]["excitation_type"] = "current";
+	config["terminals"][0]["entity_group"] = "Domain";
 	config["scenarios"][0]["frequency"] = 60.0;
 	return config;
 }
@@ -310,6 +312,70 @@ TEST_CASE("ConfigValidator accepts the canonical schema", "[config_validator]") 
 	ConfigValidator validator;
 	REQUIRE(validator.Validate(ValidConfig()));
 	REQUIRE(validator.GetErrors().empty());
+}
+
+TEST_CASE("ConfigValidator enforces physics-specific terminal types",
+		  "[config_validator][terminals]") {
+	auto magnetic_config = [](const std::string& physics,
+							 const std::string& excitation,
+							 const std::string& conductor = "massive") {
+		json config = ValidConfig();
+		config["simulation"]["physics_type"] = physics;
+		config["materials"][0]["properties"] = {
+			{"mu_r", 1.0}, {"sigma", 5.8e7}
+		};
+		config["terminals"][0]["excitation_type"] = excitation;
+		config["terminals"][0]["conductor_type"] = conductor;
+		config["terminals"][0]["entity_group"] =
+			excitation == "current" ? "Domain" : "Boundary";
+		if (physics == "magnetoquasistatics") {
+			config["scenarios"][0]["frequency"] = 1000.0;
+		}
+		return config;
+	};
+
+	SECTION("accepts electrostatic voltage terminals") {
+		ConfigValidator validator;
+		REQUIRE(validator.Validate(ValidConfig()));
+	}
+
+	SECTION("rejects electrostatic current terminals") {
+		json config = ValidConfig();
+		config["terminals"][0]["excitation_type"] = "current";
+		config["terminals"][0]["entity_group"] = "Domain";
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "terminals[0].excitation_type"));
+	}
+
+	SECTION("accepts magnetostatic current terminals") {
+		ConfigValidator validator;
+		REQUIRE(validator.Validate(
+			magnetic_config("magnetostatics", "current")));
+	}
+
+	SECTION("rejects magnetostatic voltage terminals") {
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(
+			magnetic_config("magnetostatics", "voltage")));
+		REQUIRE(HasError(validator, "terminals[0].excitation_type"));
+	}
+
+	SECTION("accepts massive and stranded MQS current terminals") {
+		for (const std::string conductor : {"massive", "stranded"}) {
+			ConfigValidator validator;
+			REQUIRE(validator.Validate(magnetic_config(
+				"magnetoquasistatics", "current", conductor)));
+		}
+	}
+
+	SECTION("rejects MQS voltage terminals") {
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(
+			magnetic_config("magnetoquasistatics", "voltage")));
+		REQUIRE(HasError(validator, "terminals[0].excitation_type"));
+	}
 }
 
 TEST_CASE("ConfigValidator rejects wrong JSON types without throwing", "[config_validator]") {

@@ -228,6 +228,12 @@ public:
 
         // Axisymmetric or Planar
         geometry = config.GeometryType;
+        for (const auto& [term_name, term] : config.Terminals) {
+            MFEM_VERIFY(term.ExcitationType == Quantity::Current,
+                "Magnetoquasistatic terminal '" + term_name +
+                "' must use a current excitation; massive terminal voltage "
+                "is a solved output.");
+        }
 
         // Reject negative radii and record whether the domain reaches r = 0.
         ValidateAxisymmetricGeometry();

@@ -50,6 +50,11 @@ public:
 
 		// Axisymmetric or Planar
 		geometry = config.GeometryType;
+		for (const auto& [term_name, term] : config.Terminals) {
+			MFEM_VERIFY(term.ExcitationType == Quantity::Voltage,
+				"Electrostatic terminal '" + term_name +
+				"' must use a voltage excitation.");
+		}
 
 		// Reject negative radii. Electrostatics needs no axis condition: the
 		// natural condition dV/dr = 0 on r = 0 is already the correct one.
