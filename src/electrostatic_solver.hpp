@@ -16,6 +16,8 @@
 #include "sparse_direct_solver.hpp"
 
 class ElectrostaticSolver : public PhysicsSolver {
+	enum class ImprintMode { Field, CouplingPerturbation };
+
 	// Primary Spaces
 	std::unique_ptr<mfem::GridFunction> x; // Electric Potential (V)
 
@@ -207,15 +209,24 @@ public:
 		return peak;
 	}
 
-	void ImprintScenario(const Scenario& sc) {
+	// Field analysis imprints the configured closure data (nonzero Dirichlet
+	// values and the Neumann load). CouplingPerturbation analysis omits it:
+	// a coupling coefficient is a derivative with respect to terminal drive,
+	// so each column must be the homogeneous response to a unit terminal
+	// excitation. Because the problem is linear, homogenizing here is exactly
+	// equivalent to subtracting a background baseline solve, at one fewer solve.
+	void ImprintScenario(const Scenario& sc, ImprintMode mode) {
 		*x = 0.0; // Reset solution for new scenario
-		*b = neumann_rhs;
-		
-		for (const auto& bc : config.BoundaryConditions) {
-			if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
-				auto marker = MarkerFromGroup(bc.EntityGroupName);
-				mfem::ConstantCoefficient c(bc.Value);
-				x->ProjectBdrCoefficient(c, marker);
+		*b = 0.0;
+
+		if (mode == ImprintMode::Field) {
+			*b = neumann_rhs;
+			for (const auto& bc : config.BoundaryConditions) {
+				if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
+					auto marker = MarkerFromGroup(bc.EntityGroupName);
+					mfem::ConstantCoefficient c(bc.Value);
+					x->ProjectBdrCoefficient(c, marker);
+				}
 			}
 		}
 		for (const auto& [term_name, term] : config.Terminals) {
@@ -253,7 +264,8 @@ public:
 		int col = 0;
 		for (const auto& [name, sc] : BuildSolveScenarios()) {
 			auto operation = Reporter().Start("scenario '" + name + "'");
-			ImprintScenario(sc);
+			ImprintScenario(sc, coupling ? ImprintMode::CouplingPerturbation
+											 : ImprintMode::Field);
 			SolveSystem();
 			AccumulateScenarioError();
 			if (coupling) { GatherChargeColumn(col++); }
@@ -308,11 +320,14 @@ public:
 private:
 	// CouplingMatrix post-solve action for one column: with the just-solved
 	// potential in *x (terminal `col` driven at 1 V, the rest grounded by the
-	// synthesized scenario), gather the induced charge Q = K0 * x onto every
+	// synthesized scenario), gather the reaction charge Q = K0*x onto every
 	// conductor's boundary DOFs and write column `col` of C. Off-diagonals are
 	// negative, diagonals positive. K0 carries the full geometric measure in
 	// both planar and axisymmetric mode, so Q is already in coulombs and needs
 	// no geometry-dependent scaling here.
+	// The coupling solve is imprinted in CouplingPerturbation mode, so the load
+	// vector is identically zero and K0*x is the full reaction, with no RHS
+	// contribution left to subtract.
 	// Terminal order matches BuildSolveScenarios() / WriteCouplingMatrix()
 	// (config.Terminals order).
 	void GatherChargeColumn(int col) {

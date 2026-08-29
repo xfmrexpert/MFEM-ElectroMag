@@ -21,6 +21,8 @@
 class MagnetostaticSolver : public PhysicsSolver
 {
 private:
+	enum class ImprintMode { Field, CouplingPerturbation };
+
 	// Resources (order of declaration = order of destruction)
 	std::unique_ptr<mfem::GridFunction> A; // A_phi (axisym) or A_z (planar scalar)
 
@@ -206,18 +208,20 @@ public:
 		return peak;
 	}
 
-	void ImprintScenario(const Scenario& sc) {
+	void ImprintScenario(const Scenario& sc, ImprintMode mode) {
 		*A = 0.0; // Reset solution for new scenario
 
 		// Re-apply non-zero essential (closure) BC values on this mesh's A.
 		// ess_tdof values are lifted into the RHS by FormLinearSystem at solve time,
 		// so they must be set AFTER the *A = 0.0 reset, every scenario.
-		for (const auto& bc : config.BoundaryConditions) {
-			if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
-				const EntityGroup& group = config.EntityGroups.at(bc.EntityGroupName);
-				auto marker = MarkerFromAttrs(group.AttributeIds);
-				mfem::ConstantCoefficient c(bc.Value);
-				A->ProjectBdrCoefficient(c, marker);
+		if (mode == ImprintMode::Field) {
+			for (const auto& bc : config.BoundaryConditions) {
+				if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
+					const EntityGroup& group = config.EntityGroups.at(bc.EntityGroupName);
+					auto marker = MarkerFromAttrs(group.AttributeIds);
+					mfem::ConstantCoefficient c(bc.Value);
+					A->ProjectBdrCoefficient(c, marker);
+				}
 			}
 		}
 		// Axis stays at A=0 (already zero from the reset; no projection needed).
@@ -237,7 +241,9 @@ public:
 			b->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
 		}
 		b->Assemble();
-		*b += neumann_rhs;
+		if (mode == ImprintMode::Field) {
+			*b += neumann_rhs;
+		}
 	}
 
 	// Solve + save on the CURRENT mesh/operators. Both analysis types flow through
@@ -261,7 +267,10 @@ public:
 
 		for (const auto& [sc_name, sc] : BuildSolveScenarios()) {
 			auto operation = Reporter().Start("scenario '" + sc_name + "'");
-			ImprintScenario(sc);
+			ImprintScenario(sc,
+				config.AnalysisType == AnalysisType::CouplingMatrix
+					? ImprintMode::CouplingPerturbation
+					: ImprintMode::Field);
 			SolveSystem();
 			AccumulateScenarioError();
 			SaveScenario(sc_name);
@@ -405,6 +414,12 @@ private:
 		return current_density;
 	}
 
+	// Source current density for a scenario, summed over its excitations.
+	// Current enters the model only through Terminals, so this is a pure
+	// function of sc.Excitations: a terminal with no matching excitation
+	// contributes nothing. In CouplingPerturbation mode the scenario carries a
+	// single unit excitation, so this IS the drive for that column rather than
+	// background data, and must not be suppressed the way closure data is.
 	mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
 		mfem::Vector j_src(mesh.attributes.Max());
 		j_src = 0.0;

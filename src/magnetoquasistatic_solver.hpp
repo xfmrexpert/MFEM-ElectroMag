@@ -27,6 +27,7 @@
 #include "sparse_direct_solver.hpp"
 
 class MagnetoquasistaticSolver : public PhysicsSolver {
+    enum class ImprintMode { Field, CouplingPerturbation };
 
     double frequency = 0.0;
     mfem::real_t omega = 0.0;
@@ -416,20 +417,22 @@ public:
         port_operator->SetOmega(omega);
     }
 
-    void ImprintScenario(const Scenario& sc) {
+    void ImprintScenario(const Scenario& sc, ImprintMode mode) {
         ActivateFrequency(sc);
         *A = 0.0;
 
         // Re-apply non-zero essential (closure) BC values on this mesh's A.
         // ess_tdof values are lifted into the RHS by FormLinearSystem at solve time,
         // so they must be set AFTER the *A = 0.0 reset, every scenario.
-        for (const auto& bc : config.BoundaryConditions) {
-            if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
-                const EntityGroup& group = config.EntityGroups.at(bc.EntityGroupName);
-                auto marker = MarkerFromAttrs(group.AttributeIds);
-                mfem::ConstantCoefficient c_re(bc.Value);
-				mfem::ConstantCoefficient c_im(0.0);
-                A->ProjectBdrCoefficient(c_re, c_im, marker);
+        if (mode == ImprintMode::Field) {
+            for (const auto& bc : config.BoundaryConditions) {
+                if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
+                    const EntityGroup& group = config.EntityGroups.at(bc.EntityGroupName);
+                    auto marker = MarkerFromAttrs(group.AttributeIds);
+                    mfem::ConstantCoefficient c_re(bc.Value);
+                    mfem::ConstantCoefficient c_im(0.0);
+                    A->ProjectBdrCoefficient(c_re, c_im, marker);
+                }
             }
         }
         // Axis stays at A=0 (already zero from the reset; no projection needed).
@@ -457,7 +460,10 @@ public:
         b_source.Assemble();
         const mfem::real_t* b_source_data = b_source.GetData();   // bypass LinearForm::operator()
         for (int d = 0; d < port_operator->Layout().NDofs(); ++d) {
-            b.ReMesh(d) += b_source_data[d] + neumann_rhs[d];
+            b.ReMesh(d) += b_source_data[d];
+            if (mode == ImprintMode::Field) {
+                b.ReMesh(d) += neumann_rhs[d];
+            }
         }
 
         // Drive the active port(s) via the imaginary port block Im_Port.
@@ -483,7 +489,7 @@ public:
         if (config.AnalysisType == AnalysisType::Field) {
             for (const auto& [name, scenario] : config.Scenarios) {
                 auto operation = Reporter().Start("scenario '" + name + "'");
-                ImprintScenario(scenario);
+                ImprintScenario(scenario, ImprintMode::Field);
                 SolveSystem();
                 AccumulateScenarioError();
                 SaveScenario(name);
@@ -499,7 +505,7 @@ public:
                 column.Excitations.push_back({ term_name, 1.0 });
                 auto operation = Reporter().Start(
                     "scenario '" + point_name + "', terminal '" + term_name + "'");
-                ImprintScenario(column);
+                ImprintScenario(column, ImprintMode::CouplingPerturbation);
                 SolveSystem();
                 AccumulateScenarioError();
                 GatherCouplingColumn(column);
@@ -823,6 +829,12 @@ public:
         };
     }
 
+    // Stranded-conductor source current density for a scenario. Current enters
+    // the model only through Terminals, so this is a pure function of
+    // sc.Excitations: a terminal with no matching excitation contributes
+    // nothing. In CouplingPerturbation mode the scenario carries a single unit
+    // excitation, so this IS the drive for that column rather than background
+    // data, and must not be suppressed the way closure data is.
     mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
         mfem::Vector j_src(mesh.attributes.Max());
         j_src = 0.0;

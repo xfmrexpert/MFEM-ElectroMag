@@ -914,6 +914,19 @@ CsvMatrix ReadCsvMatrix(const std::string& filename) {
     return matrix;
 }
 
+void RequireMatricesEqual(const CsvMatrix& actual, const CsvMatrix& expected,
+                          double tolerance = 1e-10) {
+    REQUIRE(actual.labels == expected.labels);
+    REQUIRE(actual.values.size() == expected.values.size());
+    for (std::size_t row = 0; row < actual.values.size(); ++row) {
+        REQUIRE(actual.values[row].size() == expected.values[row].size());
+        for (std::size_t column = 0; column < actual.values[row].size(); ++column) {
+            REQUIRE(actual.values[row][column] ==
+                Catch::Approx(expected.values[row][column]).epsilon(tolerance));
+        }
+    }
+}
+
 // Build a 2D axisymmetric "coaxial capacitor" triangle mesh spanning
 // r in [r_inner, r_outer], z in [0, height], and write it as an MFEM v1.0 mesh.
 // Boundary attributes are assigned by geometry (independent of MFEM's internal
@@ -981,6 +994,141 @@ void CreateCoaxMesh(const std::string& filename,
         m << v[0] << " " << v[1] << "\n";
     }
     m.close();
+}
+
+// Build a 2D axisymmetric shield-and-turns mesh: an aluminum shield band
+// nearest the axis, then two rectangular conductor turns further out in r,
+// each separated by air. All conductors are held off the symmetry axis so the
+// massive-port conductance integral sigma/(2*pi*r) stays finite.
+//
+// Radial layout (r increasing), with the domain attribute in parentheses:
+//   air (1) | shield (2) | air (1) | turn A (3) | air (1) | turn B (4) | air (1)
+//
+// Boundary attributes: 1 = inner (r=r_min), 2 = outer (r=r_max),
+// 3 = top/bottom (z=0 or z=height).
+void CreateShieldedTurnsMesh(const std::string& filename,
+                             double r_min, double r_max, double height,
+                             int nz = 4, int cells_per_band = 2) {
+    // Radial band edges as fractions of the span, one entry per band, each
+    // paired with the domain attribute carried by that band.
+    struct Band { int cells; int attribute; };
+    const std::vector<Band> bands{
+        { cells_per_band, 1 },  // air gap next to the axis side
+        { cells_per_band, 2 },  // aluminum shield
+        { cells_per_band, 1 },  // air between shield and turns
+        { cells_per_band, 3 },  // turn A
+        { cells_per_band, 1 },  // air between turns
+        { cells_per_band, 4 },  // turn B
+        { cells_per_band, 1 }   // air out to the far boundary
+    };
+
+    int nr = 0;
+    for (const Band& band : bands) nr += band.cells;
+    const int nvr = nr + 1;
+    const int nvz = nz + 1;
+    auto vid = [nvr](int i, int j) { return j * nvr + i; };
+
+    // Per-radial-cell attribute, expanded from the band table.
+    std::vector<int> cell_attribute;
+    cell_attribute.reserve(nr);
+    for (const Band& band : bands) {
+        for (int c = 0; c < band.cells; ++c) cell_attribute.push_back(band.attribute);
+    }
+
+    std::ofstream m(filename);
+    m << "MFEM mesh v1.0\n\n";
+    m << "dimension\n2\n\n";
+
+    m << "elements\n" << (2 * nr * nz) << "\n";
+    for (int j = 0; j < nz; ++j) {
+        for (int i = 0; i < nr; ++i) {
+            const int attribute = cell_attribute[i];
+            const int v00 = vid(i, j);
+            const int v10 = vid(i + 1, j);
+            const int v11 = vid(i + 1, j + 1);
+            const int v01 = vid(i, j + 1);
+            m << attribute << " 2 " << v00 << " " << v10 << " " << v11 << "\n";
+            m << attribute << " 2 " << v00 << " " << v11 << " " << v01 << "\n";
+        }
+    }
+    m << "\n";
+
+    std::vector<std::array<int, 3>> bdr; // {attr, va, vb}
+    for (int j = 0; j < nz; ++j) {
+        bdr.push_back({ 1, vid(0, j),  vid(0, j + 1) });
+        bdr.push_back({ 2, vid(nr, j), vid(nr, j + 1) });
+    }
+    for (int i = 0; i < nr; ++i) {
+        bdr.push_back({ 3, vid(i, 0),  vid(i + 1, 0) });
+        bdr.push_back({ 3, vid(i, nz), vid(i + 1, nz) });
+    }
+
+    m << "boundary\n" << bdr.size() << "\n";
+    for (const auto& b : bdr) {
+        m << b[0] << " 1 " << b[1] << " " << b[2] << "\n";
+    }
+    m << "\n";
+
+    m << "vertices\n" << (nvr * nvz) << "\n2\n";
+    for (int j = 0; j < nvz; ++j) {
+        const double z = height * static_cast<double>(j) / nz;
+        for (int i = 0; i < nvr; ++i) {
+            const double r = r_min + (r_max - r_min) * static_cast<double>(i) / nr;
+            m << r << " " << z << "\n";
+        }
+    }
+    m.close();
+}
+
+// Coupling-matrix config for the shield-and-turns mesh at a single frequency
+// point. Region index 1 is the shield, so callers switch its material or add a
+// current constraint to select between the shielding cases under test.
+json MakeShieldedTurnsConfig(const std::string& mesh_file, double frequency) {
+    return json{
+        {"simulation", {
+            {"physics_type", "magnetoquasistatics"},
+            {"mesh", mesh_file},
+            {"order", 1},
+            {"geometry_type", "axisymmetric"},
+            {"analysis_type", "coupling_matrix"},
+            {"solver_tolerance", 1e-12},
+            {"solver_max_iter", 4000},
+            {"solver_print_level", 0}
+        }},
+        {"entity_groups", json::array({
+            {{"name", "AirDomain"},    {"dim", 2}, {"attribute_ids", {1}}},
+            {{"name", "ShieldDomain"}, {"dim", 2}, {"attribute_ids", {2}}},
+            {{"name", "TurnADomain"},  {"dim", 2}, {"attribute_ids", {3}}},
+            {{"name", "TurnBDomain"},  {"dim", 2}, {"attribute_ids", {4}}},
+            {{"name", "Outer"},        {"dim", 1}, {"attribute_ids", {2}}}
+        })},
+        {"regions", json::array({
+            {{"name", "Air"},    {"entity_group", "AirDomain"},    {"material", "Air"}},
+            {{"name", "Shield"}, {"entity_group", "ShieldDomain"}, {"material", "Aluminum"}},
+            {{"name", "TurnA"},  {"entity_group", "TurnADomain"},  {"material", "Copper"}},
+            {{"name", "TurnB"},  {"entity_group", "TurnBDomain"},  {"material", "Copper"}}
+        })},
+        {"materials", json::array({
+            {{"name", "Air"},      {"properties", {{"mu_r", 1.0}, {"sigma", 0.0}}}},
+            {{"name", "Aluminum"}, {"properties", {{"mu_r", 1.0}, {"sigma", 3.5e7}}}},
+            {{"name", "Copper"},   {"properties", {{"mu_r", 1.0}, {"sigma", 5.8e7}}}}
+        })},
+        {"boundaries", json::array({
+            {{"name", "Outer"}, {"type", "Dirichlet"}, {"entity_group", "Outer"}, {"value", 0.0}}
+        })},
+        {"terminals", json::array({
+            {{"name", "TurnA"}, {"excitation_type", "current"},
+             {"conductor_type", "massive"}, {"entity_group", "TurnADomain"}},
+            {{"name", "TurnB"}, {"excitation_type", "current"},
+             {"conductor_type", "massive"}, {"entity_group", "TurnBDomain"}}
+        })},
+        {"scenarios", json::array({
+            {{"name", "point"},
+             {"frequency", {{"scale", "linear"}, {"start", frequency},
+                            {"stop", frequency}, {"points", 1}}},
+             {"excitations", json::array()}}
+        })}
+    };
 }
 
 // Common AMR-enabled coaxial-capacitor config (Field analysis, one energized
@@ -1301,6 +1449,43 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
     fs::remove(mesh_file);
 }
 
+TEST_CASE("Electrostatic coupling ignores fixed Neumann background",
+          "[solvers][electrostatic][coupling][m2]") {
+    const std::string mesh_file = "test_es_coupling_background.mesh";
+    const std::string matrix_file = "capacitance_matrix.csv";
+    CreatePlanarStripMesh(mesh_file, 0.2, 0.05, 4, 2);
+
+    json config = MakePlanarStripConfig(
+        "electrostatics", mesh_file, 1, {{"epsilon_r", 2.5}}, 0.0, 0.0);
+    config["simulation"]["analysis_type"] = "coupling_matrix";
+    config["boundaries"] = json::array();
+    config["terminals"] = json::array({
+        {{"name", "Left"}, {"excitation_type", "voltage"}, {"entity_group", "Left"}},
+        {{"name", "Right"}, {"excitation_type", "voltage"}, {"entity_group", "Right"}}
+    });
+
+    auto solve = [&]() {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        ElectrostaticSolver solver(mesh, DecodeConfig(config));
+        solver.Setup();
+        solver.Run();
+        solver.SaveAnalysis();
+        return ReadCsvMatrix(matrix_file);
+    };
+
+    const CsvMatrix baseline = solve();
+    config["entity_groups"].push_back(
+        {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
+    config["boundaries"].push_back(
+        {{"name", "BackgroundFlux"}, {"type", "Neumann"},
+         {"entity_group", "Horizontal"}, {"value", 3.0}});
+    const CsvMatrix with_background = solve();
+
+    RequireMatricesEqual(with_background, baseline);
+    fs::remove(matrix_file);
+    fs::remove(mesh_file);
+}
+
 // Guards the axisymmetric 2*pi normalization end to end: the stiffness
 // integrator omits the global 2*pi and GatherChargeColumn restores it exactly
 // once. Applying it twice (or zero times) shifts every entry by a factor of
@@ -1381,6 +1566,49 @@ TEST_CASE("Magnetostatic inductance matrix is reciprocal and distinguishes rows"
     REQUIRE(matrix.values[1][0] < matrix.values[0][0]);
     REQUIRE(matrix.values[0][1] < matrix.values[1][1]);
 
+    fs::remove(matrix_file);
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Magnetostatic coupling ignores fixed Neumann background",
+          "[solvers][magnetostatic][coupling][m2]") {
+    const std::string mesh_file = "test_ms_coupling_background.mesh";
+    const std::string matrix_file = "inductance_matrix.csv";
+    CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 4, 2, 2);
+
+    json config = MakePlanarStripConfig(
+        "magnetostatics", mesh_file, 1, {{"mu_r", 1.0}}, 0.0, 0.0);
+    config["simulation"]["analysis_type"] = "coupling_matrix";
+    config["entity_groups"].push_back(
+        {{"name", "CoilA"}, {"dim", 2}, {"attribute_ids", {1}}});
+    config["entity_groups"].push_back(
+        {{"name", "CoilB"}, {"dim", 2}, {"attribute_ids", {2}}});
+    config["regions"] = json::array({
+        {{"name", "CoilA"}, {"entity_group", "CoilA"}, {"material", "Material"}},
+        {{"name", "CoilB"}, {"entity_group", "CoilB"}, {"material", "Material"}}
+    });
+    config["terminals"] = json::array({
+        {{"name", "CoilA"}, {"excitation_type", "current"}, {"entity_group", "CoilA"}},
+        {{"name", "CoilB"}, {"excitation_type", "current"}, {"entity_group", "CoilB"}}
+    });
+
+    auto solve = [&]() {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetostaticSolver solver(mesh, DecodeConfig(config));
+        solver.Setup();
+        solver.Run();
+        return ReadCsvMatrix(matrix_file);
+    };
+
+    const CsvMatrix baseline = solve();
+    config["entity_groups"].push_back(
+        {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
+    config["boundaries"].push_back(
+        {{"name", "BackgroundFlux"}, {"type", "Neumann"},
+         {"entity_group", "Horizontal"}, {"value", 2.0}});
+    const CsvMatrix with_background = solve();
+
+    RequireMatricesEqual(with_background, baseline);
     fs::remove(matrix_file);
     fs::remove(mesh_file);
 }
@@ -1605,6 +1833,55 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     fs::remove(mesh_file);
 }
 
+TEST_CASE("MQS coupling ignores fixed Neumann background",
+          "[solvers][mqs][coupling][m2]") {
+    const std::string mesh_file = "test_mqs_coupling_background.mesh";
+    const std::string inductance_file = "inductance_matrix_point_1000Hz.csv";
+    const std::string resistance_file = "resistance_matrix_point_1000Hz.csv";
+    CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 2, 1, 1);
+
+    json config = MakePlanarStripConfig(
+        "magnetoquasistatics", mesh_file, 1,
+        {{"mu_r", 1.0}, {"sigma", 1.0e6}}, 0.0, 0.0);
+    config["simulation"]["analysis_type"] = "coupling_matrix";
+    config["scenarios"] = json::array({
+        {{"name", "point"}, {"frequency", 1000.0}, {"excitations", json::array()}}
+    });
+    config["entity_groups"].push_back(
+        {{"name", "DriveDomain"}, {"dim", 2}, {"attribute_ids", {1}}});
+    config["regions"] = json::array({
+        {{"name", "Domain"}, {"entity_group", "Domain"}, {"material", "Material"}}
+    });
+    config["terminals"] = json::array({
+        {{"name", "Drive"}, {"excitation_type", "current"},
+         {"conductor_type", "massive"}, {"entity_group", "DriveDomain"}}
+    });
+
+    auto solve = [&]() {
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+        solver.Setup();
+        solver.Run();
+        solver.SaveAnalysis();
+        return std::pair{
+            ReadCsvMatrix(inductance_file), ReadCsvMatrix(resistance_file)};
+    };
+
+    const auto baseline = solve();
+    config["entity_groups"].push_back(
+        {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
+    config["boundaries"].push_back(
+        {{"name", "BackgroundFlux"}, {"type", "Neumann"},
+         {"entity_group", "Horizontal"}, {"value", 2.0}});
+    const auto with_background = solve();
+
+    RequireMatricesEqual(with_background.first, baseline.first);
+    RequireMatricesEqual(with_background.second, baseline.second);
+    fs::remove(resistance_file);
+    fs::remove(inductance_file);
+    fs::remove(mesh_file);
+}
+
 TEST_CASE("MQS heterogeneous massive-port conductance is piecewise and order independent",
           "[solvers][mqs][coupling][conductance]") {
     const std::string mesh_file = "test_mqs_heterogeneous_port.mesh";
@@ -1746,6 +2023,191 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
     fs::remove(inductance_file);
     fs::remove(mesh_file);
 }
+
+// Axisymmetric companion to the planar open-current test: an aluminum shield
+// modeled as a passive open-current region, with two driven massive turns
+// outside it. Covers the axisymmetric massive-port path (G_dc = integral
+// sigma/(2*pi*r)) for a region that is not a terminal, which the planar test
+// cannot exercise.
+//
+// Mesh resolution note: the shield must be resolved against the skin depth
+// delta = sqrt(2/(omega*mu*sigma)). At 1 kHz in aluminum delta is about 2.7 mm,
+// and the radial cell size here is about 2.7 mm, so delta/cell is roughly 1.
+// Coarser meshes drive the extracted port resistance negative (unphysical
+// negative loss), so do not reduce cells_per_band without also lowering the
+// frequency.
+TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
+          "[solvers][mqs][coupling][regions][axisymmetric]") {
+    const std::string mesh_file = "test_mqs_axisym_shield.mesh";
+    const std::string inductance_file = "inductance_matrix_point_f1_1000Hz.csv";
+    const std::string resistance_file = "resistance_matrix_point_f1_1000Hz.csv";
+    CreateShieldedTurnsMesh(mesh_file, /*r_min=*/0.05, /*r_max=*/0.20,
+                            /*height=*/0.04, /*nz=*/8, /*cells_per_band=*/8);
+
+    json config = MakeShieldedTurnsConfig(mesh_file, 1000.0);
+
+    // Reference 1: no shield at all. The shield band is air, so nothing is
+    // induced there and the turns see their unshielded coupling.
+    json air_config = config;
+    air_config["regions"][1]["material"] = "Air";
+    mfem::Mesh air_mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver air_solver(air_mesh, DecodeConfig(air_config));
+    air_solver.Setup();
+    air_solver.Run();
+    air_solver.SaveAnalysis();
+    const CsvMatrix air_inductance = ReadCsvMatrix(inductance_file);
+
+    // Reference 2: a conducting shield with no current constraint. Without a
+    // port unknown there is no net-current equation, so the region behaves as a
+    // short-circuited closed loop and shields most strongly.
+    mfem::Mesh shorted_mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver shorted_solver(shorted_mesh, DecodeConfig(config));
+    shorted_solver.Setup();
+    shorted_solver.Run();
+    shorted_solver.SaveAnalysis();
+    const CsvMatrix shorted_inductance = ReadCsvMatrix(inductance_file);
+
+    // Case under test: the shield becomes an open-current region, gaining a
+    // port unknown whose net current is pinned to zero. This is the physical
+    // model for a shield that is not a closed turn.
+    config["regions"][1]["current_constraint"] = "open";
+    mfem::Mesh shielded_mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver shielded_solver(shielded_mesh, DecodeConfig(config));
+    shielded_solver.Setup();
+    shielded_solver.Run();
+    shielded_solver.SaveAnalysis();
+    const CsvMatrix shielded_inductance = ReadCsvMatrix(inductance_file);
+    const CsvMatrix shielded_resistance = ReadCsvMatrix(resistance_file);
+
+    // The shield is passive: it never becomes a matrix row/column, so the
+    // matrices stay 2x2 over the two driven turns.
+    const std::vector<std::string> expected_labels{"TurnA", "TurnB"};
+    REQUIRE(shielded_inductance.labels == expected_labels);
+    REQUIRE(shielded_resistance.labels == expected_labels);
+    REQUIRE(shielded_inductance.values.size() == 2);
+    REQUIRE(shielded_resistance.values.size() == 2);
+
+    // Reciprocity: mutual terms must match in both matrices.
+    REQUIRE(shielded_inductance.values[0][1] ==
+        Catch::Approx(shielded_inductance.values[1][0]).epsilon(1e-8));
+    REQUIRE(shielded_resistance.values[0][1] ==
+        Catch::Approx(shielded_resistance.values[1][0]).epsilon(1e-8));
+
+    // Self terms stay physical: positive inductance and positive loss.
+    for (int turn = 0; turn < 2; ++turn) {
+        REQUIRE(shielded_inductance.values[turn][turn] > 0.0);
+        REQUIRE(shielded_resistance.values[turn][turn] > 0.0);
+    }
+
+    // The shield is not inert: constraining net current to zero still permits
+    // eddy currents to circulate within the cross-section, so the turns must
+    // see different coupling than with no shield present.
+    double change_vs_air = 0.0;
+    for (int row = 0; row < 2; ++row) {
+        for (int column = 0; column < 2; ++column) {
+            change_vs_air += std::abs(shielded_inductance.values[row][column] -
+                                      air_inductance.values[row][column]);
+        }
+    }
+    REQUIRE(change_vs_air > 1e-14);
+
+    // Shielding strength is ordered by how much net current the shield may
+    // carry. A short-circuited closed loop develops a large opposing net
+    // current and shields strongly. Pinning the net current to zero removes
+    // that bulk opposition entirely, leaving only redistribution within the
+    // cross-section, so the turns behave nearly as if the shield were absent.
+    for (int turn = 0; turn < 2; ++turn) {
+        const double shorted = shorted_inductance.values[turn][turn];
+        const double open = shielded_inductance.values[turn][turn];
+        const double air = air_inductance.values[turn][turn];
+
+        // The closed loop shields substantially, by a margin well outside
+        // discretization noise. The exact factor depends on how far the turn
+        // sits from the shield, so only the direction is asserted.
+        REQUIRE(shorted < 0.8 * air);
+        // The zero-net-current shield does not: it stays within a few percent
+        // of the unshielded value, and clearly apart from the shorted case.
+        REQUIRE(std::abs(open - air) < 0.05 * air);
+        REQUIRE(shorted < 0.9 * open);
+    }
+
+    fs::remove(resistance_file);
+    fs::remove(inductance_file);
+    fs::remove(mesh_file);
+}
+
+// Cross-check on the shielding mechanism: a short-circuited closed shield
+// excludes flux more strongly as frequency rises, because the induced opposing
+// net current grows with the rate of change of flux. A zero-net-current (open)
+// shield has no such bulk mechanism available, so it stays near the unshielded
+// value at every frequency. Asserting the trend, rather than a single operating
+// point, is what separates the two constraints physically.
+TEST_CASE("MQS shielding strengthens with frequency only when current may close",
+          "[solvers][mqs][coupling][regions][axisymmetric]") {
+    const std::string mesh_file = "test_mqs_axisym_shield_sweep.mesh";
+    // The radial cell must stay below the aluminum skin depth at the top of the
+    // sweep (delta is about 0.85 mm at 10 kHz). At 32 cells per band the
+    // extracted port resistance is still negative; 64 resolves it.
+    CreateShieldedTurnsMesh(mesh_file, /*r_min=*/0.05, /*r_max=*/0.20,
+                            /*height=*/0.04, /*nz=*/8, /*cells_per_band=*/64);
+
+    // Self inductance of turn A with the shield present, divided by the same
+    // quantity with the shield replaced by air. Lower means more flux excluded.
+    auto shielding_ratio = [&](double frequency, bool closed) {
+        std::ostringstream tag;
+        tag << "point_f1_" << frequency << "Hz";
+        const std::string inductance_file = "inductance_matrix_" + tag.str() + ".csv";
+        const std::string resistance_file = "resistance_matrix_" + tag.str() + ".csv";
+
+        json config = MakeShieldedTurnsConfig(mesh_file, frequency);
+        if (!closed) config["regions"][1]["current_constraint"] = "open";
+
+        json air_config = MakeShieldedTurnsConfig(mesh_file, frequency);
+        air_config["regions"][1]["material"] = "Air";
+
+        mfem::Mesh air_mesh(mesh_file.c_str(), 1, 1);
+        MagnetoquasistaticSolver air_solver(air_mesh, DecodeConfig(air_config));
+        air_solver.Setup();
+        air_solver.Run();
+        air_solver.SaveAnalysis();
+        const CsvMatrix air = ReadCsvMatrix(inductance_file);
+
+        mfem::Mesh shield_mesh(mesh_file.c_str(), 1, 1);
+        MagnetoquasistaticSolver shield_solver(shield_mesh, DecodeConfig(config));
+        shield_solver.Setup();
+        shield_solver.Run();
+        shield_solver.SaveAnalysis();
+        const CsvMatrix shielded = ReadCsvMatrix(inductance_file);
+        const CsvMatrix resistance = ReadCsvMatrix(resistance_file);
+
+        // Guard the discretization: negative extracted loss means the shield is
+        // under-resolved against the skin depth and the ratio is meaningless.
+        for (int turn = 0; turn < 2; ++turn) {
+            REQUIRE(resistance.values[turn][turn] > 0.0);
+        }
+
+        fs::remove(inductance_file);
+        fs::remove(resistance_file);
+        return shielded.values[0][0] / air.values[0][0];
+    };
+
+    // A closed (short-circuited) shield excludes more flux as frequency rises.
+    const double closed_low = shielding_ratio(100.0, /*closed=*/true);
+    const double closed_high = shielding_ratio(10000.0, /*closed=*/true);
+    REQUIRE(closed_low < 1.0);
+    REQUIRE(closed_high < closed_low);
+
+    // An open shield cannot carry net current, so no such trend develops: it
+    // stays near the unshielded value at both ends of the sweep.
+    const double open_low = shielding_ratio(100.0, /*closed=*/false);
+    const double open_high = shielding_ratio(10000.0, /*closed=*/false);
+    REQUIRE(std::abs(open_low - 1.0) < 0.05);
+    REQUIRE(std::abs(open_high - 1.0) < 0.05);
+    REQUIRE(closed_high < 0.5 * open_high);
+
+    fs::remove(mesh_file);
+}
+
 
 TEST_CASE("AMR refines an axisymmetric coax and stays conforming", "[solvers][amr]") {
     const std::string mesh_file = "test_amr_coax.mesh";
