@@ -412,6 +412,23 @@ public:
     const std::vector<amr::AmrIterationInfo>& AmrHistory() const {
         return GetAmrHistory();
     }
+
+    mfem::Vector LocalErrors() {
+        mfem::Vector errors;
+        EstimateCurrentSolutionError(errors);
+        return errors;
+    }
+};
+
+class MagnetostaticAmrProbe : public MagnetostaticSolver {
+public:
+    using MagnetostaticSolver::MagnetostaticSolver;
+
+    mfem::Vector LocalErrors() {
+        mfem::Vector errors;
+        EstimateCurrentSolutionError(errors);
+        return errors;
+    }
 };
 
 TEST_CASE("ElectrostaticSolver can be constructed", "[solvers]") {
@@ -907,7 +924,7 @@ CsvMatrix ReadCsvMatrix(const std::string& filename) {
 // resolve.
 void CreateCoaxMesh(const std::string& filename,
                     double r_inner, double r_outer, double height,
-                    int nr, int nz) {
+                    int nr, int nz, int interface_column = 0) {
     const int nvr = nr + 1;
     const int nvz = nz + 1;
     auto vid = [nvr](int i, int j) { return j * nvr + i; }; // i along r, j along z
@@ -926,16 +943,18 @@ void CreateCoaxMesh(const std::string& filename,
     m << "MFEM mesh v1.0\n\n";
     m << "dimension\n2\n\n";
 
-    // Two triangles per cell, all domain attribute 1.
+    // Two triangles per cell. With a positive interface column, radial cells to
+    // its right use domain attribute 2; otherwise the whole domain is attribute 1.
     m << "elements\n" << (2 * nr * nz) << "\n";
     for (int j = 0; j < nz; ++j) {
         for (int i = 0; i < nr; ++i) {
+            const int attribute = interface_column > 0 && i >= interface_column ? 2 : 1;
             const int v00 = vid(i, j);
             const int v10 = vid(i + 1, j);
             const int v11 = vid(i + 1, j + 1);
             const int v01 = vid(i, j + 1);
-            m << "1 2 " << v00 << " " << v10 << " " << v11 << "\n";
-            m << "1 2 " << v00 << " " << v11 << " " << v01 << "\n";
+            m << attribute << " 2 " << v00 << " " << v10 << " " << v11 << "\n";
+            m << attribute << " 2 " << v00 << " " << v11 << " " << v01 << "\n";
         }
     }
     m << "\n";
@@ -1004,6 +1023,51 @@ json MakeCoaxAmrConfig(const std::string& mesh_file, int max_iterations) {
             })}}
         })}
     };
+}
+
+mfem::Vector AxisymmetricDiffusionErrors(
+    mfem::Mesh& mesh, mfem::GridFunction& solution,
+    mfem::Coefficient& coefficient, bool with_coefficient) {
+    mfem::H1_FECollection flux_fec(1, mesh.Dimension());
+    mfem::FiniteElementSpace flux_fes(
+        &mesh, &flux_fec, mesh.SpaceDimension());
+    AxisymmetricDiffusionIntegrator integrator(coefficient);
+    mfem::ZienkiewiczZhuEstimator estimator(
+        integrator, solution, flux_fes);
+    estimator.SetWithCoeff(with_coefficient);
+    estimator.SetFluxAveraging(1);
+    return estimator.GetLocalErrors();
+}
+
+mfem::Vector AxisymmetricCurlCurlErrors(
+    mfem::Mesh& mesh, mfem::GridFunction& solution,
+    mfem::Coefficient& coefficient, bool with_coefficient) {
+    mfem::H1_FECollection flux_fec(1, mesh.Dimension());
+    mfem::FiniteElementSpace flux_fes(
+        &mesh, &flux_fec, mesh.SpaceDimension());
+    AxisymmetricCurlCurlIntegrator integrator(coefficient);
+    mfem::ZienkiewiczZhuEstimator estimator(
+        integrator, solution, flux_fes);
+    estimator.SetWithCoeff(with_coefficient);
+    estimator.SetFluxAveraging(1);
+    return estimator.GetLocalErrors();
+}
+
+void RequireErrorsEqual(const mfem::Vector& actual,
+                        const mfem::Vector& expected) {
+    REQUIRE(actual.Size() == expected.Size());
+    for (int i = 0; i < actual.Size(); ++i) {
+        REQUIRE(actual(i) == Catch::Approx(expected(i)).epsilon(1e-12));
+    }
+}
+
+bool ErrorsDiffer(const mfem::Vector& first, const mfem::Vector& second) {
+    if (first.Size() != second.Size()) return true;
+    for (int i = 0; i < first.Size(); ++i) {
+        const double scale = std::max(std::abs(first(i)), std::abs(second(i)));
+        if (std::abs(first(i) - second(i)) > 1e-8 * scale) return true;
+    }
+    return false;
 }
 
 // Extract the raw text of a named MSH section, e.g. "$Nodes" ... "$EndNodes".
@@ -1725,6 +1789,110 @@ TEST_CASE("AMR refines an axisymmetric coax and stays conforming", "[solvers][am
     REQUIRE(std::isfinite(last_peak));
     REQUIRE(last_peak > 0.5 * analytic_peak);
     REQUIRE(last_peak < 1.2 * analytic_peak);
+
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Axisymmetric electrostatic AMR applies permittivity once",
+          "[solvers][amr][materials][m1]") {
+    const std::string mesh_file = "test_amr_axisymmetric_es_materials.mesh";
+    CreateCoaxMesh(mesh_file, 1.0, 4.0, 1.0, 6, 2, 3);
+
+    json config = MakeCoaxAmrConfig(mesh_file, 1);
+    config["simulation"]["amr"]["enabled"] = false;
+    config["entity_groups"].push_back(
+        {{"name", "OuterDielectric"}, {"dim", 2}, {"attribute_ids", {2}}});
+    config["materials"].push_back(
+        {{"name", "HighPermittivity"}, {"properties", {{"epsilon_r", 100.0}}}});
+    config["regions"].push_back(
+        {{"name", "OuterDielectric"}, {"entity_group", "OuterDielectric"},
+         {"material", "HighPermittivity"}});
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    ElectrostaticAmrProbe solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    const mfem::Vector actual = solver.LocalErrors();
+    FieldExportSet fields = solver.CollectExportFields();
+    mfem::GridFunction& potential = *FindField(fields, "V").primary;
+    mfem::Vector epsilon_values(2);
+    epsilon_values(0) = Constants::EPSILON_0;
+    epsilon_values(1) = 100.0 * Constants::EPSILON_0;
+    mfem::PWConstCoefficient epsilon(epsilon_values);
+    const mfem::Vector intended =
+        AxisymmetricDiffusionErrors(mesh, potential, epsilon, false);
+    const mfem::Vector coefficient_cubed =
+        AxisymmetricDiffusionErrors(mesh, potential, epsilon, true);
+
+    RequireErrorsEqual(actual, intended);
+    REQUIRE(ErrorsDiffer(actual, coefficient_cubed));
+
+    mfem::Array<int> actual_marked;
+    mfem::Array<int> intended_marked;
+    amr::MarkElementsDorfler(actual, 0.7, actual_marked);
+    amr::MarkElementsDorfler(intended, 0.7, intended_marked);
+    REQUIRE(actual_marked == intended_marked);
+
+    fs::remove(mesh_file);
+}
+
+TEST_CASE("Axisymmetric magnetostatic AMR applies reluctivity once",
+          "[solvers][amr][materials][m1]") {
+    const std::string mesh_file = "test_amr_axisymmetric_ms_materials.mesh";
+    CreateCoaxMesh(mesh_file, 1.0, 4.0, 1.0, 6, 2, 3);
+
+    json config = MakeCoaxAmrConfig(mesh_file, 1);
+    config["simulation"]["physics_type"] = "magnetostatics";
+    config["simulation"]["amr"]["enabled"] = false;
+    config["entity_groups"].push_back(
+        {{"name", "OuterMagnetic"}, {"dim", 2}, {"attribute_ids", {2}}});
+    config["materials"] = json::array({
+        {{"name", "LowPermeability"}, {"properties", {{"mu_r", 1.0}}}},
+        {{"name", "HighPermeability"}, {"properties", {{"mu_r", 100.0}}}}
+    });
+    config["regions"] = json::array({
+        {{"name", "InnerMagnetic"}, {"entity_group", "Dielectric"},
+         {"material", "LowPermeability"}},
+        {{"name", "OuterMagnetic"}, {"entity_group", "OuterMagnetic"},
+         {"material", "HighPermeability"}}
+    });
+    config.erase("terminals");
+    config["boundaries"] = json::array({
+        {{"name", "Inner"}, {"type", "Dirichlet"},
+         {"entity_group", "Inner"}, {"value", 1.0}},
+        {{"name", "Outer"}, {"type", "Dirichlet"},
+         {"entity_group", "Outer"}, {"value", 0.0}}
+    });
+    config["scenarios"] = json::array({
+        {{"name", "energized"}, {"excitations", json::array()}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetostaticAmrProbe solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    const mfem::Vector actual = solver.LocalErrors();
+    FieldExportSet fields = solver.CollectExportFields();
+    mfem::GridFunction& potential = *FindField(fields, "A").primary;
+    mfem::Vector reluctivity_values(2);
+    reluctivity_values(0) = 1.0 / Constants::MU_0;
+    reluctivity_values(1) = 1.0 / (100.0 * Constants::MU_0);
+    mfem::PWConstCoefficient reluctivity(reluctivity_values);
+    const mfem::Vector intended =
+        AxisymmetricCurlCurlErrors(mesh, potential, reluctivity, false);
+    const mfem::Vector coefficient_cubed =
+        AxisymmetricCurlCurlErrors(mesh, potential, reluctivity, true);
+
+    RequireErrorsEqual(actual, intended);
+    REQUIRE(ErrorsDiffer(actual, coefficient_cubed));
+
+    mfem::Array<int> actual_marked;
+    mfem::Array<int> intended_marked;
+    amr::MarkElementsDorfler(actual, 0.7, actual_marked);
+    amr::MarkElementsDorfler(intended, 0.7, intended_marked);
+    REQUIRE(actual_marked == intended_marked);
 
     fs::remove(mesh_file);
 }

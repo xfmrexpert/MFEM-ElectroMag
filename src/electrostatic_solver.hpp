@@ -170,8 +170,8 @@ public:
 	// MPI-only). A dedicated integrator instance (separate from a's) and an H1
 	// vector flux space are constructed here per call; SetFluxAveraging(1) keeps
 	// the recovered flux from smoothing across material-attribute interfaces so
-	// per-region permittivity discontinuities are respected. SetWithCoeff(true)
-	// makes the flux eps*grad(V), consistent with the integrator's energy norm.
+	// per-region permittivity discontinuities are respected. The recovered field
+	// is grad(V); ComputeFluxEnergy applies eps once to form the physical norm.
 	//
 	// @param errors  Output: per-element error indicator (sized to NE).
 	void EstimateCurrentSolutionError(mfem::Vector& errors) override {
@@ -179,7 +179,7 @@ public:
 		std::unique_ptr<mfem::BilinearFormIntegrator> flux_integ(MakeStiffnessIntegrator());
 		mfem::FiniteElementSpace flux_fes(&mesh, fec.get(), sdim);
 		mfem::ZienkiewiczZhuEstimator estimator(*flux_integ, *x, flux_fes);
-		estimator.SetWithCoeff(true);     // flux = eps * grad(V)
+		estimator.SetWithCoeff(false);    // field = grad(V); energy applies eps
 		estimator.SetFluxAveraging(1);    // do not average across attribute interfaces
 		errors = estimator.GetLocalErrors();
 	}
