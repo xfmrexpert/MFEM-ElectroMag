@@ -22,6 +22,14 @@ enum class AnalysisType { Field, CouplingMatrix };
 // The across/through quantity a terminal imposes. Room to grow: Charge, Flux.
 enum class Quantity { Voltage, Current };
 
+// How the assembled linear system is solved.
+//   Iterative - preconditioned Krylov (PCG/GMRES). Lowest memory; cost scales
+//               with the preconditioner's convergence rate.
+//   Direct    - sparse factorization. Costs more memory, but a CouplingMatrix
+//               run amortizes one factorization over every terminal's RHS and
+//               its accuracy does not depend on a residual tolerance.
+enum class LinearSolverType { Iterative, Direct };
+
 enum class EntityDim { Boundary, Domain };
 
 enum class ConductorType { Massive, Stranded };
@@ -108,6 +116,7 @@ struct ProblemConfig {
 	double SolverTolerance  = Constants::DEFAULT_SOLVER_TOLERANCE;
 	int    SolverMaxIter    = Constants::DEFAULT_SOLVER_MAX_ITER;
 	int    SolverPrintLevel = Constants::DEFAULT_SOLVER_PRINT_LEVEL;
+	::LinearSolverType LinearSolver = ::LinearSolverType::Direct;
 
 	std::string MeshPath;
 	bool OutputParaview = false;

@@ -40,6 +40,10 @@ protected:
 
     std::vector<amr::AmrIterationInfo> amr_history;
 
+    // Non-null only while an AMR pass is in flight: the element-wise maximum of
+    // the per-scenario error indicators accumulated by the current scenario loop.
+    mfem::Vector* amr_errors = nullptr;
+
     StatusReporter& Reporter() const {
         return StatusReporter::Global();
     }
@@ -254,52 +258,30 @@ protected:
     // AMR is disabled. Consumed by the regression tests and useful for logging.
     const std::vector<amr::AmrIterationInfo>& GetAmrHistory() const { return amr_history; }
 
-    // Fold the current solution's local error over every solve scenario using an
-    // element-wise maximum, then return its global L2 norm. Concrete solvers own
-    // the physics-specific solve and estimator; the shared scenario policy lives
-    // here alongside BuildSolveScenarios().
-    template <typename SolveScenario, typename EstimateCurrentSolution>
-    double EstimateScenarioMaximumError(
-        mfem::Vector& combined,
-        SolveScenario&& solve_scenario,
-        EstimateCurrentSolution&& estimate_current_solution) {
-        return EstimateScenarioMaximumErrorOver(
-            BuildSolveScenarios(), combined,
-            std::forward<SolveScenario>(solve_scenario),
-            std::forward<EstimateCurrentSolution>(estimate_current_solution));
-    }
+    // Fold the just-solved scenario's local error into the AMR indicator using an
+    // element-wise maximum, so one shared mesh is refined for all scenarios.
+    // Solvers call this from RunOnCurrentMesh() right after each solve; outside an
+    // AMR pass it is a no-op, which is what lets a single scenario loop serve both
+    // the production solve and the error estimate (no duplicate solves).
+    void AccumulateScenarioError() {
+        if (!amr_errors) return;
 
-    template <typename SolveScenario, typename EstimateCurrentSolution>
-    double EstimateScenarioMaximumErrorOver(
-        const std::vector<std::pair<std::string, Scenario>>& scenarios,
-        mfem::Vector& combined,
-        SolveScenario&& solve_scenario,
-        EstimateCurrentSolution&& estimate_current_solution) {
         const int ne = mesh.GetNE();
-        combined.SetSize(ne);
-        combined = 0.0;
-
         mfem::Vector current;
-        for (const auto& [name, scenario] : scenarios) {
-            solve_scenario(scenario);
-            estimate_current_solution(current);
-            MFEM_VERIFY(current.Size() == ne,
-                "AMR estimator returned the wrong number of element errors.");
-            for (int element = 0; element < ne; ++element) {
-                combined(element) = std::max(combined(element), current(element));
-            }
-        }
-
-        double sum_squared = 0.0;
+        EstimateCurrentSolutionError(current);
+        MFEM_VERIFY(current.Size() == ne,
+            "AMR estimator returned the wrong number of element errors.");
         for (int element = 0; element < ne; ++element) {
-            sum_squared += combined(element) * combined(element);
+            (*amr_errors)(element) = std::max((*amr_errors)(element), current(element));
         }
-        return std::sqrt(sum_squared);
     }
 
     virtual void BuildOperators() = 0;
     virtual void RunOnCurrentMesh() = 0;
-    virtual double EstimateCombinedError(mfem::Vector& errors) = 0;
+
+    // Per-element error indicator for whichever solution currently lives in the
+    // solver's grid function. The scenario-wide fold lives in the base class.
+    virtual void EstimateCurrentSolutionError(mfem::Vector& errors) = 0;
     virtual double ComputePeakFieldMagnitude() const = 0;
 
 private:
@@ -315,8 +297,22 @@ private:
         for (int iteration = 0; iteration < max_iterations; ++iteration) {
             const long true_dofs = fespace->GetTrueVSize();
 
-            mfem::Vector errors;
-            const double global_error = EstimateCombinedError(errors);
+            // ONE scenario loop per AMR iteration: RunOnCurrentMesh() solves and
+            // post-processes every scenario, and folds each solution's error
+            // indicator into `errors` as it goes. The last iteration's results are
+            // therefore already the converged-mesh results, so no extra solve pass
+            // is needed after the loop.
+            mfem::Vector errors(mesh.GetNE());
+            errors = 0.0;
+            amr_errors = &errors;
+            RunOnCurrentMesh();
+            amr_errors = nullptr;
+
+            double sum_squared = 0.0;
+            for (int element = 0; element < errors.Size(); ++element) {
+                sum_squared += errors(element) * errors(element);
+            }
+            const double global_error = std::sqrt(sum_squared);
             const double peak_field = ComputePeakFieldMagnitude();
             amr_history.push_back({ true_dofs, global_error, peak_field });
 
@@ -353,8 +349,6 @@ private:
             amr::RefineConforming(mesh, marked);
             BuildOperators();
         }
-
-        RunOnCurrentMesh();
     }
 
 private:

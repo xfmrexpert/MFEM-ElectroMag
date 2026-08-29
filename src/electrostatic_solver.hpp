@@ -13,6 +13,7 @@
 #include "boundary_validation.hpp"
 #include "gmsh_results_writer.hpp"
 #include "amr_support.hpp"
+#include "sparse_direct_solver.hpp"
 
 class ElectrostaticSolver : public PhysicsSolver {
 	// Primary Spaces
@@ -33,6 +34,10 @@ class ElectrostaticSolver : public PhysicsSolver {
 	// so it is assembled once per mesh in BuildOperators() and reused for all
 	// scenarios / coupling columns. AMR refinement rebuilds it via BuildOperators().
 	mfem::OperatorPtr A_op;
+
+	// Factorization of A_op, built once per mesh when the direct solver is
+	// selected and reused for every scenario's RHS. Null when solving iteratively.
+	std::unique_ptr<SparseDirectSolver> direct_solver;
 
 	std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
 
@@ -118,6 +123,23 @@ public:
 		// (mat_e, used to build each scenario's RHS) is bound to A_op, which is
 		// reused for every scenario's solve on this mesh.
 		a->FormSystemMatrix(ess_tdof_list, A_op);
+
+		// Factor here rather than in SolveSystem() so the (dominant) factorization
+		// cost is paid once per mesh instead of once per scenario. AMR rebuilds it
+		// implicitly by re-running BuildOperators() after each refinement.
+		direct_solver.reset();
+		if (config.LinearSolver == LinearSolverType::Direct) {
+			auto operation = Reporter().Start("sparse direct factorization");
+			direct_solver = std::make_unique<SparseDirectSolver>(SystemMatrix());
+		}
+	}
+
+	// The constrained system matrix behind A_op. FormSystemMatrix always yields a
+	// SparseMatrix for this serial build.
+	mfem::SparseMatrix& SystemMatrix() const {
+		auto* sp = dynamic_cast<mfem::SparseMatrix*>(A_op.Ptr());
+		MFEM_VERIFY(sp, "Expected a SparseMatrix operator from FormSystemMatrix.");
+		return *sp;
 	}
 
 	// Create the domain diffusion integrator matching the active geometry. Used
@@ -146,25 +168,15 @@ public:
 	// per-region permittivity discontinuities are respected. SetWithCoeff(true)
 	// makes the flux eps*grad(V), consistent with the integrator's energy norm.
 	//
-	// @param combined  Output: per-element max error indicator (sized to NE).
-	// @return Global error sqrt(sum_k combined_k^2).
-	double EstimateCombinedError(mfem::Vector& combined) override {
+	// @param errors  Output: per-element error indicator (sized to NE).
+	void EstimateCurrentSolutionError(mfem::Vector& errors) override {
 		const int sdim = mesh.SpaceDimension();
 		std::unique_ptr<mfem::BilinearFormIntegrator> flux_integ(MakeStiffnessIntegrator());
 		mfem::FiniteElementSpace flux_fes(&mesh, fec.get(), sdim);
 		mfem::ZienkiewiczZhuEstimator estimator(*flux_integ, *x, flux_fes);
 		estimator.SetWithCoeff(true);     // flux = eps * grad(V)
 		estimator.SetFluxAveraging(1);    // do not average across attribute interfaces
-
-		return EstimateScenarioMaximumError(combined,
-			[this](const Scenario& scenario) {
-				ImprintScenario(scenario);
-				SolveSystem();
-			},
-			[&estimator](mfem::Vector& current) {
-				estimator.Reset();
-				current = estimator.GetLocalErrors();
-			});
+		errors = estimator.GetLocalErrors();
 	}
 
 	// Peak field magnitude |E| = |grad(V)| over the current solution *x, sampled
@@ -240,6 +252,7 @@ public:
 			auto operation = Reporter().Start("scenario '" + name + "'");
 			ImprintScenario(sc);
 			SolveSystem();
+			AccumulateScenarioError();
 			if (coupling) { GatherChargeColumn(col++); }
 			else          { SaveScenario(name); }
 		}
@@ -256,11 +269,15 @@ public:
 		// rebuild on the new mesh.
 		mfem::Vector B, X;
 		a->FormLinearSystem(ess_tdof_list, *x, *b, A_op, X, B);
-		auto* sp = dynamic_cast<mfem::SparseMatrix*>(A_op.Ptr());
-		MFEM_ASSERT(sp, "Expected SparseMatrix operator from FormLinearSystem.");
-		mfem::GSSmoother M(*sp);
-		mfem::PCG(*A_op, M, B, X, Reporter().SolverPrintLevel(config.SolverPrintLevel),
-			config.SolverMaxIter, config.SolverTolerance, 0.0);
+		if (direct_solver) {
+			// Back-substitution only: the factorization was done in BuildOperators().
+			direct_solver->Mult(B, X);
+		}
+		else {
+			mfem::GSSmoother M(SystemMatrix());
+			mfem::PCG(*A_op, M, B, X, Reporter().SolverPrintLevel(config.SolverPrintLevel),
+				config.SolverMaxIter, config.SolverTolerance, 0.0);
+		}
 		a->RecoverFEMSolution(X, *b, *x);
 	}
 

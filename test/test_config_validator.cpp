@@ -228,6 +228,44 @@ TEST_CASE("ConfigValidator validates open-current MQS regions",
 	}
 }
 
+TEST_CASE("ConfigValidator requires every meshed domain attribute to have a region",
+		  "[config_validator][regions]") {
+	// Two domain attributes in the mesh; the base config's single region covers
+	// only attribute 1. An uncovered attribute gets no material, contributing zero
+	// stiffness and making the assembled system singular, so it must be an error.
+	mfem::Mesh mesh = mfem::Mesh::MakeCartesian2D(
+		2, 1, mfem::Element::QUADRILATERAL, true, 2.0, 1.0);
+	mesh.SetAttribute(0, 1);
+	mesh.SetAttribute(1, 2);
+	mesh.SetAttributes();
+
+	SECTION("rejects a domain attribute no region claims") {
+		json config = ValidConfig();
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config, &mesh));
+		REQUIRE(HasError(validator, "regions"));
+	}
+
+	SECTION("accepts full coverage") {
+		json config = ValidConfig();
+		config["entity_groups"].push_back(
+			{{"name", "Domain2"}, {"dim", 2}, {"attribute_ids", {2}}});
+		config["regions"].push_back(
+			{{"entity_group", "Domain2"}, {"material", "Dielectric"}});
+
+		ConfigValidator validator;
+		REQUIRE(validator.Validate(config, &mesh));
+	}
+
+	SECTION("is skipped without a mesh") {
+		json config = ValidConfig();
+
+		ConfigValidator validator;
+		REQUIRE(validator.Validate(config));
+	}
+}
+
 TEST_CASE("ConfigValidator validates material names",
 		  "[config_validator][materials]") {
 	SECTION("requires a name") {

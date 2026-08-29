@@ -24,6 +24,7 @@
 #include "axisymmetric_conductance_coefficient.hpp"
 #include "gmsh_results_writer.hpp"
 #include "amr_support.hpp"
+#include "sparse_direct_solver.hpp"
 
 class MagnetoquasistaticSolver : public PhysicsSolver {
 
@@ -36,9 +37,16 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
 	std::unique_ptr<mfem::ComplexGridFunction> A; // Complex field solution
 	std::unique_ptr<mfem::Vector> Re_port_values; // Real part of port voltages
 	std::unique_ptr<mfem::Vector> Im_port_values; // Imag part of port voltages
-    std::unique_ptr<MqsMassivePortOperator> port_operator;
+	std::unique_ptr<MqsMassivePortOperator> port_operator;
 	std::unique_ptr<mfem::Vector> x_combined;
 	std::unique_ptr<mfem::Vector> b_combined;
+
+	// Direct-solve state for the packed real system. Both are rebuilt whenever
+	// the mesh or the active frequency changes; factored_omega records which
+	// frequency the current factors belong to.
+	std::unique_ptr<mfem::SparseMatrix> packed_matrix;
+	std::unique_ptr<SparseLUSolver> direct_solver;
+	mfem::real_t factored_omega = 0.0;
 
     // Coefficients
     std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;
@@ -91,14 +99,16 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
         mfem::Array<int> port_marker =
             DomainMarkerFromAttrs(port_attributes, "massive port '" + port_name + "'");
 
-        // Constant coefficient restricted to this port (axisymmetric and planar
-        // alike); referenced only while we assemble below.
+        // Constant coefficient restricted to this port by the attribute marker
+        // passed to AddDomainIntegrator below; referenced only while we assemble.
         mfem::ConstantCoefficient coeff(sigma);
-        mfem::RestrictedCoefficient restricted_coeff(coeff, port_marker);
 
-        // Assemble the LinearForm using a scalar domain integrator
+        // Assemble the LinearForm using a scalar domain integrator. The attribute
+        // marker restricts assembly to this port's elements, so the cost is
+        // proportional to the port rather than to the whole mesh; with one port per
+        // turn, assembling over every element would be quadratic overall.
         mfem::LinearForm port_lf(fespace);
-        port_lf.AddDomainIntegrator(new mfem::DomainLFIntegrator(restricted_coeff));
+        port_lf.AddDomainIntegrator(new mfem::DomainLFIntegrator(coeff), port_marker);
         port_lf.Assemble();
 
         // Extract and return as a standalone Vector
@@ -130,14 +140,13 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
         return min_r;
     }
 
-    // Function to compute G_dc for a specific port
-    double ComputePortConductance(const std::vector<int>& port_attributes, double sigma,
+    // Function to compute G_dc for a specific port. The L2(order 0) space is
+    // supplied by the caller because it depends only on the mesh: building it here
+    // would repeat an O(mesh) construction for every port.
+    double ComputePortConductance(mfem::FiniteElementSpace& l2_fes,
+                                  const std::vector<int>& port_attributes, double sigma,
                                   const std::string& port_name)
     {
-        // Setup an L2 space of order 0 for pure volumetric integration
-        mfem::L2_FECollection l2_fec(0, mesh.Dimension());
-        mfem::FiniteElementSpace l2_fes(&mesh, &l2_fec);
-
         // Create the restriction array for the port attributes
         mfem::Array<int> port_marker =
             DomainMarkerFromAttrs(port_attributes, "massive port '" + port_name + "'");
@@ -156,9 +165,10 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
 
         mfem::RestrictedCoefficient restricted_coeff(*base_coeff, port_marker);
 
-        // Assemble the LinearForm to perform the spatial integration
+        // Assemble the LinearForm to perform the spatial integration, restricted
+        // to this port's elements by the attribute marker.
         mfem::LinearForm g_form(&l2_fes);
-        g_form.AddDomainIntegrator(new mfem::DomainLFIntegrator(restricted_coeff));
+        g_form.AddDomainIntegrator(new mfem::DomainLFIntegrator(restricted_coeff), port_marker);
         g_form.Assemble();
 
         // The total integral is the sum of the piecewise constant values
@@ -262,18 +272,24 @@ public:
             closure_bcs, /*terminals=*/{}, false);  // Strict mode - reject conflicts
     }
 
-    void BuildOperators() override {
+	void BuildOperators() override {
 		// Build the FE space and everything bound to it for the starting mesh.
 		fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
-        neumann_rhs = AssembleNeumannBoundaryLoad();
+		Reporter().Status("Mesh has " + std::to_string(mesh.GetNE()) +
+			" elements; field space has " + std::to_string(fespace->GetTrueVSize()) +
+			" true DOFs.");
+		neumann_rhs = AssembleNeumannBoundaryLoad();
 
-        // Setup Complex Billinear Form
-        S_AA = std::make_unique<mfem::SesquilinearForm>(fespace.get(), mfem::ComplexOperator::HERMITIAN);
-        S_AA->AddDomainIntegrator(MakeStiffnessIntegrator(), nullptr);
-        S_AA->AddDomainIntegrator(nullptr, MakeMassIntegrator());
+		{
+			auto operation = Reporter().Start("complex bilinear form assembly");
+			// Setup Complex Billinear Form
+			S_AA = std::make_unique<mfem::SesquilinearForm>(fespace.get(), mfem::ComplexOperator::HERMITIAN);
+			S_AA->AddDomainIntegrator(MakeStiffnessIntegrator(), nullptr);
+			S_AA->AddDomainIntegrator(nullptr, MakeMassIntegrator());
 
-        S_AA->Assemble();
-        S_AA->Finalize();
+			S_AA->Assemble();
+			S_AA->Finalize();
+		}
 
         mfem::BilinearForm& K = S_AA->real();
         mfem::BilinearForm& M_sigma = S_AA->imag();
@@ -302,7 +318,22 @@ public:
         port_loads.reserve(massive_ports.size());
         port_conductances.clear();
         port_conductances.reserve(massive_ports.size());
+        {
+        auto operation = Reporter().Start(
+            "massive port assembly (" + std::to_string(massive_ports.size()) + " ports)");
+        // One L2(order 0) space shared by every port's conductance integral. It
+        // depends only on the mesh, so building it per port made this loop cost
+        // mesh_size * port_count instead of mesh_size + port_count.
+        mfem::L2_FECollection l2_fec(0, mesh.Dimension());
+        mfem::FiniteElementSpace l2_fes(&mesh, &l2_fec);
+        size_t port_index = 0;
         for (const MassivePortDefinition& port : massive_ports) {
+            // Winding models declare one port per turn, so report periodically
+            // rather than once per port.
+            if (++port_index % 25 == 0) {
+                Reporter().Status("  assembled " + std::to_string(port_index) + " of " +
+                    std::to_string(massive_ports.size()) + " massive ports");
+            }
             if (geometry == GeometryType::Axisymmetric) {
                 // G_dc = integral sigma/(2*pi*r) diverges for a toroidal massive
                 // conductor whose cross-section reaches the symmetry axis.
@@ -320,11 +351,12 @@ public:
             port_loads.push_back(
                 BuildPortVector(fespace.get(), port.AttributeIds, port.Conductivity,
                                 port.Name));
-            double G_dc = ComputePortConductance(port.AttributeIds, port.Conductivity,
-                                                 port.Name);
+            double G_dc = ComputePortConductance(l2_fes, port.AttributeIds,
+                                                 port.Conductivity, port.Name);
             MFEM_VERIFY(G_dc > 0.0,
                 "Massive port '" + port.Name + "' has zero conductance.");
             port_conductances.push_back(G_dc);
+        }
         }
 
         // Hand the field matrices and port data to the block-system owner, which
@@ -339,8 +371,13 @@ public:
         // in the packed [Re|Im] layout (half-size = N_DOFs + N_Ports).
         ess_tdof_list = port_operator->MakeEssentialTDofs(ess_mesh_tdofs);
 
-        // Grid Function (for solution recovery later)
-        A = std::make_unique<mfem::ComplexGridFunction>(fespace.get());
+		// Grid Function (for solution recovery later)
+		A = std::make_unique<mfem::ComplexGridFunction>(fespace.get());
+
+		// Any factorization from a previous mesh refers to the old DOF numbering.
+		direct_solver.reset();
+		packed_matrix.reset();
+		factored_omega = 0.0;
 	}
 
 	mfem::BilinearFormIntegrator* MakeStiffnessIntegrator() {
@@ -439,6 +476,7 @@ public:
                 auto operation = Reporter().Start("scenario '" + name + "'");
                 ImprintScenario(scenario);
                 SolveSystem();
+                AccumulateScenarioError();
                 SaveScenario(name);
             }
             return;
@@ -454,6 +492,7 @@ public:
                     "scenario '" + point_name + "', terminal '" + term_name + "'");
                 ImprintScenario(column);
                 SolveSystem();
+                AccumulateScenarioError();
                 GatherCouplingColumn(column);
             }
         }
@@ -467,23 +506,62 @@ public:
 
         mfem::Operator* A_op_ptr;
 
-        mfem::ComplexOperator& complex_system = port_operator->Operator();
-        complex_system.FormLinearSystem(ess_tdof_list, *x_combined, *b_combined, A_op_ptr, X_vec, B_vec);
-        bool own_A = (A_op_ptr != &complex_system);
-        A_op.Reset(A_op_ptr, own_A);
+		mfem::ComplexOperator& complex_system = port_operator->Operator();
+		complex_system.FormLinearSystem(ess_tdof_list, *x_combined, *b_combined, A_op_ptr, X_vec, B_vec);
+		bool own_A = (A_op_ptr != &complex_system);
+		A_op.Reset(A_op_ptr, own_A);
 
-        // Iterative Complex Solver
-        mfem::GMRESSolver gmres;
-        gmres.SetOperator(*A_op.Ptr());
-        gmres.SetPrintLevel(Reporter().SolverPrintLevel(config.SolverPrintLevel));
-        gmres.SetRelTol(config.SolverTolerance);
-        gmres.SetMaxIter(config.SolverMaxIter);
-		gmres.Mult(B_vec, X_vec);
+		if (config.LinearSolver == LinearSolverType::Direct) {
+			// The factorization is valid for one frequency, so it is cached and
+			// reused across every terminal column at that frequency; only a
+			// change of frequency (which rescales both omega-dependent blocks)
+			// forces a rebuild.
+			EnsureFactorizationForActiveFrequency();
+			direct_solver->Mult(B_vec, X_vec);
+		}
+		else {
+			// Iterative Complex Solver
+			mfem::GMRESSolver gmres;
+			gmres.SetOperator(*A_op.Ptr());
+			gmres.SetPrintLevel(Reporter().SolverPrintLevel(config.SolverPrintLevel));
+			gmres.SetRelTol(config.SolverTolerance);
+			gmres.SetMaxIter(config.SolverMaxIter);
+			gmres.Mult(B_vec, X_vec);
+		}
 
 		// X_vec is laid out [Re_Mesh, Re_Port, Im_Mesh, Im_Port]; copy the mesh
 		// (field) DOFs back into the complex grid function, dropping the ports.
 		RecoverSolvedUnknowns(X_vec);
 	}
+
+    // Assemble and factor the packed real system for the currently active
+    // frequency, reusing the existing factors if the frequency has not moved.
+    //
+    // Unlike the static solvers, the MQS matrix is NOT constant over a run: both
+    // the sigma-mass block (omega*M_sigma) and the port corner (G_dc/omega)
+    // depend on frequency. It is, however, constant across the terminal columns
+    // of a single frequency point, which is where the reuse pays off: one
+    // factorization serves every terminal at that frequency.
+    void EnsureFactorizationForActiveFrequency() {
+        if (direct_solver && factored_omega == omega) { return; }
+
+        auto operation = Reporter().Start(
+            "sparse direct factorization at " + std::to_string(frequency) + " Hz");
+        direct_solver.reset();
+
+        packed_matrix = port_operator->AssemblePackedMatrix();
+
+        // Apply the same essential-DOF elimination that ComplexOperator's
+        // constrained operator applies matrix-free. FormLinearSystem has already
+        // folded the essential values into B_vec and placed them in X_vec, so a
+        // unit diagonal on the eliminated rows reproduces them exactly.
+        for (int i = 0; i < ess_tdof_list.Size(); ++i) {
+            packed_matrix->EliminateRowCol(ess_tdof_list[i], mfem::Operator::DIAG_ONE);
+        }
+
+        direct_solver = std::make_unique<SparseLUSolver>(*packed_matrix);
+        factored_omega = omega;
+    }
 
     // Estimate per-element error on the CURRENT mesh, folding every scenario /
     // coupling column into a single indicator via the element-wise maximum
@@ -499,9 +577,8 @@ public:
     // imaginary indicators are combined as a complex magnitude before the base
     // class folds them across scenarios.
     //
-    // @param combined  Output: per-element max error indicator (sized to NE).
-    // @return Global error sqrt(sum_k combined_k^2).
-    double EstimateCombinedError(mfem::Vector& combined) override {
+    // @param errors  Output: per-element error indicator (sized to NE).
+    void EstimateCurrentSolutionError(mfem::Vector& errors) override {
         const int sdim = mesh.SpaceDimension();
         std::unique_ptr<mfem::BilinearFormIntegrator> flux_integ(MakeStiffnessIntegrator());
         mfem::FiniteElementSpace flux_fes(&mesh, fec.get(), sdim);
@@ -513,40 +590,12 @@ public:
         estimator_im.SetWithCoeff(false);     // flux = nu * grad(A)
         estimator_im.SetFluxAveraging(1);    // do not average across attribute interfaces
 
-        const auto amr_scenarios = BuildAmrSolveScenarios();
-        return EstimateScenarioMaximumErrorOver(amr_scenarios, combined,
-            [this](const Scenario& scenario) {
-                ImprintScenario(scenario);
-                SolveSystem();
-            },
-            [&estimator_re, &estimator_im](mfem::Vector& current) {
-                estimator_re.Reset();
-                const mfem::Vector& errs_re = estimator_re.GetLocalErrors();
-                estimator_im.Reset();
-                const mfem::Vector& errs_im = estimator_im.GetLocalErrors();
-                current.SetSize(errs_re.Size());
-                for (int k = 0; k < current.Size(); ++k) {
-                    current(k) = std::hypot(errs_re(k), errs_im(k));
-                }
-            });
-    }
-
-    std::vector<std::pair<std::string, Scenario>> BuildAmrSolveScenarios() const {
-        if (config.AnalysisType == AnalysisType::Field) {
-            return config.Scenarios;
+        const mfem::Vector& errs_re = estimator_re.GetLocalErrors();
+        const mfem::Vector& errs_im = estimator_im.GetLocalErrors();
+        errors.SetSize(errs_re.Size());
+        for (int k = 0; k < errors.Size(); ++k) {
+            errors(k) = std::hypot(errs_re(k), errs_im(k));
         }
-
-        std::vector<std::pair<std::string, Scenario>> scenarios;
-        scenarios.reserve(config.Scenarios.size() * config.Terminals.size());
-        for (const auto& [point_name, point] : config.Scenarios) {
-            for (const auto& [term_name, term] : config.Terminals) {
-                Scenario column;
-                column.Frequency = point.Frequency;
-                column.Excitations.push_back({ term_name, 1.0 });
-                scenarios.emplace_back(point_name + "_" + term_name, std::move(column));
-            }
-        }
-        return scenarios;
     }
 
     // Peak flux density |B| over the current solution *A, sampled at element

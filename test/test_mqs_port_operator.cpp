@@ -130,3 +130,46 @@ TEST_CASE("MQS massive-port operator degenerates to the complex field operator",
 	REQUIRE(y(2) == Catch::Approx(13.0));
 	REQUIRE(y(3) == Catch::Approx(29.0));
 }
+
+// The direct solver factors an explicitly assembled copy of a system that is
+// otherwise only ever applied matrix-free, so the two must agree exactly. A
+// sign error in the packed assembly would otherwise surface as a plausible but
+// wrong solution rather than as a failure.
+TEST_CASE("MQS packed matrix reproduces the matrix-free operator", "[mqs][operator]")
+{
+	auto K = DiagonalMatrix({ 2.0, 3.0 });
+	auto M = DiagonalMatrix({ 5.0, 7.0 });
+
+	std::vector<std::unique_ptr<mfem::Vector>> port_loads;
+	auto load = std::make_unique<mfem::Vector>(2);
+	(*load)(0) = 11.0;
+	(*load)(1) = 13.0;
+	port_loads.push_back(std::move(load));
+
+	MqsMassivePortOperator coupled(
+		2, *K, *M, std::move(port_loads), { 0.25 }, 1.0);
+
+	// A frequency other than the construction value, to confirm the packed
+	// assembly picks up both omega-dependent blocks after SetOmega.
+	coupled.SetOmega(3.0);
+
+	auto packed = coupled.AssemblePackedMatrix();
+	const int n = coupled.Layout().FullSize();
+	REQUIRE(packed->Height() == n);
+
+	// Compare column by column: the j-th column of each operator is its action
+	// on the j-th basis vector.
+	for (int j = 0; j < n; ++j) {
+		mfem::Vector e(n);
+		e = 0.0;
+		e(j) = 1.0;
+
+		mfem::Vector expected(n), actual(n);
+		coupled.Operator().Mult(e, expected);
+		packed->Mult(e, actual);
+
+		for (int i = 0; i < n; ++i) {
+			REQUIRE(actual(i) == Catch::Approx(expected(i)).margin(1e-12));
+		}
+	}
+}

@@ -104,7 +104,9 @@ public:
 		const std::vector<mfem::real_t>& conductances,
 		mfem::real_t omega)
 		: layout(n_dofs, static_cast<int>(port_loads.size())),
-		  port_loads(std::move(port_loads))
+		  port_loads(std::move(port_loads)),
+		  stiffness(K), sigma_mass(M_sigma), conductances(conductances),
+		  active_omega(omega)
 	{
 		MFEM_VERIFY(omega > 0.0, "MQS angular frequency must be positive.");
 		MFEM_VERIFY(
@@ -149,8 +151,63 @@ public:
 	void SetOmega(mfem::real_t value)
 	{
 		MFEM_VERIFY(value > 0.0, "MQS angular frequency must be positive.");
+		active_omega = value;
 		owned_scaled_mass->SetScale(value);
 		if (conductance_corner) conductance_corner->SetOmega(value);
+	}
+
+	// Assemble the packed real matrix that ComplexOperator applies matrix-free,
+	// in the HERMITIAN layout its Mult() implements:
+	//
+	//     [ R  -I ] [ x_r ]   [ y_r ]
+	//     [ I   R ] [ x_i ] = [ y_i ]
+	//
+	// where R = [K, -C; -C^T, 0] and I = [omega*M_sigma, 0; 0, -G_dc/omega] are
+	// this operator's real and imaginary halves. Building it explicitly is the
+	// price of admission for a direct solve: the block operators are apply-only,
+	// so a factorization needs the coefficients gathered into one CSR matrix.
+	//
+	// The result is frequency-dependent through both omega-scaled blocks, so it
+	// must be rebuilt (and refactored) whenever SetOmega() changes the frequency.
+	std::unique_ptr<mfem::SparseMatrix> AssemblePackedMatrix() const
+	{
+		const int h = layout.HalfSize();
+		const int n = layout.NDofs();
+		auto packed = std::make_unique<mfem::SparseMatrix>(2 * h, 2 * h);
+
+		// Real diagonal blocks: R at (0,0) and (h,h).
+		AddSparseBlock(*packed, stiffness, 0, 0, 1.0);
+		AddSparseBlock(*packed, stiffness, h, h, 1.0);
+
+		// Imaginary blocks: -I at (0,h) and +I at (h,0). The sigma mass carries
+		// the omega scaling that ScaledReferenceOperator applies at Mult time.
+		AddSparseBlock(*packed, sigma_mass, 0, h, -active_omega);
+		AddSparseBlock(*packed, sigma_mass, h, 0, active_omega);
+
+		// Port border C occupies the field/port off-diagonals of R with sign -1,
+		// mirrored into both real diagonal blocks.
+		for (int p = 0; p < layout.NPorts(); ++p)
+		{
+			const mfem::Vector& column = *port_loads[p];
+			for (int d = 0; d < n; ++d)
+			{
+				const mfem::real_t value = column(d);
+				if (value == 0.0) { continue; }
+				packed->Add(d, n + p, -value);
+				packed->Add(n + p, d, -value);
+				packed->Add(h + d, h + n + p, -value);
+				packed->Add(h + n + p, h + d, -value);
+			}
+
+			// Conductance corner -G_dc/omega sits in the imaginary block only,
+			// so it lands in the two off-diagonal halves with opposite signs.
+			const mfem::real_t corner = -conductances[p] / active_omega;
+			packed->Add(n + p, h + n + p, -corner);
+			packed->Add(h + n + p, n + p, corner);
+		}
+
+		packed->Finalize();
+		return packed;
 	}
 
 	mfem::ComplexOperator& Operator() { return complex_operator->GetOperator(); }
@@ -174,10 +231,35 @@ public:
 	}
 
 private:
+	// Scatter scale*block into `target` at the given row/column origin. The
+	// block is assumed finalized (CSR), which the SesquilinearForm guarantees.
+	static void AddSparseBlock(mfem::SparseMatrix& target,
+							   const mfem::SparseMatrix& block,
+							   int row_offset, int col_offset,
+							   mfem::real_t scale)
+	{
+		const int* I = block.GetI();
+		const int* J = block.GetJ();
+		const mfem::real_t* data = block.GetData();
+		for (int r = 0; r < block.Height(); ++r)
+		{
+			for (int k = I[r]; k < I[r + 1]; ++k)
+			{
+				target.Add(row_offset + r, col_offset + J[k], scale * data[k]);
+			}
+		}
+	}
+
 	// complex_operator transitively references port_loads, so it is declared last
 	// and destroyed first. layout is independent and remains the size authority.
 	ComplexPortLayout layout;
 	std::vector<std::unique_ptr<mfem::Vector>> port_loads;
+	// Referenced (not owned) field matrices, retained so the packed matrix can be
+	// reassembled at each new frequency.
+	mfem::SparseMatrix& stiffness;
+	mfem::SparseMatrix& sigma_mass;
+	std::vector<mfem::real_t> conductances;
+	mfem::real_t active_omega;
 	ConductanceCornerOperator* conductance_corner = nullptr;
 	std::unique_ptr<ScaledReferenceOperator> owned_scaled_mass;
 	std::unique_ptr<OwningComplexBlockOperator> complex_operator;

@@ -212,7 +212,7 @@ int main(int argc, char *argv[]) {
 
         // 4. Validate Configuration (with mesh for attribute checking)
         {
-            auto operation = reporter.Start("mesh-aware configuration validation");
+            auto operation = reporter.Start("configuration validation");
             validator.ValidateOrThrow(parser.config, &mesh);
         }
 

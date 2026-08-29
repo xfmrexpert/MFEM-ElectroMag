@@ -90,6 +90,7 @@ private:
 		prob_config.SolverTolerance = GetSolverTolerance();
 		prob_config.SolverMaxIter = GetSolverMaxIter();
 		prob_config.SolverPrintLevel = GetSolverPrintLevel();
+		prob_config.LinearSolver = GetLinearSolver();
 
 		prob_config.OutputParaview = GetOutputParaview();
 		prob_config.OutputGmsh = GetOutputGmsh();
@@ -301,6 +302,15 @@ private:
 
     [[nodiscard]] int GetSolverPrintLevel() const {
         return Get(Sim(), "solver_print_level", Constants::DEFAULT_SOLVER_PRINT_LEVEL);
+    }
+
+    // "simulation.linear_solver": iterative | direct. Direct is the default: it
+    // factors once per mesh and reuses the factors across scenarios, and its
+    // accuracy does not depend on a residual tolerance.
+    [[nodiscard]] ::LinearSolverType GetLinearSolver() const {
+        return ParseEnum(Sim(), "linear_solver", ::LinearSolverType::Direct,
+                         {{"iterative", ::LinearSolverType::Iterative},
+                          {"direct",    ::LinearSolverType::Direct}});
     }
 
     // Relative mesh paths resolve against the directory holding the config file.

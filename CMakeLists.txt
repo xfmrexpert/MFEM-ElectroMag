@@ -80,8 +80,28 @@ FetchContent_Declare(
 # library is still built on demand when mfem-electromag links it.
 FetchContent_MakeAvailable(mfem)
 
+# Eigen supplies the sparse Cholesky (SimplicialLDLT) behind the "direct"
+# linear solver option. Eigen is header-only, so SOURCE_SUBDIR points at a
+# directory that does not exist: that skips Eigen's own (heavy) CMake project
+# entirely and just downloads the headers, which we add as an include dir.
+# Only the MPL2-licensed subset is used; EIGEN_MPL2_ONLY makes any accidental
+# use of an LGPL-licensed Eigen module a compile error, keeping this project
+# safely MIT-licensed.
+FetchContent_Declare(
+  eigen
+  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+  GIT_TAG        3.4.0  # Pin to a stable version for reproducibility
+  GIT_PROGRESS   TRUE   # See MFEM block above for rationale.
+  SOURCE_SUBDIR  do-not-configure-eigen
+)
+FetchContent_MakeAvailable(eigen)
+
+add_library(eigen_headers INTERFACE)
+target_include_directories(eigen_headers SYSTEM INTERFACE ${eigen_SOURCE_DIR})
+target_compile_definitions(eigen_headers INTERFACE EIGEN_MPL2_ONLY)
+
 add_executable(mfem-electromag src/main.cpp)
-target_link_libraries(mfem-electromag PRIVATE mfem)
+target_link_libraries(mfem-electromag PRIVATE mfem eigen_headers)
 
 # Build identity banner: regenerate build_info.hpp on every build so a stale
 # executable is obvious at runtime. GenerateBuildInfo.cmake uses configure_file,
@@ -159,7 +179,7 @@ if(BUILD_TESTING)
         test/test_status_reporter.cpp
     )
 
-    target_link_libraries(mfem_tests PRIVATE mfem Catch2::Catch2WithMain)
+    target_link_libraries(mfem_tests PRIVATE mfem eigen_headers Catch2::Catch2WithMain)
     target_compile_definitions(mfem_tests PRIVATE ${JSON_DIAGNOSTIC_DEFS})
 
     # Register tests with CTest

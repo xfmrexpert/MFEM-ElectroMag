@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <map>
 #include <cmath>
 #include <stdexcept>
 #include <functional>
@@ -507,6 +508,47 @@ private:
                 }
             }
             constrained_attributes.insert(attributes.begin(), attributes.end());
+        }
+
+        ValidateDomainCoverage(config, mesh, group_attributes);
+    }
+
+    // Every domain attribute actually present in the mesh must be claimed by some
+    // region, because an unclaimed attribute silently gets the zero-material
+    // default: its elements contribute no stiffness, leaving their interior DOFs
+    // unconstrained and the assembled system singular. An iterative solver hides
+    // this (it simply stalls on the null space and returns whatever it reached at
+    // the iteration cap, producing plausible-looking but wrong fields), so without
+    // this check the error only surfaces as bad results. A direct factorization
+    // fails outright on the same system, which is how this was found.
+    //
+    // Mesh-dependent, so it is skipped in the schema-only (mesh == nullptr) pass.
+    void ValidateDomainCoverage(
+        const json& config, const mfem::Mesh* mesh,
+        const std::function<std::set<int>(const std::string&)>& group_attributes) {
+        if (!mesh) return;
+
+        std::set<int> claimed;
+        if (config.contains("regions") && config["regions"].is_array()) {
+            for (const auto& reg : config["regions"]) {
+                if (!reg.contains("entity_group") || !reg["entity_group"].is_string()) continue;
+                const auto attributes = group_attributes(reg["entity_group"]);
+                claimed.insert(attributes.begin(), attributes.end());
+            }
+        }
+
+        // Count elements per attribute so the diagnostic can quantify the gap and
+        // so attributes that exist only in the numbering (no elements) are ignored.
+        std::map<int, int> element_counts;
+        for (int e = 0; e < mesh->GetNE(); ++e) element_counts[mesh->GetAttribute(e)]++;
+
+        for (const auto& [attribute, count] : element_counts) {
+            if (claimed.count(attribute) != 0) continue;
+            AddError("regions",
+                "Mesh domain attribute " + std::to_string(attribute) + " (" +
+                std::to_string(count) + " elements) is not covered by any region, so "
+                "it has no material. Every meshed domain attribute must belong to a "
+                "region; add one, or remove the attribute from the mesh.");
         }
     }
 

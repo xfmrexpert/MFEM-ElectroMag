@@ -306,10 +306,9 @@ public:
 protected:
     void BuildOperators() override {}
     void RunOnCurrentMesh() override {}
-    double EstimateCombinedError(mfem::Vector& errors) override {
+    void EstimateCurrentSolutionError(mfem::Vector& errors) override {
         errors.SetSize(mesh.GetNE());
         errors = 0.0;
-        return 0.0;
     }
     double ComputePeakFieldMagnitude() const override { return 0.0; }
 };
@@ -329,7 +328,7 @@ public:
 
     int OperatorBuilds() const { return operator_builds; }
     int ErrorEstimates() const { return error_estimates; }
-    int FinalRuns() const { return final_runs; }
+    int SolvePasses() const { return solve_passes; }
     const std::vector<amr::AmrIterationInfo>& AmrHistory() const {
         return GetAmrHistory();
     }
@@ -340,13 +339,17 @@ protected:
         fespace = std::make_unique<mfem::FiniteElementSpace>(&mesh, fec.get());
     }
 
-    void RunOnCurrentMesh() override { ++final_runs; }
+    // One scenario per pass, folding its error indicator in as production
+    // solvers do.
+    void RunOnCurrentMesh() override {
+        ++solve_passes;
+        AccumulateScenarioError();
+    }
 
-    double EstimateCombinedError(mfem::Vector& errors) override {
+    void EstimateCurrentSolutionError(mfem::Vector& errors) override {
         ++error_estimates;
         errors.SetSize(mesh.GetNE());
         errors = 1.0;
-        return std::sqrt(static_cast<double>(mesh.GetNE()));
     }
 
     double ComputePeakFieldMagnitude() const override { return 2.5; }
@@ -354,7 +357,7 @@ protected:
 private:
     int operator_builds = 0;
     int error_estimates = 0;
-    int final_runs = 0;
+    int solve_passes = 0;
 };
 
 class ElectrostaticAmrProbe : public ElectrostaticSolver {
@@ -427,7 +430,9 @@ TEST_CASE("PhysicsSolver owns the adaptive lifecycle", "[solvers][amr]") {
 
     REQUIRE(probe.OperatorBuilds() == 3);
     REQUIRE(probe.ErrorEstimates() == 3);
-    REQUIRE(probe.FinalRuns() == 1);
+    // The AMR loop now runs exactly one solve pass per iteration; the last one
+    // is on the converged mesh, so there is no extra pass afterwards.
+    REQUIRE(probe.SolvePasses() == 3);
     REQUIRE(probe.AmrHistory().size() == 3);
     REQUIRE(probe.AmrHistory().back().peak_field_magnitude == 2.5);
     REQUIRE(mesh.GetNE() > 1);
