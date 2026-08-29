@@ -70,7 +70,6 @@ public:
 			return 1.0 / (Constants::MU_0 * m.RelPermeability); });
 
 		closure_bcs = BuildClosureBcs();
-		ValidateMagneticAxisBoundaryValues();
 
 		std::vector<mfem::Array<int>> ess_markers =
 			DirichletClosureMarkers(closure_bcs);
@@ -90,6 +89,7 @@ public:
 
 		// Build the FE space and everything bound to it for the starting mesh.
 		BuildOperators();
+		ValidateMagneticAxisBoundaryValues();
 
 		BoundaryConditionValidator validator(mesh, *fespace);
 		validator.ValidateBoundaryConditions(

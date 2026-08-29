@@ -162,7 +162,18 @@ TEST_CASE("Axisymmetric magnetic solvers enforce zero A_phi on the axis",
         json config = MakePlanarStripConfig(
             physics, mesh_file, 1, material, axis_value, 0.0);
         config["simulation"]["geometry_type"] = "axisymmetric";
+        if (physics == "magnetoquasistatics") {
+            config["scenarios"][0]["frequency"] = 60.0;
+        }
         return config;
+    };
+
+    auto add_horizontal_dirichlet = [](json& config, double value) {
+        config["entity_groups"].push_back(
+            {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
+        config["boundaries"].push_back(
+            {{"name", "Horizontal"}, {"type", "Dirichlet"},
+             {"entity_group", "Horizontal"}, {"value", value}});
     };
 
     SECTION("magnetostatics rejects a nonzero axis value") {
@@ -185,6 +196,40 @@ TEST_CASE("Axisymmetric magnetic solvers enforce zero A_phi on the axis",
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
         MagnetostaticSolver solver(
             mesh, DecodeConfig(magnetic_config("magnetostatics", 0.0)));
+        REQUIRE_NOTHROW(solver.Setup());
+    }
+
+    SECTION("magnetostatics rejects a nonzero value at an axis corner") {
+        json config = magnetic_config("magnetostatics", 0.0);
+        add_horizontal_dirichlet(config, 1.0);
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetostaticSolver solver(mesh, DecodeConfig(config));
+        REQUIRE_THROWS_WITH(solver.Setup(),
+            Catch::Matchers::ContainsSubstring("on the magnetic symmetry axis"));
+    }
+
+    SECTION("magnetoquasistatics rejects a nonzero value at an axis corner") {
+        json config = magnetic_config("magnetoquasistatics", 0.0);
+        add_horizontal_dirichlet(config, 1.0);
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+        REQUIRE_THROWS_WITH(solver.Setup(),
+            Catch::Matchers::ContainsSubstring("on the magnetic symmetry axis"));
+    }
+
+    SECTION("a zero value on a boundary adjacent to the axis is accepted") {
+        json config = magnetic_config("magnetostatics", 0.0);
+        add_horizontal_dirichlet(config, 0.0);
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetostaticSolver solver(mesh, DecodeConfig(config));
+        REQUIRE_NOTHROW(solver.Setup());
+    }
+
+    SECTION("planar problems do not apply magnetic axis regularity") {
+        json config = magnetic_config("magnetostatics", 1.0);
+        config["simulation"]["geometry_type"] = "planar";
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetostaticSolver solver(mesh, DecodeConfig(config));
         REQUIRE_NOTHROW(solver.Setup());
     }
 

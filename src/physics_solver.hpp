@@ -115,18 +115,31 @@ protected:
         if (geometry != GeometryType::Axisymmetric ||
             !axisymmetric_mesh.TouchesAxis()) return;
 
+        MFEM_VERIFY(fespace,
+            "Magnetic axis boundary validation requires a finite element space.");
+
+        mfem::Array<int> axis_tdofs;
+        fespace->GetEssentialTrueDofs(
+            axisymmetric_mesh.axis_boundary, axis_tdofs);
+        mfem::Array<int> is_axis_tdof(fespace->GetTrueVSize());
+        is_axis_tdof = 0;
+        for (int i = 0; i < axis_tdofs.Size(); ++i) {
+            is_axis_tdof[axis_tdofs[i]] = 1;
+        }
+
         for (const auto& bc : closure_bcs) {
             if (bc.Condition.Type != BoundaryConditionType::Dirichlet ||
                 bc.Condition.Value == 0.0) continue;
 
-            const int marker_size =
-                std::min(bc.Marker.Size(), axisymmetric_mesh.axis_boundary.Size());
-            for (int attr = 0; attr < marker_size; ++attr) {
-                MFEM_VERIFY(!bc.Marker[attr] || !axisymmetric_mesh.axis_boundary[attr],
+            mfem::Array<int> boundary_tdofs;
+            fespace->GetEssentialTrueDofs(bc.Marker, boundary_tdofs);
+            for (int i = 0; i < boundary_tdofs.Size(); ++i) {
+                const int tdof = boundary_tdofs[i];
+                MFEM_VERIFY(!is_axis_tdof[tdof],
                     "Boundary group '" + bc.Condition.EntityGroupName +
-                    "' assigns a nonzero Dirichlet value on magnetic symmetry-axis "
-                    "attribute " + std::to_string(attr + 1) +
-                    ". Axis regularity requires A_phi = 0 at r = 0.");
+                    "' assigns a nonzero Dirichlet value at true DOF " +
+                    std::to_string(tdof) + " on the magnetic symmetry axis. "
+                    "Axis regularity requires A_phi = 0 at r = 0.");
             }
         }
     }

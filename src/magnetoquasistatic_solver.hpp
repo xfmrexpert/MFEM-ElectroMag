@@ -251,7 +251,6 @@ public:
         sigma_coeff = std::make_unique<mfem::PWConstCoefficient>(conductivity_values);
 
         closure_bcs = BuildClosureBcs();
-        ValidateMagneticAxisBoundaryValues();
 
         std::vector<mfem::Array<int>> ess_markers =
             DirichletClosureMarkers(closure_bcs);
@@ -271,6 +270,7 @@ public:
 
         // Build the FE space and everything bound to it for the starting mesh.
         BuildOperators();
+        ValidateMagneticAxisBoundaryValues();
 
         // Validate that BCs don't create physical conflicts
         BoundaryConditionValidator validator(mesh, *fespace);
