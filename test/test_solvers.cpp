@@ -1541,6 +1541,77 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     fs::remove(mesh_file);
 }
 
+TEST_CASE("MQS heterogeneous massive-port conductance is piecewise and order independent",
+          "[solvers][mqs][coupling][conductance]") {
+    const std::string mesh_file = "test_mqs_heterogeneous_port.mesh";
+    const std::string inductance_file =
+        "inductance_matrix_heterogeneous_60Hz.csv";
+    const std::string resistance_file =
+        "resistance_matrix_heterogeneous_60Hz.csv";
+    constexpr double length = 0.2;
+    constexpr double height = 0.05;
+    constexpr double sigma_left = 2.0;
+    constexpr double sigma_right = 5.0;
+    CreateLayeredStripMesh(mesh_file, length, height, 2, 1, 1);
+
+    auto resistance_for = [&](const json& port_attributes) {
+        json config = MakePlanarStripConfig(
+            "magnetoquasistatics", mesh_file, 1,
+            {{"mu_r", 1.0}, {"sigma", sigma_left}}, 0.0, 0.0);
+        config["simulation"]["analysis_type"] = "coupling_matrix";
+        config["scenarios"] = json::array({
+            {{"name", "heterogeneous"}, {"frequency", 60.0},
+             {"excitations", json::array()}}
+        });
+        config["entity_groups"].push_back(
+            {{"name", "RightDomain"}, {"dim", 2}, {"attribute_ids", {2}}});
+        config["entity_groups"].push_back(
+            {{"name", "PortDomain"}, {"dim", 2},
+             {"attribute_ids", port_attributes}});
+        config["entity_groups"].push_back(
+            {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
+        config["materials"].push_back(
+            {{"name", "RightMaterial"},
+             {"properties", {{"mu_r", 1.0}, {"sigma", sigma_right}}}});
+        config["regions"].push_back(
+            {{"name", "RightRegion"}, {"entity_group", "RightDomain"},
+             {"material", "RightMaterial"}});
+        config["boundaries"].push_back(
+            {{"name", "Horizontal"}, {"type", "Dirichlet"},
+             {"entity_group", "Horizontal"}, {"value", 0.0}});
+        config["terminals"] = json::array({
+            {{"name", "Port"}, {"excitation_type", "current"},
+             {"conductor_type", "massive"}, {"entity_group", "PortDomain"}}
+        });
+
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+        solver.Setup();
+        solver.Run();
+        solver.SaveAnalysis();
+        const CsvMatrix resistance = ReadCsvMatrix(resistance_file);
+        REQUIRE(resistance.labels == std::vector<std::string>{"Port"});
+        REQUIRE(resistance.values.size() == 1);
+        REQUIRE(resistance.values[0].size() == 1);
+        return resistance.values[0][0];
+    };
+
+    const double left_area = 0.5 * length * height;
+    const double right_area = 0.5 * length * height;
+    const double expected_resistance =
+        1.0 / (sigma_left * left_area + sigma_right * right_area);
+    const double forward = resistance_for(json::array({1, 2}));
+    const double reversed = resistance_for(json::array({2, 1}));
+
+    REQUIRE(forward == Catch::Approx(expected_resistance).epsilon(1e-6));
+    REQUIRE(reversed == Catch::Approx(expected_resistance).epsilon(1e-6));
+    REQUIRE(reversed == Catch::Approx(forward).epsilon(1e-12));
+
+    fs::remove(resistance_file);
+    fs::remove(inductance_file);
+    fs::remove(mesh_file);
+}
+
 TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
           "[solvers][mqs][coupling][regions]") {
     const std::string mesh_file = "test_mqs_open_current_region.mesh";

@@ -14,9 +14,10 @@
 class AxisymmetricConductanceCoeff : public mfem::Coefficient
 {
 private:
-    double sigma;
+    mfem::Coefficient& conductivity;
 public:
-    explicit AxisymmetricConductanceCoeff(double s) : sigma(s) { }
+    explicit AxisymmetricConductanceCoeff(mfem::Coefficient& sigma)
+        : conductivity(sigma) { }
 
     virtual double Eval(mfem::ElementTransformation &T, const mfem::IntegrationPoint &ip) override
     {
@@ -30,6 +31,6 @@ public:
             << r << ". A massive azimuthal conductor cannot touch the symmetry "
             "axis; remodel the port or use a different conductor type.");
 
-        return sigma / (Constants::TWO_PI * r);
+        return conductivity.Eval(T, ip) / (Constants::TWO_PI * r);
     }
 };

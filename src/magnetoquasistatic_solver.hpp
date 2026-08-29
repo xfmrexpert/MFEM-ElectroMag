@@ -68,7 +68,6 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     struct MassivePortDefinition {
         std::string Name;
         std::vector<int> AttributeIds;
-        double Conductivity;
     };
     std::vector<CouplingResult> coupling_results;
     mfem::DenseMatrix* resistance_matrix = nullptr;
@@ -92,23 +91,20 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     // which is this plain (unweighted) domain form.
     std::unique_ptr<mfem::Vector> BuildPortVector(mfem::FiniteElementSpace* fespace,
                             const std::vector<int>& port_attributes,
-                            double sigma,
+                            mfem::Coefficient& conductivity,
                             const std::string& port_name)
     {
         // Restrict integration to this specific port's attributes
         mfem::Array<int> port_marker =
             DomainMarkerFromAttrs(port_attributes, "massive port '" + port_name + "'");
 
-        // Constant coefficient restricted to this port by the attribute marker
-        // passed to AddDomainIntegrator below; referenced only while we assemble.
-        mfem::ConstantCoefficient coeff(sigma);
-
         // Assemble the LinearForm using a scalar domain integrator. The attribute
         // marker restricts assembly to this port's elements, so the cost is
         // proportional to the port rather than to the whole mesh; with one port per
         // turn, assembling over every element would be quadratic overall.
         mfem::LinearForm port_lf(fespace);
-        port_lf.AddDomainIntegrator(new mfem::DomainLFIntegrator(coeff), port_marker);
+        port_lf.AddDomainIntegrator(
+            new mfem::DomainLFIntegrator(conductivity), port_marker);
         port_lf.Assemble();
 
         // Extract and return as a standalone Vector
@@ -144,7 +140,8 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     // supplied by the caller because it depends only on the mesh: building it here
     // would repeat an O(mesh) construction for every port.
     double ComputePortConductance(mfem::FiniteElementSpace& l2_fes,
-                                  const std::vector<int>& port_attributes, double sigma,
+                                  const std::vector<int>& port_attributes,
+                                  mfem::Coefficient& conductivity,
                                   const std::string& port_name)
     {
         // Create the restriction array for the port attributes
@@ -152,15 +149,12 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
             DomainMarkerFromAttrs(port_attributes, "massive port '" + port_name + "'");
 
         // Define the appropriate coefficient
-        mfem::Coefficient* base_coeff = nullptr;
+        std::unique_ptr<mfem::Coefficient> geometry_coeff;
+        mfem::Coefficient* base_coeff = &conductivity;
         if (geometry == GeometryType::Axisymmetric)
         {
-            base_coeff = new AxisymmetricConductanceCoeff(sigma);
-        }
-        else
-        {
-            base_coeff = new mfem::ConstantCoefficient(sigma); // For Planar, unit depth assumed? Or maybe per unit length.
-            // If planar 2D, G usually per unit depth.
+            geometry_coeff = std::make_unique<AxisymmetricConductanceCoeff>(conductivity);
+            base_coeff = geometry_coeff.get();
         }
 
         mfem::RestrictedCoefficient restricted_coeff(*base_coeff, port_marker);
@@ -174,8 +168,23 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
         // The total integral is the sum of the piecewise constant values
         double G_dc = g_form.Sum();
 
-        delete base_coeff;
         return G_dc;
+    }
+
+    void ValidatePortConductivity(const MassivePortDefinition& port) const
+    {
+        for (int attr : port.AttributeIds) {
+            const Material* material = MaterialForAttr(attr);
+            MFEM_VERIFY(material != nullptr,
+                "Massive port '" + port.Name + "' contains domain attribute " +
+                std::to_string(attr) + " without an assigned material.");
+            MFEM_VERIFY(material->Conductivity > 0.0,
+                "Massive port '" + port.Name + "' contains domain attribute " +
+                std::to_string(attr) + " with non-positive conductivity " +
+                std::to_string(material->Conductivity) +
+                ". Assign a material with a positive 'sigma' or model the region "
+                "as a non-conducting region.");
+        }
     }
 
     // The complex block system is solved as a single real vector laid out
@@ -307,14 +316,12 @@ public:
         for (const auto& [term_name, term] : config.Terminals) {
             if (term.Conductor != ConductorType::Massive) continue;
             const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
-            massive_ports.push_back(
-                { term_name, group.AttributeIds, TerminalConductivity(term) });
+            massive_ports.push_back({ term_name, group.AttributeIds });
         }
         for (const Region& region : config.Regions) {
             if (region.CurrentConstraint != RegionCurrentConstraint::Open) continue;
             const EntityGroup& group = config.EntityGroups.at(region.EntityGroupName);
-            massive_ports.push_back({ region.EntityGroupName, group.AttributeIds,
-                config.Materials.at(region.MaterialName).Conductivity });
+            massive_ports.push_back({ region.EntityGroupName, group.AttributeIds });
         }
 
         // Explicit massive terminals come first so their solved voltage indices
@@ -349,16 +356,12 @@ public:
                     "Its DC conductance integral sigma/(2*pi*r) is divergent; "
                     "model it as a stranded conductor or move it off the axis.");
             }
-            MFEM_VERIFY(port.Conductivity > 0.0,
-                "Massive port '" + port.Name + "' has non-positive conductivity " +
-                std::to_string(port.Conductivity) +
-                ". Assign a material with a positive 'sigma' or model the region "
-                "as a non-conducting region.");
+            ValidatePortConductivity(port);
             port_loads.push_back(
-                BuildPortVector(fespace.get(), port.AttributeIds, port.Conductivity,
+                BuildPortVector(fespace.get(), port.AttributeIds, *sigma_coeff,
                                 port.Name));
             double G_dc = ComputePortConductance(l2_fes, port.AttributeIds,
-                                                 port.Conductivity, port.Name);
+                                                 *sigma_coeff, port.Name);
             MFEM_VERIFY(G_dc > 0.0,
                 "Massive port '" + port.Name + "' has zero conductance.");
             port_conductances.push_back(G_dc);
@@ -777,17 +780,6 @@ public:
         stream << std::setprecision(12) << value;
         return SafeOutputToken(stream.str());
     }
-
-	double TerminalConductivity(const Terminal& term) const {
-		// First domain attribute of the terminal's group that a region claims
-		// wins (preserves the prior "first match" behavior); 0 => non-conductive.
-		const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
-		for (int attr : group.AttributeIds) {
-			if (const Material* mat = MaterialForAttr(attr))
-				return mat->Conductivity;
-		}
-		return 0.0;
-	}
 
     mfem::Vector BuildTerminalCurrentDensity(
         const std::string& terminal_name, double current) const {
