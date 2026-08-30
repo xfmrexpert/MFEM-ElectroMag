@@ -5,7 +5,8 @@
 #include <catch2/catch_approx.hpp>
 
 #include "axisym/axisymmetric_curl_curl_integrator.hpp"
-#include "axisym/axisymmetric_mesh.hpp"
+#include "axisym/axisymmetric_mesh_validation.hpp"
+#include "axisym/magnetic_axis_boundary.hpp"
 #include "coefficients/magnetic_field_coefficient.hpp"
 
 #include <cmath>
@@ -58,36 +59,39 @@ TEST_CASE("Axisymmetric radial validation classifies the mesh",
    SECTION("domain touching the axis is detected")
    {
 	  auto mesh = MakeRadialMesh(2, 0.0);
-	  const axisym::MeshInfo info = axisym::ValidateMesh(*mesh);
+	  const axisym::AxisGeometry info = axisym::ValidateMesh(*mesh);
 	  REQUIRE(info.relation == axisym::AxisRelation::TouchesAxis);
 	  REQUIRE(info.TouchesAxis());
 	  REQUIRE(info.tolerance > 0.0);
-	  REQUIRE(info.axis_boundary.Size() == mesh->bdr_attributes.Max());
-	  REQUIRE(info.axis_boundary[3] == 1);
+
+	  const mfem::Array<int> axis_boundary =
+		 axisym::FindAxisBoundaryMarker(*mesh, info);
+	  REQUIRE(axis_boundary.Size() == mesh->bdr_attributes.Max());
+	  REQUIRE(axis_boundary[3] == 1);
    }
 
    SECTION("annular domain needs no axis handling")
    {
 	  auto mesh = MakeRadialMesh(2, 1.0);
-	  const axisym::MeshInfo info = axisym::ValidateMesh(*mesh);
+	  const axisym::AxisGeometry info = axisym::ValidateMesh(*mesh);
 	  REQUIRE(info.relation == axisym::AxisRelation::Annular);
 	  REQUIRE_FALSE(info.TouchesAxis());
 	  REQUIRE(info.min_r == Catch::Approx(1.0));
-	  REQUIRE(info.axis_boundary.Max() == 0);
+	  REQUIRE(axisym::FindAxisBoundaryMarker(*mesh, info).Max() == 0);
    }
 
    SECTION("tolerance scales with the mesh, not with an absolute constant")
    {
 	  auto small = MakeRadialMesh(2, 0.0, 1.0e-6);
 	  auto large = MakeRadialMesh(2, 0.0, 1.0e6);
-	  REQUIRE(axisym::InspectMesh(*small).tolerance <
-			  axisym::InspectMesh(*large).tolerance);
+	  REQUIRE(axisym::InspectAxisGeometry(*small).tolerance <
+			  axisym::InspectAxisGeometry(*large).tolerance);
    }
 
    SECTION("negative radius is rejected")
    {
 	  auto mesh = MakeRadialMesh(2, -0.5);
-	  REQUIRE(axisym::InspectMesh(*mesh).relation ==
+	  REQUIRE(axisym::InspectAxisGeometry(*mesh).relation ==
 			  axisym::AxisRelation::NegativeRadius);
    }
 
@@ -105,7 +109,7 @@ TEST_CASE("Axisymmetric radial validation classifies the mesh",
 		 });
 	  mesh->Transform(deformation);
 
-	  REQUIRE(axisym::InspectMesh(*mesh).relation ==
+	  REQUIRE(axisym::InspectAxisGeometry(*mesh).relation ==
 			  axisym::AxisRelation::NegativeRadius);
    }
 }
@@ -121,7 +125,7 @@ TEST_CASE("Axisymmetric curl-curl recovers B on a mesh touching the axis",
 		  "[axisymmetric][axis]")
 {
    auto mesh = MakeRadialMesh(4, 0.0);
-	  const axisym::MeshInfo info = axisym::ValidateMesh(*mesh);
+	  const axisym::AxisGeometry info = axisym::ValidateMesh(*mesh);
    REQUIRE(info.TouchesAxis());
 
    // Order 3 represents A_phi = r*(c0 + c1*z + c2*r^2) exactly.
@@ -184,7 +188,7 @@ TEST_CASE("MagneticFieldCoefficient agrees with the curl-curl flux on the axis",
 		  "[axisymmetric][axis]")
 {
    auto mesh = MakeRadialMesh(4, 0.0);
-	  const axisym::MeshInfo info = axisym::ValidateMesh(*mesh);
+	  const axisym::AxisGeometry info = axisym::ValidateMesh(*mesh);
 
    mfem::H1_FECollection collection(3, mesh->Dimension());
    mfem::FiniteElementSpace space(mesh.get(), &collection);
@@ -239,7 +243,7 @@ TEST_CASE("Near-zero axis coordinates recover the same limit as exact zero",
       if (vertex[0] == 0.0) { vertex[0] = perturbation; }
    }
 
-   const axisym::MeshInfo info = axisym::ValidateMesh(*mesh);
+   const axisym::AxisGeometry info = axisym::ValidateMesh(*mesh);
    REQUIRE(info.TouchesAxis());
    REQUIRE(info.min_r > 0.0);
    REQUIRE(info.min_r < info.tolerance);

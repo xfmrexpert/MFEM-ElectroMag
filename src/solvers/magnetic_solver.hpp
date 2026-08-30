@@ -10,6 +10,7 @@
 #include "mfem.hpp"
 #include "physics_solver.hpp"
 #include "../axisym/axisymmetric_curl_curl_integrator.hpp"
+#include "../axisym/magnetic_axis_boundary.hpp"
 
 /**
  * @brief Base class for solvers formulated in the magnetic vector potential.
@@ -30,19 +31,25 @@ protected:
 	// derived Setup() via MaterialCoefficient(); everything below reads it.
 	std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;
 
+	// Boundary attributes lying entirely on r = 0. Discovered here rather than
+	// during geometric classification because only an A_phi formulation needs a
+	// dedicated axis attribute; an electrostatic run on the same mesh does not.
+	mfem::Array<int> axis_boundary;
+
 	MagneticSolver(mfem::Mesh& m, const ProblemConfig& c) : PhysicsSolver(m, c) {}
 
-	// Axis regularity, imposition half: the setup-time mesh inspection identifies
-	// a dedicated r=0 boundary attribute. Merge it into the essential marker so
-	// A_phi = 0 there. Call after ess_bdr is built from the closure BCs and
-	// before BuildOperators().
+	// Axis regularity, imposition half: locate the dedicated r=0 boundary
+	// attribute and merge it into the essential marker so A_phi = 0 there. Call
+	// after ess_bdr is built from the closure BCs and before BuildOperators().
 	void ImposeAxisRegularity() {
 		if (geometry != GeometryType::Axisymmetric) { return; }
 
-		MFEM_VERIFY(ess_bdr.Size() == axisymmetric_mesh.axis_boundary.Size(),
+		axis_boundary = axisym::FindAxisBoundaryMarker(mesh, axisymmetric_mesh);
+
+		MFEM_VERIFY(ess_bdr.Size() == axis_boundary.Size(),
 			"Axis boundary marker does not match the mesh boundary attributes.");
 		for (int i = 0; i < ess_bdr.Size(); ++i) {
-			ess_bdr[i] = ess_bdr[i] || axisymmetric_mesh.axis_boundary[i];
+			ess_bdr[i] = ess_bdr[i] || axis_boundary[i];
 		}
 	}
 
@@ -58,8 +65,7 @@ protected:
 			"Magnetic axis boundary validation requires a finite element space.");
 
 		mfem::Array<int> axis_tdofs;
-		fespace->GetEssentialTrueDofs(
-			axisymmetric_mesh.axis_boundary, axis_tdofs);
+		fespace->GetEssentialTrueDofs(axis_boundary, axis_tdofs);
 		mfem::Array<int> is_axis_tdof(fespace->GetTrueVSize());
 		is_axis_tdof = 0;
 		for (int i = 0; i < axis_tdofs.Size(); ++i) {

@@ -9,7 +9,7 @@
 
 #include "mfem.hpp"
 #include "axisymmetric_measure.hpp"
-#include "axisymmetric_mesh.hpp"
+#include "axisymmetric_field_relations.hpp"
 
 /**
  * @brief Thread-safe axisymmetric curl-curl bilinear form integrator for magnetostatics
@@ -48,7 +48,7 @@ class AxisymmetricCurlCurlIntegrator : public mfem::BilinearFormIntegrator
 {
 public:
    // @param axis_tolerance  Scale-relative radius below which flux recovery takes
-   //                        the axis limit; use axisym::MeshInfo::tolerance so the
+   //                        the axis limit; use axisym::AxisGeometry::tolerance so the
    //                        integrator shares the mesh's axis policy.
    explicit AxisymmetricCurlCurlIntegrator(
       mfem::Coefficient &reluctivity,

@@ -11,7 +11,7 @@ namespace Constants {
 
     // Numerical tolerances
     // NOTE: axis proximity is no longer governed by a fixed absolute tolerance.
-    // See axisym::kRelativeGeometryTolerance in axisymmetric_mesh.hpp, which
+    // See axisym::kRelativeGeometryTolerance in axis_geometry.hpp, which
     // scales with the mesh bounding box so the same model works in any units.
 
     // Default solver parameters

@@ -14,7 +14,7 @@
 #include "../io/matrix_writer.hpp"
 #include "../io/status_reporter.hpp"
 #include "amr_support.hpp"
-#include "../axisym/axisymmetric_mesh.hpp"
+#include "../axisym/axisymmetric_mesh_validation.hpp"
 #include "../axisym/axisymmetric_boundary_lf_integrator.hpp"
 #include "../axisym/axisymmetric_curl_curl_integrator.hpp"
 #include "../core/marked_boundary_condition.hpp"
@@ -37,7 +37,7 @@ protected:
 
     // Setup-time axisymmetric mesh classification and axis boundary marker.
     // Planar problems leave it at its default.
-    axisym::MeshInfo axisymmetric_mesh;
+    axisym::AxisGeometry axisymmetric_mesh;
     std::vector<MarkedBoundaryCondition> closure_bcs;
 
     std::vector<amr::AmrIterationInfo> amr_history;

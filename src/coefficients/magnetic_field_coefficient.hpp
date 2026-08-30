@@ -4,14 +4,14 @@
 #pragma once
 
 #include "mfem.hpp"
-#include "../axisym/axisymmetric_mesh.hpp"
+#include "../axisym/axisymmetric_field_relations.hpp"
 
 /**
  * @brief Computes B = Curl(A) in 2D Axisymmetry
  * B_r = -dA/dz
  * B_z = A/r + dA/dr, with the exact axis limit B_z -> 2 dA/dr at r = 0.
  *
- * The axis test is the mesh's scale-relative tolerance (axisym::MeshInfo),
+ * The axis test is the mesh's scale-relative tolerance (axisym::AxisGeometry),
  * shared with geometry classification and with the curl-curl flux recovery, so
  * all three agree on what counts as the axis.
  */
