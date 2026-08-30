@@ -4,6 +4,7 @@
 #pragma once
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <list>
 #include <sstream>
 #include "mfem.hpp"
@@ -15,6 +16,7 @@
 #include "amr_support.hpp"
 #include "axisymmetric_mesh.hpp"
 #include "axisymmetric_boundary_lf_integrator.hpp"
+#include "axisymmetric_curl_curl_integrator.hpp"
 #include "marked_boundary_condition.hpp"
 
 /**
@@ -515,6 +517,53 @@ public:
                     ? "domain touches the symmetry axis (axis regularity enforced)."
                     : "domain is annular (no axis condition required).");
         Reporter().Diagnostic(msg.str());
+
+        WarnOnUnderResolvedRadialQuadrature();
+    }
+
+    // The curl-curl 1/r term is integrated by a geometry-aware rule whose cost
+    // is set by s = r_min/h per element (see
+    // AxisymmetricCurlCurlIntegrator::RadialExtraOrder). That rule is capped, so
+    // an element that is both very thin radially and very close to the axis can
+    // fall outside the accuracy target. Such an element is rare and always a
+    // meshing choice, but the resulting error is silent, so report it once.
+    void WarnOnUnderResolvedRadialQuadrature()
+    {
+        int worst_element = -1;
+        double worst_ratio = std::numeric_limits<double>::max();
+
+        for (int e = 0; e < mesh.GetNE(); ++e) {
+            double min_radius = 0.0;
+            double radial_width = 0.0;
+            AxisymmetricCurlCurlIntegrator::RadialExtent(
+                *mesh.GetElementTransformation(e), min_radius, radial_width);
+
+            // Elements meeting the axis are excluded by design: there the
+            // divergent directions are removed by the A_phi = 0 constraint.
+            if (!(radial_width > 0.0)) { continue; }
+            if (axisymmetric_mesh.IsOnAxisGeometry(min_radius)) { continue; }
+
+            const double ratio = min_radius / radial_width;
+            if (ratio < worst_ratio) {
+                worst_ratio = ratio;
+                worst_element = e;
+            }
+        }
+
+        if (worst_element < 0) { return; }
+        if (worst_ratio >= AxisymmetricCurlCurlIntegrator::kResolvedRadiusRatio) {
+            return;
+        }
+
+        std::ostringstream msg;
+        msg << std::setprecision(3)
+            << "Element " << worst_element << " has r_min/width = " << worst_ratio
+            << ", below the ratio " << AxisymmetricCurlCurlIntegrator::kResolvedRadiusRatio
+            << " at which the curl-curl 1/r quadrature reaches its accuracy "
+               "target. The capped rule integrates such elements approximately; "
+               "widen the innermost radial band or move it away from the axis if "
+               "near-axis accuracy matters.";
+        Reporter().Warning(msg.str());
     }
 
     double CalculateRegionArea(const std::vector<int>& attribute_ids) const {

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "mfem.hpp"
@@ -59,19 +60,112 @@ public:
       MFEM_ASSERT(nu_ != nullptr, "Reluctivity coefficient cannot be null");
    }
 
+   // Relative accuracy targeted for the non-polynomial 1/r term.
+   static constexpr double kRadialQuadratureTolerance = 1.0e-10;
+
+   // Ceiling on the extra points added for the 1/r term. Reached only for
+   // elements whose inner radius is a tiny fraction of their radial width;
+   // see GetRule for what that costs and why it is acceptable.
+   static constexpr int kMaxRadialExtraOrder = 120;
+
+   // Smallest r_min/width at which the capped rule still meets
+   // kRadialQuadratureTolerance. Measured: relative energy error stays near
+   // 1e-11 down to this ratio, then degrades (about 1e-8 at 5e-3, 1e-5 at
+   // 2e-3). Solvers use this to warn about under-resolved elements.
+   static constexpr double kResolvedRadiusRatio = 1.0e-2;
+
+   /**
+    * @brief Additional integration order needed to resolve the 1/r term.
+    *
+    * The integrand splits into a polynomial part and the single non-polynomial
+    * term N_j N_k / r. On an element spanning r in [a, a+h], mapping to the
+    * reference interval x in [-1, 1] gives r = a + h(1+x)/2, so 1/r has a pole
+    * at x0 = -(1 + 2s) with s = a/h. Gauss-Legendre applied to a function whose
+    * nearest singularity lies at x0 converges geometrically like rho^-n, where
+    *
+    *     rho = |x0| + sqrt(x0^2 - 1)
+    *
+    * is the Bernstein-ellipse parameter. Achieving a relative accuracy eps
+    * therefore needs roughly ln(1/eps)/ln(rho) points, which blows up as
+    * s -> 0 because rho -> 1.
+    *
+    * This is why a fixed polynomial-order heuristic cannot work: it depends
+    * only on the basis degree, while the actual difficulty is set by the
+    * geometric ratio s. Measured convergence orders match this estimate closely
+    * across s in [1e-3, 3].
+    *
+    * Returns 0 when the element touches the axis. There s = 0 and no finite
+    * rule converges, because the exact integral of N_j N_k / r diverges
+    * logarithmically for basis functions that do not vanish at r = 0. That
+    * divergence is a property of individual basis functions, not of the
+    * solution: axis regularity forces A_phi -> 0 linearly, and the essential
+    * A_phi = 0 constraint removes exactly the offending directions. Spending
+    * quadrature there would refine a quantity that elimination discards.
+    */
+   static int RadialExtraOrder(double min_radius, double radial_width)
+   {
+      if (!(radial_width > 0.0) || !(min_radius > 0.0)) { return 0; }
+
+      const double s = min_radius / radial_width;
+      const double x0 = 1.0 + 2.0 * s;
+      const double rho = x0 + std::sqrt(x0 * x0 - 1.0);
+      if (!(rho > 1.0)) { return kMaxRadialExtraOrder; }
+
+      const double points =
+         std::log(1.0 / kRadialQuadratureTolerance) / std::log(rho);
+      if (!(points > 0.0)) { return 0; }
+      if (points >= static_cast<double>(kMaxRadialExtraOrder))
+      {
+         return kMaxRadialExtraOrder;
+      }
+      return static_cast<int>(std::ceil(points));
+   }
+
+   // Radial extent of an element, sampled through its transformation so curved
+   // geometry is respected.
+   static void RadialExtent(const mfem::ElementTransformation &Trans,
+                            double &min_radius, double &radial_width)
+   {
+      auto &T = const_cast<mfem::ElementTransformation &>(Trans);
+      const mfem::IntegrationRule &vertices =
+         *mfem::Geometries.GetVertices(T.GetGeometryType());
+
+      double min_r = std::numeric_limits<double>::max();
+      double max_r = std::numeric_limits<double>::lowest();
+      mfem::Vector pos(T.GetSpaceDim());
+      for (int i = 0; i < vertices.GetNPoints(); ++i)
+      {
+         const mfem::IntegrationPoint &ip = vertices.IntPoint(i);
+         T.SetIntPoint(&ip);
+         T.Transform(ip, pos);
+         min_r = std::min(min_r, pos(0));
+         max_r = std::max(max_r, pos(0));
+      }
+
+      min_radius = min_r;
+      radial_width = max_r - min_r;
+   }
+
    static const mfem::IntegrationRule &GetRule(
       const mfem::FiniteElement &trial_fe,
       const mfem::FiniteElement &test_fe,
       const mfem::ElementTransformation &Trans)
    {
-      // The transformed-gradient and 1/r contributions have different order
-      // requirements. The latter is non-polynomial, so use the larger
-      // geometry-aware estimate rather than claiming exact integration.
+      // Polynomial part: integrated exactly by the usual order estimate.
       const int gradient_order = Trans.OrderGrad(&trial_fe)
          + Trans.OrderGrad(&test_fe) + Trans.Order();
       const int radial_reaction_order = trial_fe.GetOrder()
          + test_fe.GetOrder() + Trans.Order() + Trans.OrderW();
-      const int order = std::max(gradient_order, radial_reaction_order);
+      const int polynomial_order =
+         std::max(gradient_order, radial_reaction_order);
+
+      // Non-polynomial 1/r part: cost is set by the element's geometry, not by
+      // the basis degree, so it must be added on top.
+      double min_radius = 0.0;
+      double radial_width = 0.0;
+      RadialExtent(Trans, min_radius, radial_width);
+      const int order = polynomial_order
+         + RadialExtraOrder(min_radius, radial_width);
 
       if (trial_fe.Space() == mfem::FunctionSpace::rQk)
       {

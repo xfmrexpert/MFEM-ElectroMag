@@ -104,12 +104,17 @@ void CheckAutomaticQuadrature(bool curved)
 
    AxisymmetricCurlCurlIntegrator automatic_curl(coefficient, 0.0);
 	 AxisymmetricCurlCurlIntegrator reference_curl(coefficient, 0.0);
-   reference_curl.SetIntRule(&reference_rule);
+   // The curl-curl rule now adapts to element geometry and can exceed the
+   // shared reference order, so it needs a strictly finer reference.
+   const mfem::IntegrationRule &curl_reference_rule =
+	  mfem::IntRules.Get(element.GetGeomType(), 2 * reference_order + 40);
+   reference_curl.SetIntRule(&curl_reference_rule);
    automatic_curl.AssembleElementMatrix(element, transformation, automatic_matrix);
    reference_curl.AssembleElementMatrix(element, transformation, reference_matrix);
-	  // The 1/r reaction term is non-polynomial, so automatic quadrature should
-   // converge closely to over-integration without being expected to match it.
-   REQUIRE(RelativeDifference(automatic_matrix, reference_matrix) < 1.0e-5);
+	  // The 1/r reaction term is non-polynomial, but the automatic rule adds a
+   // geometry-dependent order for it, so on this well-separated element
+   // (r_min/width = 1) it is resolved to round-off rather than merely close.
+   REQUIRE(RelativeDifference(automatic_matrix, reference_matrix) < 1.0e-11);
 
    mfem::Vector automatic_vector;
    mfem::Vector reference_vector;
@@ -137,6 +142,101 @@ TEST_CASE("Axisymmetric quadrature accounts for element transformations",
    {
 	  CheckAutomaticQuadrature(true);
    }
+}
+
+namespace {
+
+// One element spanning r in [s*h, s*h + h], z in [0, 1].
+std::unique_ptr<mfem::Mesh> MakeRadialBand(double r_min, double width)
+{
+   auto mesh = std::make_unique<mfem::Mesh>(
+	  mfem::Mesh::MakeCartesian2D(1, 1, mfem::Element::QUADRILATERAL,
+								  true, width, 1.0));
+   for (int v = 0; v < mesh->GetNV(); ++v)
+   {
+	  mesh->GetVertex(v)[0] += r_min;
+   }
+   return mesh;
+}
+
+double ConstantPotential(const mfem::Vector &) { return 1.0; }
+
+// u^T K u for A_phi = 1, the magnetic energy the stiffness matrix represents.
+double CurlCurlEnergy(mfem::Mesh &mesh)
+{
+   mfem::H1_FECollection collection(2, mesh.Dimension());
+   mfem::FiniteElementSpace space(&mesh, &collection);
+   mfem::ConstantCoefficient one(1.0);
+
+   mfem::BilinearForm a(&space);
+   a.AddDomainIntegrator(new AxisymmetricCurlCurlIntegrator(one, 0.0));
+   a.Assemble();
+   a.Finalize();
+
+   mfem::GridFunction u(&space);
+   mfem::FunctionCoefficient potential(ConstantPotential);
+   u.ProjectCoefficient(potential);
+
+   mfem::Vector Ku(u.Size());
+   a.SpMat().Mult(u, Ku);
+   return Ku * u;
+}
+
+} // namespace
+
+// The 1/r term is non-polynomial and its quadrature difficulty is governed by
+// the element's geometry, s = r_min/width, not by the basis degree: mapped to
+// the reference interval, 1/r has a pole at -(1 + 2s), which approaches the
+// integration interval as s -> 0. A basis-degree-only rule is therefore blind
+// to the hard case, and a thin band close to the axis was integrated with tens
+// of percent of error. A_phi = 1 does not vanish near the axis, so it exercises
+// the term directly, and its energy has the closed form 2*pi*ln(b/a).
+TEST_CASE("Near-axis annular curl-curl quadrature meets its accuracy target",
+		  "[axisymmetric][quadrature]")
+{
+   const double width = 1.0;
+
+   // kResolvedRadiusRatio is the documented limit of the capped rule.
+   const double ratios[] = {
+	  3.0, 1.0, 0.1, 0.03,
+	  AxisymmetricCurlCurlIntegrator::kResolvedRadiusRatio};
+
+   for (double s : ratios)
+   {
+	  const double a = s * width;
+	  const double b = a + width;
+	  auto mesh = MakeRadialBand(a, width);
+
+	  const double exact = Constants::TWO_PI * std::log(b / a);
+	  const double relative_error =
+		 std::abs(CurlCurlEnergy(*mesh) - exact) / exact;
+
+	  INFO("r_min/width = " << s);
+	  REQUIRE(relative_error < 1.0e-10);
+   }
+}
+
+// Below the documented ratio the rule is capped and only approximate. That is
+// a deliberate cost bound, not an accident: the tensor-product point count
+// grows quadratically in the order. Pinning the degradation here keeps the
+// published limit honest and detects any silent change to the cap.
+TEST_CASE("Curl-curl quadrature degrades only past its documented ratio",
+		  "[axisymmetric][quadrature]")
+{
+   const double width = 1.0;
+   const double s = 1.0e-3;
+   const double a = s * width;
+   auto mesh = MakeRadialBand(a, width);
+
+   const double exact = Constants::TWO_PI * std::log((a + width) / a);
+   const double relative_error =
+	  std::abs(CurlCurlEnergy(*mesh) - exact) / exact;
+
+   REQUIRE(s < AxisymmetricCurlCurlIntegrator::kResolvedRadiusRatio);
+   // Far better than the ~40% the basis-degree-only rule produced here, but
+   // short of the 1e-10 target, which is exactly what the warning reports.
+   REQUIRE(relative_error > 1.0e-10);
+   REQUIRE(relative_error < 1.0e-3);
 }
 
 TEST_CASE("Axisymmetric boundary load includes radial measure",
