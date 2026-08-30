@@ -10,7 +10,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <functional>
-#include "json.hpp"
+#include <nlohmann/json.hpp>
 #include "mfem.hpp"
 
 using json = nlohmann::json;

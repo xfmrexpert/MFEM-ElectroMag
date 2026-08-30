@@ -4,9 +4,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
-#include "../src/axisymmetric_curl_curl_integrator.hpp"
-#include "../src/axisymmetric_mesh.hpp"
-#include "../src/magnetic_field_coefficient.hpp"
+#include "axisymmetric_curl_curl_integrator.hpp"
+#include "axisymmetric_mesh.hpp"
+#include "magnetic_field_coefficient.hpp"
 
 #include <cmath>
 #include <memory>

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #pragma once
-#include "json.hpp" // nlohmann/json
+#include <nlohmann/json.hpp>
 #include "constants.hpp"
 #include "problem_config.hpp"
 #include <fstream>

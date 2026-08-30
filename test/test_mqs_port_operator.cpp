@@ -4,8 +4,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
-#include "../src/complex_block_layout.hpp"
-#include "../src/mqs_massive_port_operator.hpp"
+#include "complex_block_layout.hpp"
+#include "mqs_massive_port_operator.hpp"
 
 namespace {
 

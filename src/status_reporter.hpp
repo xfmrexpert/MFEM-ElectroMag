@@ -14,7 +14,7 @@
 #include <streambuf>
 #include <string>
 #include <utility>
-#include "json.hpp"
+#include <nlohmann/json.hpp>
 
 class StatusReporter {
 public:
