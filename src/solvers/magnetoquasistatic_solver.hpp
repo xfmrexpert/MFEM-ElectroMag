@@ -11,7 +11,7 @@
 #include <set>
 #include <sstream>
 #include "mfem.hpp"
-#include "physics_solver.hpp"
+#include "magnetic_solver.hpp"
 #include "../axisym/axisymmetric_curl_curl_integrator.hpp"
 #include "../axisym/axisymmetric_mass_integrator.hpp"
 #include "../axisym/axisymmetric_lf_integrator.hpp"
@@ -28,7 +28,7 @@
 #include "amr_support.hpp"
 #include "../linalg/sparse_direct_solver.hpp"
 
-class MagnetoquasistaticSolver : public PhysicsSolver {
+class MagnetoquasistaticSolver : public MagneticSolver {
     enum class ImprintMode { Field, CouplingPerturbation };
 
     double frequency = 0.0;
@@ -52,7 +52,6 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
 	mfem::real_t factored_omega = 0.0;
 
     // Coefficients
-    std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;
     std::unique_ptr<mfem::PWConstCoefficient> sigma_coeff;
     std::unique_ptr<mfem::PWConstCoefficient> j_coeff;     
     mfem::Vector conductivity_values;
@@ -471,7 +470,7 @@ public:
 
 public:
 	// Constructor deals only with initialization, no manual nullptr assignment needed
-	MagnetoquasistaticSolver(mfem::Mesh &m, const ProblemConfig &c) : PhysicsSolver(m, c) {}
+	MagnetoquasistaticSolver(mfem::Mesh &m, const ProblemConfig &c) : MagneticSolver(m, c) {}
 
 	void Setup() override {
         int order = config.Order;
@@ -512,17 +511,7 @@ public:
             DirichletClosureMarkers(closure_bcs);
         ess_bdr = EssentialBdrFrom(ess_markers);
 
-        // Axis regularity: the setup-time mesh inspection identifies a dedicated
-        // r=0 boundary attribute. Merge it into the essential marker so A_phi = 0.
-        if (geometry == GeometryType::Axisymmetric)
-        {
-            MFEM_VERIFY(ess_bdr.Size() == axisymmetric_mesh.axis_boundary.Size(),
-                "Axis boundary marker does not match the mesh boundary attributes.");
-            for (int i = 0; i < ess_bdr.Size(); ++i)
-            {
-                ess_bdr[i] = ess_bdr[i] || axisymmetric_mesh.axis_boundary[i];
-            }
-        }
+        ImposeAxisRegularity();
 
         // Build the FE space and everything bound to it for the starting mesh.
         BuildOperators();
@@ -620,17 +609,6 @@ public:
 		direct_solver.reset();
 		packed_matrix.reset();
 		factored_omega = 0.0;
-	}
-
-	mfem::BilinearFormIntegrator* MakeStiffnessIntegrator() {
-		if (geometry == GeometryType::Axisymmetric) {
-			auto* integ = new AxisymmetricCurlCurlIntegrator(
-				*nu_coeff, axisymmetric_mesh.tolerance);
-			return integ;
-		}
-		else {
-			return new mfem::DiffusionIntegrator(*nu_coeff);
-		}
 	}
 
 	mfem::BilinearFormIntegrator* MakeMassIntegrator() {
@@ -1034,25 +1012,6 @@ public:
         std::ostringstream stream;
         stream << std::setprecision(12) << value;
         return SafeOutputToken(stream.str());
-    }
-
-    mfem::Vector BuildTerminalCurrentDensity(
-        const std::string& terminal_name, double current) const {
-        const Terminal& term = config.Terminals.at(terminal_name);
-        const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
-        const double area = CalculateRegionArea(group.AttributeIds);
-        MFEM_VERIFY(area > 0.0,
-            "Current terminal '" + terminal_name + "' has zero cross-section.");
-
-        mfem::Vector current_density(mesh.attributes.Max());
-        current_density = 0.0;
-        const double density = current / area;
-        for (int attr : group.AttributeIds) {
-            if (attr > 0 && attr <= current_density.Size()) {
-                current_density[attr - 1] = density;
-            }
-        }
-        return current_density;
     }
 
     std::pair<double, double> ComputeStrandedFluxLinkage(

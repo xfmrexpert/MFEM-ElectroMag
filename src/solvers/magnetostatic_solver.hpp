@@ -9,7 +9,7 @@
 #include <sstream>
 
 #include "mfem.hpp"
-#include "physics_solver.hpp"
+#include "magnetic_solver.hpp"
 #include "../axisym/axisymmetric_curl_curl_integrator.hpp"
 #include "../axisym/axisymmetric_lf_integrator.hpp"
 #include "../coefficients/magnetic_field_coefficient.hpp"
@@ -18,7 +18,7 @@
 #include "../io/gmsh_results_writer.hpp"
 #include "../linalg/sparse_direct_solver.hpp"
 
-class MagnetostaticSolver : public PhysicsSolver
+class MagnetostaticSolver : public MagneticSolver
 {
 private:
 	enum class ImprintMode { Field, CouplingPerturbation };
@@ -26,7 +26,6 @@ private:
 	// Resources (order of declaration = order of destruction)
 	std::unique_ptr<mfem::GridFunction> A; // A_phi (axisym) or A_z (planar scalar)
 
-	std::unique_ptr<mfem::PWConstCoefficient> nu_coeff; // nu=1/mu (reluctivity)
 	std::unique_ptr<mfem::PWConstCoefficient> j_coeff; // J_phi (axisym) or J (planar scalar src)
 
 	std::unique_ptr<mfem::LinearForm> b;
@@ -46,7 +45,7 @@ private:
 	std::unique_ptr<mfem::DenseMatrix> L; // Inductance matrix (coupling matrix) for the current mesh
 
 public:
-	MagnetostaticSolver(mfem::Mesh& m, const ProblemConfig& c) : PhysicsSolver(m, c) {}
+	MagnetostaticSolver(mfem::Mesh& m, const ProblemConfig& c) : MagneticSolver(m, c) {}
 
 	void Setup() override
 	{
@@ -77,17 +76,7 @@ public:
 			DirichletClosureMarkers(closure_bcs);
 		ess_bdr = EssentialBdrFrom(ess_markers);
 
-		// Axis regularity: the setup-time mesh inspection identifies a dedicated
-		// r=0 boundary attribute. Merge it into the essential marker so A_phi = 0.
-		if (geometry == GeometryType::Axisymmetric)
-		{
-			MFEM_VERIFY(ess_bdr.Size() == axisymmetric_mesh.axis_boundary.Size(),
-				"Axis boundary marker does not match the mesh boundary attributes.");
-			for (int i = 0; i < ess_bdr.Size(); ++i)
-			{
-				ess_bdr[i] = ess_bdr[i] || axisymmetric_mesh.axis_boundary[i];
-			}
-		}
+		ImposeAxisRegularity();
 
 		// Build the FE space and everything bound to it for the starting mesh.
 		BuildOperators();
@@ -133,23 +122,6 @@ public:
 		auto* sp = dynamic_cast<mfem::SparseMatrix*>(A_op.Ptr());
 		MFEM_VERIFY(sp, "Expected a SparseMatrix operator from FormSystemMatrix.");
 		return *sp;
-	}
-
-	// Build the domain stiffness integrator matching the active geometry:
-	// axisymmetric curl-curl (curl (nu curl A) with the 2*pi*r measure / A * nu/r^2 term) or
-	// planar diffusion (nu * grad A * grad nu). A fresh instance is returned each call so the
-	// solve (owned by 'a') and AMR error estimator can own separate copies.
-	mfem::BilinearFormIntegrator* MakeStiffnessIntegrator() const {
-		if (geometry == GeometryType::Axisymmetric)
-		{
-			auto* integ = new AxisymmetricCurlCurlIntegrator(
-				*nu_coeff, axisymmetric_mesh.tolerance);
-			return integ;
-		}
-		else
-		{
-			return new mfem::DiffusionIntegrator(*nu_coeff);
-		}
 	}
 
 	// Estimate per-element error on the CURRENT mesh, folding every scenario /
@@ -393,27 +365,6 @@ private:
 
 		// Both integrators carry the full geometric measure, so this is webers.
 		return winding_functional * *A;
-	}
-
-	// Uniform current density I/area over the terminal's domain attributes,
-	// laid out per mesh attribute for a PWConstCoefficient.
-	mfem::Vector BuildTerminalCurrentDensity(
-		const std::string& terminal_name, double current) const {
-		const Terminal& term = config.Terminals.at(terminal_name);
-		const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
-		const double area = CalculateRegionArea(group.AttributeIds);
-		MFEM_VERIFY(area > 0.0,
-			"Current terminal '" + terminal_name + "' has zero cross-section.");
-
-		mfem::Vector current_density(mesh.attributes.Max());
-		current_density = 0.0;
-		const double density = current / area;
-		for (int attr : group.AttributeIds) {
-			if (attr > 0 && attr <= current_density.Size()) {
-				current_density[attr - 1] = density;
-			}
-		}
-		return current_density;
 	}
 
 	// Source current density for a scenario, summed over its excitations.
