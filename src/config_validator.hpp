@@ -448,6 +448,12 @@ private:
         }
         std::set<int> constrained_attributes;
 
+        // attribute -> entity group of the region that first claimed it. A domain
+        // attribute resolves to exactly one material (MaterialForAttr returns the
+        // first match), so a second claim would silently make the material depend
+        // on region declaration order.
+        std::map<int, std::string> attribute_owner;
+
         for (size_t i = 0; i < regions.size(); ++i) {
             const auto& reg = regions[i];
             std::string prefix = "regions[" + std::to_string(i) + "]";
@@ -465,6 +471,21 @@ private:
                 if (material_names.count(material_name) == 0) {
                     AddError(prefix + ".material", "Unknown material '" + material_name +
                              "'. No material with that name is declared");
+                }
+            }
+
+            if (reg.contains("entity_group") && reg["entity_group"].is_string()) {
+                const std::string group_name = reg["entity_group"];
+                for (int attribute : group_attributes(reg["entity_group"])) {
+                    auto [it, inserted] =
+                        attribute_owner.emplace(attribute, group_name);
+                    if (!inserted) {
+                        AddError(prefix + ".entity_group",
+                            "Domain attribute " + std::to_string(attribute) +
+                            " is already claimed by entity group '" + it->second +
+                            "'. Every domain attribute must have exactly one region, "
+                            "otherwise its material depends on region declaration order.");
+                    }
                 }
             }
 

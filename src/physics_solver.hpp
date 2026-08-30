@@ -196,9 +196,10 @@ protected:
         return out;
     }
 
-    // First region/material that claims a given domain attribute, or nullptr if
-    // none does. The single source of truth for attribute -> material resolution
-    // (used by MaterialVector and TerminalConductivity).
+    // Region/material that claims a given domain attribute, or nullptr if none
+    // does. The single source of truth for attribute -> material resolution (used
+    // by MaterialVector). Configuration validation rejects an attribute claimed by
+    // more than one region, so the match here is unique and order-independent.
     const Material* MaterialForAttr(int attr) const {
         for (const auto& region : config.Regions) {
             const EntityGroup& group = config.EntityGroups.at(region.EntityGroupName);

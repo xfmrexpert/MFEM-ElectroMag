@@ -268,6 +268,46 @@ TEST_CASE("ConfigValidator requires every meshed domain attribute to have a regi
 	}
 }
 
+TEST_CASE("ConfigValidator rejects a domain attribute claimed by two regions",
+		  "[config_validator][regions]") {
+	// Attribute -> material resolution returns the first matching region, so two
+	// regions claiming the same attribute would make the material silently depend
+	// on declaration order. That must be an error, not a silent first-wins.
+	SECTION("rejects a duplicate claim through a second entity group") {
+		json config = ValidConfig();
+		config["entity_groups"].push_back(
+			{{"name", "DomainAgain"}, {"dim", 2}, {"attribute_ids", {1}}});
+		config["materials"].push_back(
+			{{"name", "Other"}, {"properties", {{"epsilon_r", 5.0}}}});
+		config["regions"].push_back(
+			{{"entity_group", "DomainAgain"}, {"material", "Other"}});
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "regions[1].entity_group"));
+	}
+
+	SECTION("rejects two regions sharing one entity group") {
+		json config = ValidConfig();
+		config["regions"].push_back(config["regions"][0]);
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "regions[1].entity_group"));
+	}
+
+	SECTION("accepts disjoint regions") {
+		json config = ValidConfig();
+		config["entity_groups"].push_back(
+			{{"name", "Domain2"}, {"dim", 2}, {"attribute_ids", {2}}});
+		config["regions"].push_back(
+			{{"entity_group", "Domain2"}, {"material", "Dielectric"}});
+
+		ConfigValidator validator;
+		REQUIRE(validator.Validate(config));
+	}
+}
+
 TEST_CASE("ConfigValidator validates material names",
 		  "[config_validator][materials]") {
 	SECTION("requires a name") {
