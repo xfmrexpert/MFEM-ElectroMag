@@ -24,9 +24,15 @@ public:
    double Eval(mfem::ElementTransformation &T, 
                const mfem::IntegrationPoint &ip) override
    {
+      // GetGradient() evaluates at T's CURRENT integration point, which it reads
+      // back via T.GetIntPoint(). Binding ip here (as every built-in MFEM
+      // coefficient does) is what makes this Eval() honour its own argument
+      // instead of whatever point happened to be set last.
+      T.SetIntPoint(&ip);
+
       mfem::Vector grad(2);
       Phi->GetGradient(T, grad); // Returns (Er, Ez)
-      
+
       double mag_sq = grad * grad; // |E|^2
       double eps_val = Eps->Eval(T, ip);
 

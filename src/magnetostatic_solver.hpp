@@ -218,8 +218,7 @@ public:
 		if (mode == ImprintMode::Field) {
 			for (const auto& bc : config.BoundaryConditions) {
 				if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
-					const EntityGroup& group = config.EntityGroups.at(bc.EntityGroupName);
-					auto marker = MarkerFromAttrs(group.AttributeIds);
+					auto marker = MarkerFromGroup(bc.EntityGroupName);
 					mfem::ConstantCoefficient c(bc.Value);
 					A->ProjectBdrCoefficient(c, marker);
 				}

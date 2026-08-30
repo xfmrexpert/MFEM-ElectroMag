@@ -50,13 +50,24 @@ protected:
         return StatusReporter::Global();
     }
 
-    mfem::Array<int> MarkerFromAttrs(const std::vector<int>& attrs) const {
-        mfem::Array<int> m(mesh.bdr_attributes.Max());
-        m = 0;
-        for (int a : attrs) {
-            if (a > 0 && a <= m.Size()) m[a - 1] = 1;
+    // Publish the configuration's named entity groups into the mesh's own
+    // AttributeSets containers, so a group name resolves to a marker through
+    // MFEM rather than through bespoke marker-building code here.
+    //
+    // Each group is registered into BOTH containers because a group name alone
+    // does not say whether it denotes a surface (domain) or a curve (boundary)
+    // physical group, and a Gmsh model may legitimately reuse the same id for
+    // one of each. Only the ids the mesh actually carries in a given container
+    // are registered there, which (a) preserves the historical behaviour of
+    // silently ignoring ids that do not apply to the container being queried,
+    // and (b) keeps AttrToMarker's max-attribute assertion satisfied.
+    void RegisterEntityGroups() {
+        for (const auto& [name, group] : config.EntityGroups) {
+            RegisterGroup(mesh.bdr_attribute_sets, mesh.bdr_attributes,
+                          name, group.AttributeIds);
+            RegisterGroup(mesh.attribute_sets, mesh.attributes,
+                          name, group.AttributeIds);
         }
-        return m;
     }
 
     // Marker (1/0 over domain attributes) for a set of element attribute ids.
@@ -68,25 +79,59 @@ protected:
                                            const std::string& context) const {
         MFEM_VERIFY(!attrs.empty(),
             "No domain attribute ids are associated with " + context + ".");
-        mfem::Array<int> m(mesh.attributes.Max());
-        m = 0;
+        const int max_attr = mesh.attributes.Max();
+        mfem::Array<int> ids;
+        ids.Reserve(static_cast<int>(attrs.size()));
         for (int a : attrs) {
             const bool is_bdr_attr = mesh.bdr_attributes.Find(a) >= 0;
-            MFEM_VERIFY(a > 0 && a <= m.Size() && mesh.attributes.Find(a) >= 0,
+            MFEM_VERIFY(a > 0 && a <= max_attr && mesh.attributes.Find(a) >= 0,
                 "Domain attribute " + std::to_string(a) + " referenced by " +
                 context + " does not exist in the mesh (mesh domain attributes "
-                "run up to " + std::to_string(m.Size()) + ")." +
+                "run up to " + std::to_string(max_attr) + ")." +
                 (is_bdr_attr ? " It is a boundary attribute of this mesh; the "
                                "entity group most likely names a curve physical "
                                "group instead of the surface one." : ""));
-            m[a - 1] = 1;
+            ids.Append(a);
         }
-        return m;
+        return mfem::AttributeSets::AttrToMarker(max_attr, ids);
     }
 
-    // Marker (1/0 over bdr attributes) for a named entity group.
+    // Marker (1/0 over bdr attributes) for a named entity group. Resolved through
+    // the mesh's bdr_attribute_sets, populated once by RegisterEntityGroups().
     mfem::Array<int> MarkerFromGroup(const std::string& group_name) const {
-        return MarkerFromAttrs(config.EntityGroups.at(group_name).AttributeIds);
+        MFEM_VERIFY(config.EntityGroups.count(group_name) > 0,
+            "Unknown entity group '" + group_name + "'.");
+        return BoundaryMarker(group_name);
+    }
+
+    // Register only the ids that exist in @p mesh_attrs under @p name. An
+    // AttributeSet holding an id the container does not know about would trip
+    // AttrToMarker's max-attribute assertion at query time, and an empty set
+    // cannot be queried at all (Array::Max() on an empty array), so an
+    // all-foreign group is simply left unregistered; BoundaryMarker() then
+    // returns an all-zero marker, matching the previous behaviour.
+    static void RegisterGroup(mfem::AttributeSets& sets,
+                              const mfem::Array<int>& mesh_attrs,
+                              const std::string& name,
+                              const std::vector<int>& attrs) {
+        mfem::Array<int> present;
+        present.Reserve(static_cast<int>(attrs.size()));
+        for (int a : attrs) {
+            if (a > 0 && mesh_attrs.Find(a) >= 0) present.Append(a);
+        }
+        if (present.Size() == 0) return;
+        sets.SetAttributeSet(name, present);
+    }
+
+    // Boundary marker for a registered group name, or an all-zero marker when
+    // the group names no boundary attribute of this mesh.
+    mfem::Array<int> BoundaryMarker(const std::string& name) const {
+        if (!mesh.bdr_attribute_sets.AttributeSetExists(name)) {
+            mfem::Array<int> none(mesh.bdr_attributes.Max());
+            none = 0;
+            return none;
+        }
+        return mesh.bdr_attribute_sets.GetAttributeSetMarker(name);
     }
 
     std::vector<MarkedBoundaryCondition> BuildClosureBcs() const {
@@ -567,11 +612,10 @@ public:
     }
 
     double CalculateRegionArea(const std::vector<int>& attribute_ids) const {
-        mfem::Array<int> marker(mesh.attributes.Max());
-        marker = 0;
-        for (int attr : attribute_ids) {
-            if (attr > 0 && attr <= marker.Size()) marker[attr - 1] = 1;
-        }
+        // AddDomainIntegrator binds the marker by non-const reference, so it
+        // cannot be const here.
+        mfem::Array<int> marker =
+            DomainMarkerFromAttrs(attribute_ids, "a region area calculation");
         mfem::LinearForm area_form(fespace.get());
         mfem::ConstantCoefficient one(1.0);
 
@@ -583,7 +627,12 @@ public:
     }
 
 public:
-    PhysicsSolver(mfem::Mesh &m, const ProblemConfig &c) : mesh(m), config(c) {}
+    PhysicsSolver(mfem::Mesh &m, const ProblemConfig &c) : mesh(m), config(c) {
+        // Named groups become mesh attribute sets up front, before any Setup()
+        // asks for a marker. Attribute values are refinement-invariant, so this
+        // registration survives every AMR pass without being redone.
+        RegisterEntityGroups();
+    }
 
     // Virtual destructor is essential for unique_ptr polymorphism
     virtual ~PhysicsSolver() = default;
