@@ -8,7 +8,6 @@
 #include "mfem.hpp"
 #include "bordered_block_operator.hpp"
 #include "complex_block_layout.hpp"
-#include "dense_columns_operator.hpp"
 #include "owning_complex_block_operator.hpp"
 
 // The assembled time-harmonic MQS operator with massive-conductor port coupling.
@@ -34,7 +33,7 @@
 // This class owns only the MQS operator composition and its algebraic layout. It
 // does not own scenario vectors, finite-element fields, or linear-solver policy.
 // The wiring is delegated to reusable algebraic building blocks:
-//   - DenseColumnsOperator       : C, the rank-N_ports border from port loads.
+//   - mfem::DenseMatrix          : C, the rank-N_ports border from port loads.
 //   - BorderedBlockOperator      : the real [K, -C; -C^T, 0] and imaginary
 //                                  [omega M_sigma, 0; 0, -G_dc/omega] blocks.
 //   - OwningComplexBlockOperator : owns both blocks and the ComplexOperator.
@@ -104,7 +103,7 @@ public:
 		const std::vector<mfem::real_t>& conductances,
 		mfem::real_t omega)
 		: layout(n_dofs, static_cast<int>(port_loads.size())),
-		  port_loads(std::move(port_loads)),
+		  port_columns(n_dofs, static_cast<int>(port_loads.size())),
 		  stiffness(K), sigma_mass(M_sigma), conductances(conductances),
 		  active_omega(omega)
 	{
@@ -116,12 +115,16 @@ public:
 		std::unique_ptr<mfem::Operator> coupling;
 		if (layout.NPorts() > 0)
 		{
-			mfem::Array<mfem::Vector*> column_ptrs(layout.NPorts());
 			for (int p = 0; p < layout.NPorts(); ++p)
 			{
-				column_ptrs[p] = this->port_loads[p].get();
+				MFEM_VERIFY(port_loads[p] && port_loads[p]->Size() == n_dofs,
+							"Port load vector size must match the field DOF count.");
+				port_columns.SetCol(p, *port_loads[p]);
 			}
-			coupling = std::make_unique<DenseColumnsOperator>(layout.NDofs(), column_ptrs);
+			// A referencing view: the border action is DenseMatrix's own
+			// Mult/MultTranspose over the owned column storage.
+			coupling = std::make_unique<mfem::DenseMatrix>(
+				port_columns.Data(), n_dofs, layout.NPorts());
 		}
 
 		auto real_block = std::make_unique<BorderedBlockOperator>(
@@ -189,10 +192,9 @@ public:
 		mfem::SparseMatrix corner(n_ports, n_ports);
 		for (int p = 0; p < n_ports; ++p)
 		{
-			const mfem::Vector& column = *port_loads[p];
 			for (int d = 0; d < n; ++d)
 			{
-				const mfem::real_t value = column(d);
+				const mfem::real_t value = port_columns(d, p);
 				if (value == 0.0) { continue; }
 				minus_coupling.Add(d, p, -value);
 				minus_coupling_t.Add(p, d, -value);
@@ -244,10 +246,12 @@ public:
 	}
 
 private:
-	// complex_operator transitively references port_loads, so it is declared last
+	// complex_operator transitively references port_columns, so it is declared last
 	// and destroyed first. layout is independent and remains the size authority.
 	ComplexPortLayout layout;
-	std::vector<std::unique_ptr<mfem::Vector>> port_loads;
+	// Owned border storage C = [c_0 | ... | c_{N-1}]; the DenseMatrix inside
+	// complex_operator is a non-owning view over this data.
+	mfem::DenseMatrix port_columns;
 	// Referenced (not owned) field matrices, retained so the packed matrix can be
 	// reassembled at each new frequency.
 	mfem::SparseMatrix& stiffness;
