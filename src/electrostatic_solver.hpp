@@ -360,6 +360,7 @@ private:
 			return;
 		}
 
-		SaveCouplingMatrix(*C, "Capacitance Matrix [F]", "capacitance_matrix.csv");
+		SaveCouplingMatrix(*C, "Capacitance Matrix " + CouplingUnitLabel("F"),
+			"capacitance_matrix.csv");
 	}
 };

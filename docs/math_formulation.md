@@ -11,6 +11,32 @@ We use cylindrical coordinates `(r, z, φ)` where:
 
 For axisymmetric problems, all field quantities are independent of `φ` (`∂/∂φ = 0`).
 
+## Integration Measure and Output Units
+
+The two geometry modes differ only in the measure applied during assembly, and
+that difference propagates directly into the units of every extracted quantity.
+
+- **Axisymmetric.** Revolving the meridional `(r, z)` domain through the full
+  azimuthal angle gives the volume element `dV = 2*pi*r dr dz`, and the
+  meridional boundary element `2*pi*r ds`. Every axisymmetric integrator applies
+  this measure, so energies, charges, and flux linkages are absolute quantities
+  for the complete revolved body. Coupling matrices are therefore in farads,
+  henries, and ohms.
+
+- **Planar.** The model is translationally invariant in the out-of-plane
+  direction and represents an infinitely long structure. Assembly integrates
+  over the cross-section only, which is equivalent to taking a unit out-of-plane
+  depth. Extracted quantities are consequently **per unit length**: capacitance
+  in F/m, inductance in H/m, and resistance in Ohm/m. To obtain absolute values
+  for a structure of finite length `L`, multiply by `L` (valid only where end
+  effects are negligible, which is the assumption the planar model already
+  makes).
+
+No extrusion length is configurable, so planar results are always reported per
+unit length. Output labels reflect this: `PhysicsSolver::CouplingUnitLabel`
+appends `/m` in planar mode, so a written matrix is never ambiguous about which
+convention produced it.
+
 ## 1. Electrostatics
 
 ### Strong Form

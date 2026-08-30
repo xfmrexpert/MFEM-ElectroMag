@@ -362,7 +362,8 @@ public:
 			return;
 		}
 
-		SaveCouplingMatrix(*L, "Inductance Matrix [H]", "inductance_matrix.csv");
+		SaveCouplingMatrix(*L, "Inductance Matrix " + CouplingUnitLabel("H"),
+			"inductance_matrix.csv");
 	}
 
 private:

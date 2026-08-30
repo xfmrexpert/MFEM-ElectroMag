@@ -1450,6 +1450,46 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
     fs::remove(mesh_file);
 }
 
+// A planar model is translationally invariant out of plane and assembles over
+// the cross-section alone, i.e. a unit depth, so every extracted coupling
+// quantity is per unit length. Axisymmetric assembly carries the full 2*pi*r
+// measure and is absolute. The written labels must say which convention
+// produced the numbers, otherwise an F/m result reads as farads.
+TEST_CASE("Coupling matrix units distinguish planar from axisymmetric",
+          "[solvers][units][m6]") {
+    struct LabelProbe : PhysicsSolver {
+        using PhysicsSolver::PhysicsSolver;
+        using PhysicsSolver::CouplingUnitLabel;
+        using PhysicsSolver::geometry;
+        void Setup() override {}
+        void SaveAnalysis() override {}
+        FieldExportSet CollectExportFields() const override { return {}; }
+        void BuildOperators() override {}
+        void RunOnCurrentMesh() override {}
+        void EstimateCurrentSolutionError(mfem::Vector&) override {}
+        double ComputePeakFieldMagnitude() const override { return 0.0; }
+    };
+
+    mfem::Mesh mesh = mfem::Mesh::MakeCartesian2D(
+        1, 1, mfem::Element::QUADRILATERAL);
+    ProblemConfig config;
+    LabelProbe probe(mesh, config);
+
+    SECTION("planar results are reported per unit length") {
+        probe.geometry = GeometryType::Planar;
+        REQUIRE(probe.CouplingUnitLabel("F") == "[F/m]");
+        REQUIRE(probe.CouplingUnitLabel("H") == "[H/m]");
+        REQUIRE(probe.CouplingUnitLabel("Ohm") == "[Ohm/m]");
+    }
+
+    SECTION("axisymmetric results are absolute") {
+        probe.geometry = GeometryType::Axisymmetric;
+        REQUIRE(probe.CouplingUnitLabel("F") == "[F]");
+        REQUIRE(probe.CouplingUnitLabel("H") == "[H]");
+        REQUIRE(probe.CouplingUnitLabel("Ohm") == "[Ohm]");
+    }
+}
+
 TEST_CASE("Electrostatic coupling ignores fixed Neumann background",
           "[solvers][electrostatic][coupling][m2]") {
     const std::string mesh_file = "test_es_coupling_background.mesh";

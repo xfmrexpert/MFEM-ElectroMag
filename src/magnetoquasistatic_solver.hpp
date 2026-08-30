@@ -768,10 +768,12 @@ public:
                 output_tag += "_" + frequency_label;
             }
             SaveCouplingMatrix(*result.Inductance,
-                "Inductance Matrix at " + frequency_label + " [H]",
+                "Inductance Matrix at " + frequency_label + " " +
+                    CouplingUnitLabel("H"),
                 "inductance_matrix_" + output_tag + ".csv");
             SaveCouplingMatrix(*result.Resistance,
-                "Resistance Matrix at " + frequency_label + " [Ohm]",
+                "Resistance Matrix at " + frequency_label + " " +
+                    CouplingUnitLabel("Ohm"),
                 "resistance_matrix_" + output_tag + ".csv");
         }
 	}

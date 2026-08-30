@@ -631,6 +631,21 @@ public:
         return names;
     }
 
+    // Unit label for an extracted coupling quantity.
+    //
+    // Axisymmetric assembly carries the full revolved measure 2*pi*r dr dz, so
+    // the extracted quantity is absolute. Planar assembly integrates over the
+    // (x, y) cross-section only, which is equivalent to a unit out-of-plane
+    // depth: the model is translationally invariant in z and describes an
+    // infinitely long structure, so the result is a per-unit-length quantity.
+    // No extrusion length is configurable, so the planar label always carries
+    // the "/m" suffix rather than depending on a depth setting.
+    [[nodiscard]] std::string CouplingUnitLabel(const std::string& si_unit) const {
+        return geometry == GeometryType::Axisymmetric
+            ? "[" + si_unit + "]"
+            : "[" + si_unit + "/m]";
+    }
+
     // Shared coupling-matrix serialization: print a labeled table to the console
     // and write a CSV next to the mesh (same path convention as the field
     // writers). Each solver supplies the assembled matrix plus the human-readable
