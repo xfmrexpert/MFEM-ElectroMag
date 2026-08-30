@@ -36,6 +36,30 @@ inline bool IsOnAxisGeometry(double r, double tolerance)
    return std::abs(r) <= tolerance;
 }
 
+/**
+ * @brief Axial component of B = curl(A_phi e_phi), with the regular axis limit.
+ *
+ * Away from the axis this is the plain B_z = dA/dr + A_phi/r. Regularity forces
+ * A_phi -> 0 linearly as r -> 0, so l'Hopital gives the finite limit
+ * B_z -> 2 dA/dr on the axis instead of dividing by zero.
+ *
+ * The axis test uses the same scale-relative @p tolerance as the geometry
+ * classification in this header, so a coordinate that InspectMesh calls "on the
+ * axis" also takes the limit here. An exact `r == 0.0` test would leave a mesh
+ * whose axis nodes carry round-off evaluating `A_phi / r` at a near-zero radius,
+ * which is unbounded rather than merely inaccurate.
+ *
+ * Valid only for the constrained SOLUTION, never for individual basis functions
+ * before essential elimination: shape functions need not vanish on the axis, so
+ * no per-basis limit exists.
+ */
+inline double AxialFluxDensity(double A_phi, double dA_dr, double r,
+                               double tolerance)
+{
+   return IsOnAxisGeometry(r, tolerance) ? (2.0 * dA_dr)
+                                         : (dA_dr + A_phi / r);
+}
+
 /// How a mesh's radial extent relates to the symmetry axis.
 enum class AxisRelation
 {

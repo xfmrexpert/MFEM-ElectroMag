@@ -8,6 +8,7 @@
 
 #include "mfem.hpp"
 #include "axisymmetric_measure.hpp"
+#include "axisymmetric_mesh.hpp"
 
 /**
  * @brief Thread-safe axisymmetric curl-curl bilinear form integrator for magnetostatics
@@ -37,16 +38,23 @@
  *     the axis, so no per-basis limit exists. Regularity is a property of the
  *     constrained solution and is delivered by essential BC elimination.
  *   - Flux/energy recovery, which does see the constrained solution, uses the exact
- *     limit B_z -> 2 dA/dr on the axis (see ComputeElementFlux). MagneticFieldCoefficient
- *     applies the same limit for postprocessing; keep the two in step.
+ *     limit B_z -> 2 dA/dr on the axis (see ComputeElementFlux). Both that path and
+ *     MagneticFieldCoefficient call axisym::AxialFluxDensity with the mesh's
+ *     scale-relative axis tolerance, so recovery, postprocessing, and geometry
+ *     classification cannot disagree about what counts as the axis.
  */
 class AxisymmetricCurlCurlIntegrator : public mfem::BilinearFormIntegrator
 {
 public:
+   // @param axis_tolerance  Scale-relative radius below which flux recovery takes
+   //                        the axis limit; use axisym::MeshInfo::tolerance so the
+   //                        integrator shares the mesh's axis policy.
    explicit AxisymmetricCurlCurlIntegrator(
       mfem::Coefficient &reluctivity,
+      double axis_tolerance,
       const mfem::IntegrationRule *ir = nullptr)
-      : mfem::BilinearFormIntegrator(ir), nu_(&reluctivity)
+      : mfem::BilinearFormIntegrator(ir), nu_(&reluctivity),
+        axis_tolerance_(axis_tolerance)
    {
       MFEM_ASSERT(nu_ != nullptr, "Reluctivity coefficient cannot be null");
    }
@@ -206,15 +214,11 @@ public:
            const double r = pos(0);
            const double A_phi = shape * u;
 
-           // curl(A_phi e_phi) in the (r,z) component ordering. Regularity
-           // forces A_phi -> 0 linearly as r -> 0, so l'Hopital gives the
-           // finite limit B_z -> 2 dA/dr instead of dividing by zero. This is
-           // only valid for the constrained SOLUTION, never for individual
-           // basis functions before essential elimination.
+           // curl(A_phi e_phi) in the (r,z) component ordering, with the axis
+           // limit applied under the shared scale-relative tolerance.
            double B_r = -grad_phys(1);
-           double B_z = (r == 0.0)
-                            ? (2.0 * grad_phys(0))
-                            : (grad_phys(0) + A_phi / r);
+           double B_z = axisym::AxialFluxDensity(A_phi, grad_phys(0), r,
+                                                 axis_tolerance_);
 
            if (with_coef)
            {
@@ -304,5 +308,6 @@ protected:
 
 private:
    mfem::Coefficient *nu_;
+   double axis_tolerance_;
 };
 

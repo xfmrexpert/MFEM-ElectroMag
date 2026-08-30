@@ -142,7 +142,8 @@ public:
 	mfem::BilinearFormIntegrator* MakeStiffnessIntegrator() const {
 		if (geometry == GeometryType::Axisymmetric)
 		{
-			auto* integ = new AxisymmetricCurlCurlIntegrator(*nu_coeff);
+			auto* integ = new AxisymmetricCurlCurlIntegrator(
+				*nu_coeff, axisymmetric_mesh.tolerance);
 			return integ;
 		}
 		else
@@ -187,7 +188,7 @@ public:
 	double ComputePeakFieldMagnitude() const override {
 		if (!A) { return 0.0; }
 
-		MagneticFieldCoefficient B_axi(A.get());
+		MagneticFieldCoefficient B_axi(A.get(), axisymmetric_mesh.tolerance);
 		const bool axi = (geometry == GeometryType::Axisymmetric);
 
 		double peak = 0.0;
@@ -339,7 +340,8 @@ public:
 		fields.AddPrimaryScalar("A", *A);
 
 		if (geometry == GeometryType::Axisymmetric) {
-			fields.AddVector("B", std::make_unique<MagneticFieldCoefficient>(A.get()));
+			fields.AddVector("B", std::make_unique<MagneticFieldCoefficient>(
+				A.get(), axisymmetric_mesh.tolerance));
 		}
 		else {
 			fields.AddVector("B", std::make_unique<PlanarMagneticFieldCoefficient>(A.get()));

@@ -132,7 +132,7 @@ TEST_CASE("Axisymmetric curl-curl recovers B on a mesh touching the axis",
    A.ProjectCoefficient(exact_A);
 
    mfem::ConstantCoefficient one(1.0);
-   AxisymmetricCurlCurlIntegrator integrator(one);
+   AxisymmetricCurlCurlIntegrator integrator(one, info.tolerance);
 
    // A Gauss-Lobatto basis is used deliberately: the default Gauss-Legendre
    // nodes are strictly interior, so they would never land on r = 0 and the
@@ -192,7 +192,7 @@ TEST_CASE("MagneticFieldCoefficient agrees with the curl-curl flux on the axis",
    mfem::FunctionCoefficient exact_A(ExactA);
    A.ProjectCoefficient(exact_A);
 
-	  MagneticFieldCoefficient B(&A);
+	  MagneticFieldCoefficient B(&A, info.tolerance);
 
    mfem::Vector value(2);
    mfem::Vector pos(2);
@@ -219,3 +219,87 @@ TEST_CASE("MagneticFieldCoefficient agrees with the curl-curl flux on the axis",
    // reached and every remaining assertion would still pass.
    REQUIRE(sampled_axis);
 }
+
+TEST_CASE("Near-zero axis coordinates recover the same limit as exact zero",
+          "[axisymmetric][axis]")
+{
+   // Mesh generators emit axis coordinates with round-off, so a mesh that
+   // geometry classification calls "touching the axis" can have r = 1e-18
+   // rather than exactly 0. An exact r == 0.0 test in field recovery would then
+   // evaluate A_phi / r at a near-zero radius, which is unbounded rather than
+   // merely inaccurate. Recovery must use the same scale-relative axis policy
+   // as the classification.
+   auto mesh = MakeRadialMesh(4, 0.0);
+
+   // Perturb only the axis vertices, by far less than the mesh tolerance.
+   const double perturbation = 1.0e-18;
+   for (int v = 0; v < mesh->GetNV(); ++v)
+   {
+      double *vertex = mesh->GetVertex(v);
+      if (vertex[0] == 0.0) { vertex[0] = perturbation; }
+   }
+
+   const axisym::MeshInfo info = axisym::ValidateMesh(*mesh);
+   REQUIRE(info.TouchesAxis());
+   REQUIRE(info.min_r > 0.0);
+   REQUIRE(info.min_r < info.tolerance);
+
+   mfem::H1_FECollection collection(3, mesh->Dimension());
+   mfem::FiniteElementSpace space(mesh.get(), &collection);
+   mfem::GridFunction A(&space);
+   mfem::FunctionCoefficient exact_A(ExactA);
+   A.ProjectCoefficient(exact_A);
+
+   mfem::ConstantCoefficient one(1.0);
+   AxisymmetricCurlCurlIntegrator integrator(one, info.tolerance);
+   MagneticFieldCoefficient B(&A, info.tolerance);
+
+   mfem::L2_FECollection flux_collection(3, mesh->Dimension(),
+                                         mfem::BasisType::GaussLobatto);
+   mfem::FiniteElementSpace flux_space(mesh.get(), &flux_collection,
+                                       mesh->SpaceDimension());
+
+   bool sampled_axis = false;
+   mfem::Vector value(2);
+   mfem::Vector pos(2);
+
+   for (int e = 0; e < space.GetNE(); ++e)
+   {
+      mfem::Array<int> dofs;
+      space.GetElementDofs(e, dofs);
+      mfem::Vector u;
+      A.GetSubVector(dofs, u);
+
+      mfem::ElementTransformation &trans = *mesh->GetElementTransformation(e);
+      const mfem::FiniteElement &flux_fe = *flux_space.GetFE(e);
+      const mfem::IntegrationRule &nodes = flux_fe.GetNodes();
+
+      mfem::Vector flux;
+      integrator.ComputeElementFlux(*space.GetFE(e), trans, u, flux_fe, flux);
+
+      const int fnd = nodes.GetNPoints();
+      for (int i = 0; i < fnd; ++i)
+      {
+         const mfem::IntegrationPoint &ip = nodes.IntPoint(i);
+         trans.SetIntPoint(&ip);
+         trans.Transform(ip, pos);
+         const double r = pos(0);
+         const double z = pos(1);
+
+         if (info.IsOnAxisGeometry(r)) { sampled_axis = true; }
+
+         // The perturbation is negligible physically, so the exact-zero values
+         // remain the reference. Under an exact r == 0.0 test the axis nodes
+         // would instead produce values of order A_phi / 1e-18.
+         REQUIRE(flux(i) == Catch::Approx(ExactBr(r, z)).margin(1.0e-9));
+         REQUIRE(flux(fnd + i) == Catch::Approx(ExactBz(r, z)).margin(1.0e-9));
+
+         B.Eval(value, trans, ip);
+         REQUIRE(value(0) == Catch::Approx(ExactBr(r, z)).margin(1.0e-9));
+         REQUIRE(value(1) == Catch::Approx(ExactBz(r, z)).margin(1.0e-9));
+      }
+   }
+
+   REQUIRE(sampled_axis);
+}
+

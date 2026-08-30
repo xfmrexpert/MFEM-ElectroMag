@@ -102,8 +102,8 @@ void CheckAutomaticQuadrature(bool curved)
 		element, transformation, reference_matrix);
    REQUIRE(RelativeDifference(automatic_matrix, reference_matrix) < 1.0e-9);
 
-   AxisymmetricCurlCurlIntegrator automatic_curl(coefficient);
-	 AxisymmetricCurlCurlIntegrator reference_curl(coefficient);
+   AxisymmetricCurlCurlIntegrator automatic_curl(coefficient, 0.0);
+	 AxisymmetricCurlCurlIntegrator reference_curl(coefficient, 0.0);
    reference_curl.SetIntRule(&reference_rule);
    automatic_curl.AssembleElementMatrix(element, transformation, automatic_matrix);
    reference_curl.AssembleElementMatrix(element, transformation, reference_matrix);

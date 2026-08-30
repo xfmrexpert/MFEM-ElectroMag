@@ -4,20 +4,26 @@
 #pragma once
 
 #include "mfem.hpp"
+#include "axisymmetric_mesh.hpp"
 
 /**
  * @brief Computes B = Curl(A) in 2D Axisymmetry
  * B_r = -dA/dz
  * B_z = A/r + dA/dr, with the exact axis limit B_z -> 2 dA/dr at r = 0.
+ *
+ * The axis test is the mesh's scale-relative tolerance (axisym::MeshInfo),
+ * shared with geometry classification and with the curl-curl flux recovery, so
+ * all three agree on what counts as the axis.
  */
 class MagneticFieldCoefficient : public mfem::VectorCoefficient
 {
 private:
    mfem::GridFunction *A; // The solution (Magnetic Vector Potential)
+   double axis_tolerance;
 
 public:
-   explicit MagneticFieldCoefficient(mfem::GridFunction* a_gf)
-      : mfem::VectorCoefficient(2), A(a_gf) { }
+   MagneticFieldCoefficient(mfem::GridFunction* a_gf, double axis_tolerance)
+      : mfem::VectorCoefficient(2), A(a_gf), axis_tolerance(axis_tolerance) { }
 
    void Eval(mfem::Vector &B, mfem::ElementTransformation &T, 
              const mfem::IntegrationPoint &ip) override
@@ -35,11 +41,8 @@ public:
       A->GetGradient(T, grad_A);
 
       B.SetSize(2);
-      // Regularity forces A_phi -> 0 linearly as r -> 0, so l'Hopital gives
-      // the finite limit B_z -> 2 dA/dr on the axis.
       B(0) = -grad_A(1);
-      B(1) = (r == 0.0) ? (2.0 * grad_A(0))
-                        : (grad_A(0) + A_val / r);
+      B(1) = axisym::AxialFluxDensity(A_val, grad_A(0), r, axis_tolerance);
    }
 };
 

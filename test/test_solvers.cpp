@@ -1193,7 +1193,8 @@ mfem::Vector AxisymmetricCurlCurlErrors(
     mfem::H1_FECollection flux_fec(1, mesh.Dimension());
     mfem::FiniteElementSpace flux_fes(
         &mesh, &flux_fec, mesh.SpaceDimension());
-    AxisymmetricCurlCurlIntegrator integrator(coefficient);
+    AxisymmetricCurlCurlIntegrator integrator(
+        coefficient, axisym::InspectMesh(mesh).tolerance);
     mfem::ZienkiewiczZhuEstimator estimator(
         integrator, solution, flux_fes);
     estimator.SetWithCoeff(with_coefficient);
