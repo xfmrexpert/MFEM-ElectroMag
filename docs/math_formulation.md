@@ -15,6 +15,8 @@ For axisymmetric problems, all field quantities are independent of `φ` (`∂/�
 
 The two geometry modes differ only in the measure applied during assembly, and
 that difference propagates directly into the units of every extracted quantity.
+The full convention, including which `2*pi` factors are *not* part of the
+measure, is given under "Integration Measure Convention" below.
 
 - **Axisymmetric.** Revolving the meridional `(r, z)` domain through the full
   azimuthal angle gives the volume element `dV = 2*pi*r dr dz`, and the
@@ -44,7 +46,7 @@ convention produced it.
 The electrostatic problem solves for the electric potential `V(r,z)`:
 
 ```
--∇ · (ε ∇V) = ρ/ε₀
+-∇ · (ε ∇V) = ρ
 ```
 
 where:
@@ -53,6 +55,11 @@ where:
 - `ρ` is the space charge density [C/m³]
 - `ε₀ = 8.854 × 10⁻¹² F/m` is the permittivity of free space
 
+Note that the source term is `ρ`, not `ρ/ε₀`: the absolute permittivity `ε`
+already appears inside the divergence, so dividing by `ε₀` as well would be
+dimensionally inconsistent. (`ρ/ε₀` belongs to the homogeneous free-space form
+`-∇²V = ρ/ε₀`, which is a different equation.)
+
 ### Weak Form
 
 Find `V ∈ H¹` such that for all test functions `v`:
@@ -60,6 +67,11 @@ Find `V ∈ H¹` such that for all test functions `v`:
 ```
 ∫_Ω ε ∇V · ∇v dΩ = ∫_Ω ρ v dΩ + ∫_∂Ω g v dS
 ```
+
+**Implementation status:** no domain charge integrator is assembled, so the
+solver evaluates the source-free case `ρ = 0`, i.e. a Laplace problem driven
+entirely by terminal and boundary data. The `∫_Ω ρ v dΩ` term is retained above
+to document the complete formulation, not to describe present behavior.
 
 ### Axisymmetric Form
 
@@ -135,19 +147,53 @@ The curl of the azimuthal vector potential is:
 The weak form becomes:
 
 ```
-∫₀^{z_max} ∫₀^{r_max} ν [(∂A_φ/∂r)(∂v/∂r) + (∂A_φ/∂z)(∂v/∂z) + A_φ·v/r²] · 2πr dr dz
+∫₀^{z_max} ∫₀^{r_max} ν [(∂A_φ/∂z)(∂v/∂z)
+                         + (∂A_φ/∂r + A_φ/r)(∂v/∂r + v/r)] · 2πr dr dz
      = ∫₀^{z_max} ∫₀^{r_max} J_φ · v · 2πr dr dz
 ```
 
-### Singularity at r=0
+The second bracket must be kept as the full product. Expanding it gives
 
-Near the axis (`r → 0`), the term `A_φ/r` is potentially singular. However, for physical solutions, `A_φ → 0` as `r → 0`, and the limit:
+```
+(∂A_φ/∂r)(∂v/∂r) + (A_φ/r)(v/r) + (∂A_φ/∂r)(v/r) + (A_φ/r)(∂v/∂r)
+```
+
+and the last two cross terms are **not** negligible. Dropping them is only
+possible at the cost of a compensating boundary contribution, so the shortened
+form `(∂A_φ/∂r)(∂v/∂r) + A_φ·v/r²` is not equivalent.
+`AxisymmetricCurlCurlIntegrator` assembles the complete product.
+
+### Behavior at r = 0
+
+Two distinct questions are easy to conflate here, and the distinction determines
+what the code may legitimately do.
+
+**The constrained solution is regular.** Axis regularity forces `A_φ → 0`
+linearly as `r → 0`, so for the physical solution
 
 ```
 lim_{r→0} A_φ/r = ∂A_φ/∂r|_{r=0}
 ```
 
-exists and is finite. Our integrators handle this by substituting the derivative for the ratio when `r < tolerance`.
+exists and is finite, and the axial flux density has the exact limit
+`B_z → 2 ∂A_φ/∂r`.
+
+**Individual basis functions are not.** A single Lagrange shape function need
+not vanish at `r = 0`, so no such limit exists for it, and `∫ N_j N_k / r`
+genuinely diverges logarithmically for the shape functions that do not vanish
+there. There is nothing to substitute.
+
+Assembly therefore does **not** clamp or substitute anything. Standard interior
+quadrature keeps `r > 0` even on elements that touch the axis, so the `1/r` term
+is integrated as written. Regularity is delivered instead by essential-BC
+elimination of `A_φ = 0` on the axis, which removes exactly the divergent basis
+directions. The `B_z → 2 ∂A_φ/∂r` limit is applied only during field recovery
+(`ComputeElementFlux` and `MagneticFieldCoefficient`), which operates on the
+constrained solution where the limit is valid.
+
+Quadrature order for the `1/r` term is chosen from element geometry rather than
+basis degree; see `AxisymmetricCurlCurlIntegrator::RadialExtraOrder` and finding
+M5 in `docs/math_review_findings.md`.
 
 ### Derived Quantities
 
@@ -256,9 +302,36 @@ B⃗(t) = Re{B⃗ e^{jωt}} = B⃗_real cos(ωt) - B⃗_imag sin(ωt)
 ```
 
 **Power loss density (Joule heating):**
+
+The loss density is set by the total electric field in the conductor,
+`P = ½ σ |E⃗|²`. That field is not `-jωA⃗` everywhere:
+
+```
+E⃗ = E⃗_drive - jωA⃗
+```
+
+where `E⃗_drive` is the scalar-potential or port-drive contribution. Hence
+
+```
+P = ½ σ |E⃗_drive - jωA⃗|²
+```
+
+The frequently quoted simplification
+
 ```
 P = ½ σ ω² |A⃗|²
 ```
+
+is the special case `E⃗_drive = 0`. It is valid in induction-only regions, but
+**not** in massive or open-current regions, which are driven by a port and carry
+a nonzero `E⃗_drive`. Using the simplified form there omits the drive term and
+the cross term, and so misstates the loss.
+
+**Implementation status:** no Joule-loss quantity is currently computed or
+exported. The formulation is documented here so that any future implementation
+starts from the general expression rather than the special case. Consistency
+with the port extraction is the relevant check: `R = Re(V/I)` already accounts
+for the drive field, so a loss quantity must agree with `½ Re(V I*)`.
 
 ### Boundary Conditions
 
@@ -275,14 +348,21 @@ All three formulations use H¹-conforming (Lagrange) finite elements:
 
 - **Basis functions:** `φ_i(r, z)` with `C⁰` continuity
 - **Degrees of freedom:** Nodal values
-- **Integration:** Gauss quadrature with elevated order to handle the `1/r` and `2*pi*r` weight terms
+- **Integration:** Gauss quadrature with elevated order. The `2*pi*r` weight is
+  polynomial and raises the exact order by a fixed amount; the `1/r` term is not
+  polynomial and its cost depends on element geometry (see M5).
 
 ### Special Considerations for Axisymmetry
 
-1. **Axis handling:** Near `r = 0`, use L'Hopital's rule to evaluate `A/r` limits
+1. **Axis handling:** Assembly applies no limit or clamp at `r = 0`. Interior
+   quadrature keeps `r > 0`, and the `A_φ/r` limit is used only during field
+   recovery on the constrained solution. See "Behavior at r = 0" above for why
+   an assembly-time substitution would be invalid.
 2. **Integration weight:** Include the full `2*pi*r` factor in all volume integrals
-3. **Boundary conditions:** Electrostatic axis symmetry is natural, while the
-   magnetic `A_phi` formulation automatically enforces `A_phi = 0` on `r = 0`
+3. **Boundary conditions:** Electrostatic axis symmetry is natural. The magnetic
+   `A_phi` formulation does **not** enforce `A_phi = 0` automatically; the
+   condition is imposed as an essential BC on the detected axis boundary, and
+   doing so is what makes the `1/r` term well posed.
 
 ### Integration Measure Convention
 
@@ -318,3 +398,44 @@ abandoned: it required six separate scale factors at call sites (some multiplyin
 by `2*pi`, some dividing), left intermediate quantities in non-physical units,
 and was the direct cause of findings 1, 2, 3 and 5 in
 `docs/math_review_findings.md`.
+
+## Conventions and Recurring Pitfalls
+
+Points that the math review found easy to get wrong, recorded so they are not
+rediscovered. Each is enforced by a regression test.
+
+**Keep the documented form and the assembled form identical.** Several findings
+(D1-D4) were cases where the code was right and this document was wrong. A
+formulation document that drifts from the implementation is worse than none: it
+invites "fixing" correct code to match an incorrect description. When either
+changes, change both.
+
+**Do not describe unimplemented behavior in the present tense.** The `ρ` charge
+source (D1) and Joule loss (D4) are documented above but not assembled. Both now
+carry an explicit implementation-status note. Documenting the general form is
+useful; implying it runs is not.
+
+**Distinguish the solution from the basis functions.** This is the single most
+recurrent trap in the axisymmetric formulation. `A_φ/r` has a finite limit for
+the *constrained solution* but not for an *individual shape function*. Anything
+that holds only after essential-BC elimination belongs in post-processing, never
+in assembly. D3 and finding M4 were both this confusion.
+
+**Non-polynomial terms are not covered by a polynomial order rule.** The `1/r`
+factor's quadrature cost is governed by the element's geometric ratio
+`r_min/width`, not by basis degree. A degree-only heuristic is structurally
+blind to the hard case rather than merely loosely tuned (M5).
+
+**Carry the full physical measure everywhere.** Factoring a constant out of
+assembly and restoring it downstream is mathematically equivalent but was the
+direct cause of four separate findings. Intermediate quantities should be
+readable in SI units at every stage.
+
+**State the extrusion convention in any reported value.** Planar results are per
+unit length and axisymmetric results are absolute; identical numbers mean
+different things (M6). Units belong in the label, not in the reader's memory.
+
+**A quantity that cannot be computed accurately should say so.** Where the
+capped `1/r` quadrature rule cannot reach its accuracy target, the solver warns
+at setup with the offending element rather than silently returning a degraded
+result.
