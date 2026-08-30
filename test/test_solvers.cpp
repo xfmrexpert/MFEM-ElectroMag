@@ -2131,6 +2131,93 @@ TEST_CASE("Axisymmetric massive-port resistance matches the analytic DC value",
     fs::remove(mesh_file);
 }
 
+// Joule loss in the DC limit. Driving a massive port with current I and letting
+// the frequency go to zero makes the conductor a pure resistance, so the
+// time-averaged dissipation must approach the peak-phasor value
+//
+//     P = 0.5 * I^2 * R = I^2 / (2 * G_dc),   G_dc = sigma*h*ln(b/a)/(2*pi).
+//
+// This is the sharpest available check on the loss integral: it pins the factor
+// of 1/2 (the peak-phasor convention), the axisymmetric 2*pi*r volume measure,
+// and the physical 1/(2*pi*r) drive field at once, against a closed form that
+// involves none of the solver's internals. It would also catch the
+// tempting-but-wrong simplification P = 0.5*sigma*omega^2*|A|^2, which drops the
+// drive term and tends to zero with frequency instead of to I^2/(2*G_dc).
+TEST_CASE("MQS Joule loss matches the analytic DC value",
+          "[solvers][analytic][mqs][axisymmetric][loss]") {
+    const std::string mesh_file = "test_mqs_loss_dc.mesh";
+    constexpr double r_inner = 0.05;
+    constexpr double r_outer = 0.08;
+    constexpr double height = 0.02;
+    constexpr double conductivity = 1.0e5;
+    constexpr double frequency = 1.0e-3;
+    constexpr double current = 1.0;
+    CreateCoaxMesh(mesh_file, r_inner, r_outer, height, 24, 6);
+
+    json config{
+        {"simulation", {
+            {"physics_type", "magnetoquasistatics"},
+            {"mesh", mesh_file},
+            {"order", 2},
+            {"geometry_type", "axisymmetric"},
+            {"analysis_type", "field"},
+            {"solver_tolerance", 1e-14},
+            {"solver_max_iter", 4000},
+            {"solver_print_level", 0}
+        }},
+        {"entity_groups", json::array({
+            {{"name", "PortDomain"}, {"dim", 2}, {"attribute_ids", {1}}},
+            {{"name", "Outer"}, {"dim", 1}, {"attribute_ids", {2}}}
+        })},
+        {"regions", json::array({
+            {{"name", "Conductor"}, {"entity_group", "PortDomain"},
+             {"material", "Conductor"}}
+        })},
+        {"materials", json::array({
+            {{"name", "Conductor"},
+             {"properties", {{"mu_r", 1.0}, {"sigma", conductivity}}}}
+        })},
+        {"boundaries", json::array({
+            {{"name", "Outer"}, {"type", "Dirichlet"},
+             {"entity_group", "Outer"}, {"value", 0.0}}
+        })},
+        {"terminals", json::array({
+            {{"name", "Port"}, {"excitation_type", "current"},
+             {"conductor_type", "massive"}, {"entity_group", "PortDomain"}}
+        })},
+        {"scenarios", json::array({
+            {{"name", "dc"}, {"frequency", frequency},
+             {"excitations", json::array({
+                 {{"terminal", "Port"}, {"value", current}}
+             })}}
+        })}
+    };
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    const auto losses = solver.ComputeRegionLosses();
+    // Exactly one entry: the terminal and the region name the same metal, and
+    // an attribute must have a single reporting owner or the total double-counts.
+    REQUIRE(losses.size() == 1);
+    REQUIRE(losses[0].Name == "Port");
+
+    const double conductance = conductivity * height *
+        std::log(r_outer / r_inner) / Constants::TWO_PI;
+    const double expected_loss = current * current / (2.0 * conductance);
+
+    REQUIRE(losses[0].Power == Catch::Approx(expected_loss).epsilon(1e-4));
+
+    // An RMS-convention implementation would be exactly twice this, far outside
+    // the tolerance above; pin the convention explicitly.
+    REQUIRE(std::abs(losses[0].Power - 2.0 * expected_loss) >
+            0.1 * expected_loss);
+
+    fs::remove(mesh_file);
+}
+
 TEST_CASE("MQS heterogeneous massive-port conductance is piecewise and order independent",
           "[solvers][mqs][coupling][conductance]") {
     const std::string mesh_file = "test_mqs_heterogeneous_port.mesh";
@@ -2382,6 +2469,250 @@ TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
 
     fs::remove(resistance_file);
     fs::remove(inductance_file);
+    fs::remove(mesh_file);
+}
+
+// Loss in a conductor that owns no port unknown.
+//
+// A flux shield or a steel brace is neither a terminal nor an open-current
+// region, yet the sigma mass term induces eddy currents in it all the same, so
+// it dissipates real power while appearing in no coupling matrix. This is the
+// case that motivated reporting every region with sigma > 0 rather than only the
+// ported ones, and it is the easiest to get silently wrong: with no port there
+// is no drive amplitude to look up, so a missing-entry bug would surface as
+// garbage rather than as the physically correct zero.
+//
+// With E_drive = 0 the general expression collapses to the closed form
+// 0.5*sigma*omega^2*|A|^2, which is recomputed here directly from the exported
+// potential as an independent check on the integration path.
+TEST_CASE("MQS unported conductive region dissipates and is reported",
+          "[solvers][mqs][loss][regions][axisymmetric]") {
+    const std::string mesh_file = "test_mqs_unported_loss.mesh";
+    constexpr double frequency = 1000.0;
+    CreateShieldedTurnsMesh(mesh_file, /*r_min=*/0.05, /*r_max=*/0.20,
+                            /*height=*/0.04, /*nz=*/8, /*cells_per_band=*/8);
+
+    // Field analysis with one turn driven. The shield keeps the default
+    // current_constraint of "none", so it owns no voltage unknown at all.
+    json config = MakeShieldedTurnsConfig(mesh_file, frequency);
+    config["simulation"]["analysis_type"] = "field";
+    config["scenarios"] = json::array({
+        {{"name", "drive"}, {"frequency", frequency},
+         {"excitations", json::array({
+             {{"terminal", "TurnA"}, {"value", 1.0}}
+         })}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    const auto losses = solver.ComputeRegionLosses();
+
+    auto find = [&losses](const std::string& name) {
+        return std::find_if(losses.begin(), losses.end(),
+            [&name](const auto& l) { return l.Name == name; });
+    };
+
+    // The shield is reported even though it is not a terminal and not an
+    // open-current region. Regions carry no name of their own in the config, so
+    // they report under their entity group, matching how CollectMassivePorts
+    // names open-current region ports.
+    const auto shield = find("ShieldDomain");
+    REQUIRE(shield != losses.end());
+    REQUIRE(shield->Power > 0.0);
+
+    // Air has sigma = 0 and must not appear at all: no conductivity, no loss.
+    REQUIRE(find("AirDomain") == losses.end());
+
+    // Both driven turns are conductive and must be reported.
+    REQUIRE(find("TurnA") != losses.end());
+    REQUIRE(find("TurnB") != losses.end());
+
+    // With no port unknown the drive field is zero, so the shield's loss must
+    // equal the closed form 0.5*sigma*omega^2*|A|^2. Recomputing that directly
+    // from the solved potential exercises a different code path than
+    // IntegrateLossDensity and so is an independent check on the measure, the
+    // quadrature, and the zero-drive default all at once.
+    constexpr double aluminum_sigma = 3.5e7;
+    const double omega = Constants::TWO_PI * frequency;
+    const mfem::GridFunction& a_re = solver.GetSolutionReal();
+    const mfem::GridFunction& a_im = solver.GetSolutionImag();
+    mfem::Mesh& solved_mesh = *a_re.FESpace()->GetMesh();
+
+    double expected = 0.0;
+    for (int e = 0; e < solved_mesh.GetNE(); ++e) {
+        if (solved_mesh.GetAttribute(e) != 2) { continue; }  // ShieldDomain
+        mfem::ElementTransformation& T = *solved_mesh.GetElementTransformation(e);
+        const mfem::FiniteElement& fe = *a_re.FESpace()->GetFE(e);
+        const mfem::IntegrationRule& ir =
+            mfem::IntRules.Get(fe.GetGeomType(), 2 * fe.GetOrder() + T.OrderW() + 2);
+        for (int q = 0; q < ir.GetNPoints(); ++q) {
+            const mfem::IntegrationPoint& ip = ir.IntPoint(q);
+            T.SetIntPoint(&ip);
+            mfem::Vector pos;
+            T.Transform(ip, pos);
+            const double a2 = a_re.GetValue(T, ip) * a_re.GetValue(T, ip) +
+                              a_im.GetValue(T, ip) * a_im.GetValue(T, ip);
+            expected += 0.5 * aluminum_sigma * omega * omega * a2 *
+                        ip.weight * T.Weight() * Constants::TWO_PI * pos(0);
+        }
+    }
+
+    REQUIRE(shield->Power == Catch::Approx(expected).epsilon(1e-10));
+
+    fs::remove(mesh_file);
+}
+
+// Regions that must not report eddy loss, for two different reasons.
+//
+// A non-conducting region has sigma = 0 and physically cannot dissipate. A
+// stranded terminal is a modelling choice: it represents a bundle of fine
+// insulated strands carrying an imposed current, with eddy effects deliberately
+// not represented, so the field-based expression 0.5*sigma*|E|^2 does not
+// describe it even when the bulk material property is conductive. Applying the
+// formula there anyway would yield a plausible-looking number that is simply
+// wrong, which is the worst kind of error to ship.
+//
+// The stranded region here is given a genuinely nonzero conductivity on purpose.
+// Existing mixed-conductor fixtures set sigma = 0 for stranded material, which
+// would make this test pass for the wrong reason - the exclusion would be
+// indistinguishable from the trivial sigma = 0 case.
+TEST_CASE("MQS loss excludes non-conducting and stranded regions",
+          "[solvers][mqs][loss][exclusion]") {
+    const std::string mesh_file = "test_mqs_loss_exclusion.mesh";
+    CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 2, 1, 1);
+
+    json config = MakePlanarStripConfig(
+        "magnetoquasistatics", mesh_file, 1, {{"mu_r", 1.0}}, 0.0, 0.0);
+    config["simulation"]["analysis_type"] = "field";
+    config["entity_groups"].push_back(
+        {{"name", "StrandedDomain"}, {"dim", 2}, {"attribute_ids", {1}}});
+    config["entity_groups"].push_back(
+        {{"name", "MassiveDomain"}, {"dim", 2}, {"attribute_ids", {2}}});
+    config["materials"] = json::array({
+        // Conductive on purpose: only the stranded modelling choice, not a zero
+        // material property, may keep this region out of the loss report.
+        {{"name", "StrandedMaterial"},
+         {"properties", {{"mu_r", 1.0}, {"sigma", 1.0e6}}}},
+        {{"name", "MassiveMaterial"},
+         {"properties", {{"mu_r", 1.0}, {"sigma", 1.0e6}}}}
+    });
+    config["regions"] = json::array({
+        {{"name", "StrandedRegion"}, {"entity_group", "StrandedDomain"},
+         {"material", "StrandedMaterial"}},
+        {{"name", "MassiveRegion"}, {"entity_group", "MassiveDomain"},
+         {"material", "MassiveMaterial"}}
+    });
+    config["terminals"] = json::array({
+        {{"name", "Massive"}, {"excitation_type", "current"},
+         {"conductor_type", "massive"}, {"entity_group", "MassiveDomain"}},
+        {{"name", "Stranded"}, {"excitation_type", "current"},
+         {"conductor_type", "stranded"}, {"entity_group", "StrandedDomain"}}
+    });
+    config["scenarios"] = json::array({
+        {{"name", "drive"}, {"frequency", 1000.0},
+         {"excitations", json::array({
+             {{"terminal", "Massive"}, {"value", 1.0}}
+         })}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    const auto losses = solver.ComputeRegionLosses();
+    auto find = [&losses](const std::string& name) {
+        return std::find_if(losses.begin(), losses.end(),
+            [&name](const auto& l) { return l.Name == name; });
+    };
+
+    // The massive conductor dissipates and is reported.
+    const auto massive = find("Massive");
+    REQUIRE(massive != losses.end());
+    REQUIRE(massive->Power > 0.0);
+
+    // The stranded conductor is excluded despite sigma = 1e6, under either the
+    // terminal name or its entity group.
+    REQUIRE(find("Stranded") == losses.end());
+    REQUIRE(find("StrandedDomain") == losses.end());
+
+    fs::remove(mesh_file);
+}
+
+// Global power balance: the total dissipation integrated over the fields must
+// equal the real power delivered at the driven port,
+//
+//     sum_regions P = 0.5 * Re(sum_p V_p * conj(I_p)).
+//
+// This is the one check that ties the loss integral to the port equations, and
+// it is deliberately a whole-model assertion. The shield and the undriven turn
+// both dissipate while carrying zero net port current, so they contribute to the
+// left side and nothing to the right; a balance test that summed only the driven
+// region would fail for a reason that has nothing to do with correctness.
+//
+// The two sides discretize differently - one integrates a quadratic field
+// quantity, the other reads a solved port unknown - so they agree only to
+// discretization error rather than to round-off. The tolerance below was
+// measured on this mesh, not assumed.
+TEST_CASE("MQS total Joule loss balances the delivered port power",
+          "[solvers][mqs][loss][balance][axisymmetric]") {
+    const std::string mesh_file = "test_mqs_power_balance.mesh";
+    constexpr double frequency = 1000.0;
+    constexpr double current = 1.0;
+    CreateShieldedTurnsMesh(mesh_file, /*r_min=*/0.05, /*r_max=*/0.20,
+                            /*height=*/0.04, /*nz=*/8, /*cells_per_band=*/32);
+
+    json config = MakeShieldedTurnsConfig(mesh_file, frequency);
+    config["simulation"]["analysis_type"] = "field";
+    config["simulation"]["order"] = 2;
+    // The shield is left unconstrained, so it dissipates without owning a port.
+    config["scenarios"] = json::array({
+        {{"name", "drive"}, {"frequency", frequency},
+         {"excitations", json::array({
+             {{"terminal", "TurnA"}, {"value", current}}
+         })}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    double total_loss = 0.0;
+    for (const auto& loss : solver.ComputeRegionLosses()) {
+        REQUIRE(loss.Power >= 0.0);  // dissipation is never negative
+        total_loss += loss.Power;
+    }
+    REQUIRE(total_loss > 0.0);
+
+    // Only TurnA carries net current, so it is the sole source of real power.
+    // TurnB and the shield appear in total_loss but not here.
+    const auto [v_re, v_im] = solver.GetPortVoltage("TurnA");
+    const double delivered = 0.5 * v_re * current;
+
+    // Measured: the relative gap is 3.0e-3 on this mesh, falling to 7.4e-4 when
+    // the radial resolution is doubled - a factor of 4.0 for a 2x refinement,
+    // i.e. clean second-order convergence to exact balance. That convergence is
+    // what establishes the identity actually holds; the coarser mesh is kept
+    // here because the finer one costs about two minutes to solve. The bound
+    // sits just above the measured value so a real regression cannot hide in it.
+    REQUIRE(delivered == Catch::Approx(total_loss).epsilon(4.0e-3));
+
+    // The scope decision is load-bearing, not cosmetic. The shield and the
+    // undriven turn own no net port current, so restricting the total to the
+    // driven region alone must break the balance by far more than the bound
+    // above. Without this, the test would still pass if unported conductors
+    // were silently dropped from the total.
+    double driven_only = 0.0;
+    for (const auto& loss : solver.ComputeRegionLosses()) {
+        if (loss.Name == "TurnA") { driven_only = loss.Power; }
+    }
+    REQUIRE(driven_only > 0.0);
+    REQUIRE(std::abs(delivered - driven_only) > 0.01 * delivered);
+
     fs::remove(mesh_file);
 }
 

@@ -6,6 +6,7 @@
 #include <cctype>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <memory> // Required for smart pointers
 #include <set>
 #include <sstream>
@@ -16,6 +17,7 @@
 #include "axisymmetric_lf_integrator.hpp"
 #include "magnetic_field_coefficient.hpp"
 #include "complex_vector_magnitude_coefficient.hpp"
+#include "mqs_loss_density_coefficient.hpp"
 #include "constants.hpp"
 #include "boundary_validation.hpp"
 #include "problem_config.hpp"
@@ -70,6 +72,40 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
         std::string Name;
         std::vector<int> AttributeIds;
     };
+
+    // The ordered list of ports that own a voltage unknown.
+    //
+    // The ordering is a contract, not an implementation detail: the solved
+    // vectors Re_port_values / Im_port_values are indexed by position here, so
+    // anything mapping a solved voltage back to a region must agree with the
+    // order the operator was built from. It lives in one function for that
+    // reason; a second copy of this loop would be free to drift.
+    //
+    // Explicit massive terminals come first so their solved voltage indices
+    // retain terminal order. Passive open-current regions follow and receive an
+    // identically zero current RHS in every scenario.
+    //
+    // Conductive regions with no current constraint (a flux shield, a steel
+    // brace) are deliberately absent. They still carry eddy currents through the
+    // sigma mass term, but nothing constrains their net current, so they have no
+    // voltage unknown and their drive field is zero.
+    std::vector<MassivePortDefinition> CollectMassivePorts() const
+    {
+        std::vector<MassivePortDefinition> massive_ports;
+        massive_ports.reserve(config.Terminals.size() + config.Regions.size());
+        for (const auto& [term_name, term] : config.Terminals) {
+            if (term.Conductor != ConductorType::Massive) continue;
+            const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
+            massive_ports.push_back({ term_name, group.AttributeIds });
+        }
+        for (const Region& region : config.Regions) {
+            if (region.CurrentConstraint != RegionCurrentConstraint::Open) continue;
+            const EntityGroup& group = config.EntityGroups.at(region.EntityGroupName);
+            massive_ports.push_back({ region.EntityGroupName, group.AttributeIds });
+        }
+        return massive_ports;
+    }
+
     std::vector<CouplingResult> coupling_results;
     mfem::DenseMatrix* resistance_matrix = nullptr;
     mfem::DenseMatrix* inductance_matrix = nullptr;
@@ -173,8 +209,7 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
     }
 
     void ValidatePortConductivity(const MassivePortDefinition& port) const
-    {
-        for (int attr : port.AttributeIds) {
+    {        for (int attr : port.AttributeIds) {
             const Material* material = MaterialForAttr(attr);
             MFEM_VERIFY(material != nullptr,
                 "Massive port '" + port.Name + "' contains domain attribute " +
@@ -223,11 +258,222 @@ class MagnetoquasistaticSolver : public PhysicsSolver {
 		}
 	}
 
-public:
-    // Constructor deals only with initialization, no manual nullptr assignment needed
-    MagnetoquasistaticSolver(mfem::Mesh &m, const ProblemConfig &c) : PhysicsSolver(m, c) {}
+	// Per-attribute drive amplitudes from the solved port voltages, indexed by
+	// (attribute - 1) and sized to the mesh.
+	//
+	// The tables are zero-initialised and written only where a port unknown
+	// exists. That default is load-bearing rather than defensive: conductive
+	// regions with no current constraint (a flux shield, a steel brace) carry
+	// eddy currents through the sigma mass term but own no voltage unknown, so
+	// zero is their physically correct drive and the general loss expression
+	// collapses to 0.5*sigma*omega^2*|A|^2 for them with no special case.
+	//
+	// Ordering comes from CollectMassivePorts(), the same function the operator
+	// was built from, so voltage index p always refers to the same region here
+	// as it does there.
+	void BuildDriveTables(std::vector<double>& drive_re,
+						  std::vector<double>& drive_im) const {
+		const int n_attr = mesh.attributes.Max();
+		drive_re.assign(n_attr, 0.0);
+		drive_im.assign(n_attr, 0.0);
 
-    void Setup() override {
+		if (!Re_port_values || !Im_port_values) { return; }
+
+		const std::vector<MassivePortDefinition> massive_ports = CollectMassivePorts();
+		MFEM_VERIFY(static_cast<int>(massive_ports.size()) == Re_port_values->Size(),
+			"Massive port count (" + std::to_string(massive_ports.size()) +
+			") does not match the solved voltage count (" +
+			std::to_string(Re_port_values->Size()) +
+			"). The port ordering used for loss recovery has diverged from the "
+			"one the operator was assembled with.");
+
+		for (size_t p = 0; p < massive_ports.size(); ++p) {
+			for (int attr : massive_ports[p].AttributeIds) {
+				const int index = attr - 1;
+				if (index < 0 || index >= n_attr) { continue; }
+				drive_re[index] = (*Re_port_values)(static_cast<int>(p));
+				drive_im[index] = (*Im_port_values)(static_cast<int>(p));
+			}
+		}
+	}
+
+	public:
+	// One conductive region's dissipation, and the label under which it reports.
+	struct RegionLoss {
+		std::string Name;
+		double Power = 0.0;
+	};
+
+private:
+	// Element-wise integral of the loss density over the given attributes.
+	//
+	// The measure is applied here rather than borrowed from an existing
+	// integrator on purpose. The axisymmetric linear-form integrators size their
+	// quadrature for a piecewise-constant source, but this integrand is
+	// quadratic in A and, for a driven axisymmetric region, additionally carries
+	// 1/r and 1/r^2 terms from the drive field. Reusing a rule chosen for a
+	// different integrand is exactly the mismatch that finding M5 was about, so
+	// the order is raised explicitly for the quadratic density.
+	double IntegrateLossDensity(mfem::Coefficient& density,
+								const std::vector<int>& attrs) const {
+		std::set<int> wanted(attrs.begin(), attrs.end());
+		double total = 0.0;
+
+		for (int e = 0; e < mesh.GetNE(); ++e) {
+			if (wanted.find(mesh.GetAttribute(e)) == wanted.end()) { continue; }
+
+			mfem::ElementTransformation& T = *mesh.GetElementTransformation(e);
+			const mfem::FiniteElement& fe = *fespace->GetFE(e);
+			// Quadratic in the solution, plus the geometric measure.
+			const int order = 2 * fe.GetOrder() + T.OrderW() + 2;
+			const mfem::IntegrationRule& ir =
+				mfem::IntRules.Get(fe.GetGeomType(), order);
+
+			for (int q = 0; q < ir.GetNPoints(); ++q) {
+				const mfem::IntegrationPoint& ip = ir.IntPoint(q);
+				T.SetIntPoint(&ip);
+
+				double measure = ip.weight * T.Weight();
+				if (geometry == GeometryType::Axisymmetric) {
+					mfem::Vector pos;
+					T.Transform(ip, pos);
+					measure *= Axisymmetric::Measure(pos(0));
+				}
+				total += density.Eval(T, ip) * measure;
+			}
+		}
+		return total;
+	}
+
+	// Dissipation of every region that can dissipate.
+	//
+	// Membership is decided by sigma > 0, not by whether a region owns a port.
+	// The sigma mass term induces eddy currents in any conductive material, so a
+	// flux shield or a steel brace dissipates real power while appearing in no
+	// coupling matrix. Reporting only ported regions would produce a "total"
+	// that silently omits it.
+	//
+	// Stranded terminals are excluded: they model a bundle of fine insulated
+	// strands carrying an imposed current, with eddy effects deliberately not
+	// represented, so the field-based expression does not describe them.
+	//
+	// Public because the dissipated power is a result of the analysis in its own
+	// right, not an implementation detail of reporting.
+public:
+	// Solved complex vector potential. Exposed const so verification code can
+	// recompute derived quantities independently of the solver's own paths.
+	const mfem::GridFunction& GetSolutionReal() const { return A->real(); }
+	const mfem::GridFunction& GetSolutionImag() const { return A->imag(); }
+
+	// Solved complex voltage of a named massive port, as (real, imaginary).
+	//
+	// Looked up through CollectMassivePorts() so the index always refers to the
+	// same region the operator was assembled from.
+	std::pair<double, double> GetPortVoltage(const std::string& port_name) const {
+		MFEM_VERIFY(Re_port_values && Im_port_values,
+			"Port voltages are unavailable; solve before querying them.");
+		const std::vector<MassivePortDefinition> ports = CollectMassivePorts();
+		for (size_t p = 0; p < ports.size(); ++p) {
+			if (ports[p].Name != port_name) { continue; }
+			return { (*Re_port_values)(static_cast<int>(p)),
+					 (*Im_port_values)(static_cast<int>(p)) };
+		}
+		MFEM_ABORT("Unknown massive port '" + port_name + "'.");
+		return { 0.0, 0.0 };
+	}
+
+	std::vector<RegionLoss> ComputeRegionLosses() const {
+		std::vector<RegionLoss> losses;
+		if (!A || !sigma_coeff) { return losses; }
+
+		std::vector<double> drive_re, drive_im;
+		BuildDriveTables(drive_re, drive_im);
+		MqsLossDensityCoefficient density(
+			*sigma_coeff, A->real(), A->imag(), omega,
+			drive_re, drive_im,
+			geometry == GeometryType::Axisymmetric);
+
+		std::set<int> stranded_attrs;
+		for (const auto& [term_name, term] : config.Terminals) {
+			if (term.Conductor == ConductorType::Massive) { continue; }
+			const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
+			stranded_attrs.insert(group.AttributeIds.begin(), group.AttributeIds.end());
+		}
+
+		// Assign each conductive attribute exactly one reporting owner.
+		//
+		// Exclusive ownership is essential, not cosmetic: a terminal and a
+		// region routinely share an entity group (a massive port's conductor is
+		// usually also declared as a material region), so grouping by both names
+		// independently would integrate that attribute twice and double the
+		// reported total. Terminals win because they are the more specific
+		// description of the same metal.
+		std::map<int, std::string> attr_owner;
+		for (const Region& region : config.Regions) {
+			const EntityGroup& group = config.EntityGroups.at(region.EntityGroupName);
+			for (int attr : group.AttributeIds) {
+				attr_owner[attr] = region.EntityGroupName;
+			}
+		}
+		for (const auto& [term_name, term] : config.Terminals) {
+			if (term.Conductor != ConductorType::Massive) { continue; }
+			const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
+			for (int attr : group.AttributeIds) { attr_owner[attr] = term_name; }
+		}
+
+		// Conductive attributes that no terminal or region claims still
+		// dissipate; report them individually rather than dropping them.
+		for (int attr = 1; attr <= mesh.attributes.Max(); ++attr) {
+			if (attr_owner.count(attr) != 0) { continue; }
+			const Material* material = MaterialForAttr(attr);
+			if (material == nullptr || material->Conductivity <= 0.0) { continue; }
+			attr_owner[attr] = "attribute " + std::to_string(attr);
+		}
+
+		std::map<std::string, std::vector<int>> named_attrs;
+		for (const auto& [attr, name] : attr_owner) {
+			if (stranded_attrs.count(attr) != 0) { continue; }
+			const Material* material = MaterialForAttr(attr);
+			if (material == nullptr || material->Conductivity <= 0.0) { continue; }
+			named_attrs[name].push_back(attr);
+		}
+
+		for (const auto& [name, attrs] : named_attrs) {
+			losses.push_back({ name, IntegrateLossDensity(density, attrs) });
+		}
+		return losses;
+	}
+
+	private:
+		// Print per-region and total dissipation for the current solution.
+	//
+	// Reported only for field scenarios. Coupling runs drive synthetic unit
+	// currents one terminal at a time, so the loss of any single such column is
+	// not the loss of a physically realised operating point and printing it
+	// would invite the reader to add up numbers that never coexist.
+	void ReportRegionLosses() const {
+		const std::vector<RegionLoss> losses = ComputeRegionLosses();
+		if (losses.empty()) { return; }
+
+		const std::string unit = CouplingUnitLabel("W");
+		std::ostringstream out;
+		out << "Time-averaged Joule loss " << unit
+			<< " (peak-phasor convention):\n";
+		out << std::scientific << std::setprecision(6);
+		double total = 0.0;
+		for (const RegionLoss& loss : losses) {
+			out << "  " << loss.Name << ": " << loss.Power << "\n";
+			total += loss.Power;
+		}
+		out << "  total: " << total;
+		Reporter().Status(out.str());
+	}
+
+public:
+	// Constructor deals only with initialization, no manual nullptr assignment needed
+	MagnetoquasistaticSolver(mfem::Mesh &m, const ProblemConfig &c) : PhysicsSolver(m, c) {}
+
+	void Setup() override {
         int order = config.Order;
         const int dim = mesh.Dimension();
 
@@ -312,22 +558,8 @@ public:
 
         const int n_dofs = fespace->GetTrueVSize();
 
-        std::vector<MassivePortDefinition> massive_ports;
-        massive_ports.reserve(config.Terminals.size() + config.Regions.size());
-        for (const auto& [term_name, term] : config.Terminals) {
-            if (term.Conductor != ConductorType::Massive) continue;
-            const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
-            massive_ports.push_back({ term_name, group.AttributeIds });
-        }
-        for (const Region& region : config.Regions) {
-            if (region.CurrentConstraint != RegionCurrentConstraint::Open) continue;
-            const EntityGroup& group = config.EntityGroups.at(region.EntityGroupName);
-            massive_ports.push_back({ region.EntityGroupName, group.AttributeIds });
-        }
+        const std::vector<MassivePortDefinition> massive_ports = CollectMassivePorts();
 
-        // Explicit massive terminals come first so their solved voltage indices
-        // retain terminal order. Passive open-current regions follow and receive
-        // an identically zero current RHS in every scenario.
         std::vector<std::unique_ptr<mfem::Vector>> port_loads;
         port_loads.reserve(massive_ports.size());
         port_conductances.clear();
@@ -493,6 +725,7 @@ public:
                 ImprintScenario(scenario, ImprintMode::Field);
                 SolveSystem();
                 AccumulateScenarioError();
+                ReportRegionLosses();
                 SaveScenario(name);
             }
             return;
@@ -688,6 +921,18 @@ public:
 
 		fields.AddScalar("B_Magnitude",
 			std::make_unique<ComplexVectorMagnitudeCoefficient>(*b_re, *b_im));
+
+		// Time-averaged Joule loss density [W/m^3], defined over every
+		// conductive region rather than only the ported ones: the sigma mass
+		// term induces eddy currents wherever sigma > 0, so a shield or brace
+		// dissipates even though it owns no voltage unknown.
+		std::vector<double> drive_re, drive_im;
+		BuildDriveTables(drive_re, drive_im);
+		fields.AddScalar("P_Loss",
+			std::make_unique<MqsLossDensityCoefficient>(
+				*sigma_coeff, A->real(), A->imag(), omega,
+				std::move(drive_re), std::move(drive_im),
+				geometry == GeometryType::Axisymmetric));
 		return fields;
 	}
 

@@ -327,11 +327,47 @@ is the special case `E⃗_drive = 0`. It is valid in induction-only regions, but
 a nonzero `E⃗_drive`. Using the simplified form there omits the drive term and
 the cross term, and so misstates the loss.
 
-**Implementation status:** no Joule-loss quantity is currently computed or
-exported. The formulation is documented here so that any future implementation
-starts from the general expression rather than the special case. Consistency
-with the port extraction is the relevant check: `R = Re(V/I)` already accounts
-for the drive field, so a loss quantity must agree with `½ Re(V I*)`.
+**Implementation status:** implemented. `MqsLossDensityCoefficient`
+(`src/mqs_loss_density_coefficient.hpp`) evaluates the general expression above
+and is exported as the field `P_Loss`; `MagnetoquasistaticSolver::
+ComputeRegionLosses()` integrates it per region and reports per-region and total
+dissipation for field scenarios.
+
+**Phasor convention:** peak (amplitude), matching the common convention in
+commercial AC/DC and eddy-current tools. This is why the time-average factor `½`
+appears explicitly above, and it is consistent with the coupling extraction
+`R = Re(V/I)` and `L = Im(V/I)/ω`, which are amplitude ratios. Switching to RMS
+would change every reported loss by exactly a factor of two; three independent
+tests pin the convention.
+
+**Scope:** every region with `σ > 0` is reported, not only those owning a port
+unknown. The `jωσ` mass term induces eddy currents in any conductive material, so
+a flux shield or a steel brace dissipates real power while appearing in no
+coupling matrix. Regions are classified by the constraint they carry:
+
+| Region kind | Port unknown | `E⃗_drive` |
+|---|---|---|
+| Massive terminal | yes | solved port voltage |
+| `current_constraint: open` | yes (pins net current to zero) | solved voltage enforcing that constraint |
+| No constraint, `σ > 0` | none | zero |
+
+The per-attribute drive table is zero-initialised and written only where a port
+exists, so unported conductors reduce to the `P = ½ σ ω² |A⃗|²` special case
+through the general expression rather than through a separate code path. Note
+that this makes the "frequently quoted simplification" above exactly correct for
+unported conductors, and wrong only for driven ones.
+
+Stranded terminals are excluded: they model a bundle of fine insulated strands
+carrying an imposed current, with eddy effects deliberately not represented, so
+the field-based expression does not describe them even when the bulk material
+property is conductive.
+
+**Verification:** the DC limit gives `P → I²/(2 G_dc)` for a single massive port,
+and global power balance `Σ_regions P = ½ Re(Σ_p V_p I_p*)` holds to
+discretization error (measured relative gap 3.0e-3, falling to 7.4e-4 under 2×
+radial refinement — second-order convergence to exact balance). Unported and
+open-current regions dissipate while contributing no net port current, so they
+appear on the left of that identity and not the right.
 
 ### Boundary Conditions
 
@@ -411,9 +447,25 @@ invites "fixing" correct code to match an incorrect description. When either
 changes, change both.
 
 **Do not describe unimplemented behavior in the present tense.** The `ρ` charge
-source (D1) and Joule loss (D4) are documented above but not assembled. Both now
-carry an explicit implementation-status note. Documenting the general form is
-useful; implying it runs is not.
+source (D1) is documented above but not assembled, and carries an explicit
+implementation-status note. Joule loss (D4) was in the same state and is now
+implemented, so its note records what exists rather than what might. Documenting
+a general form is useful; implying it runs is not.
+
+**Report a physical quantity wherever it is physical, not only where the model
+names it.** Joule loss was initially scoped to terminals and open-current
+regions, which are the entities appearing in coupling matrices. That would have
+omitted flux shields and structural steel: they are conductive, the `jωσ` term
+already induces eddy currents in them, and they dissipate real power while owning
+no port unknown. The correct scope followed from what the operator actually
+assembles, not from how the model labels regions.
+
+**Give each mesh attribute exactly one reporting owner.** A terminal and a region
+routinely share an entity group, since a massive port's conductor is usually also
+declared as a material region. Aggregating per-region results by both names
+independently double-counts the shared attribute. The per-region values were
+individually correct while the total was exactly twice the truth, which is the
+kind of error that survives a casual review of the output.
 
 **Distinguish the solution from the basis functions.** This is the single most
 recurrent trap in the axisymmetric formulation. `A_φ/r` has a finite limit for
