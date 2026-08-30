@@ -171,43 +171,56 @@ public:
 	// must be rebuilt (and refactored) whenever SetOmega() changes the frequency.
 	std::unique_ptr<mfem::SparseMatrix> AssemblePackedMatrix() const
 	{
-		const int h = layout.HalfSize();
 		const int n = layout.NDofs();
-		auto packed = std::make_unique<mfem::SparseMatrix>(2 * h, 2 * h);
+		const int n_ports = layout.NPorts();
 
-		// Real diagonal blocks: R at (0,0) and (h,h).
-		AddSparseBlock(*packed, stiffness, 0, 0, 1.0);
-		AddSparseBlock(*packed, stiffness, h, h, 1.0);
+		mfem::Array<int> offsets(3);
+		offsets[0] = 0;
+		offsets[1] = n;
+		offsets[2] = n + n_ports;
 
-		// Imaginary blocks: -I at (0,h) and +I at (h,0). The sigma mass carries
-		// the omega scaling that ScaledReferenceOperator applies at Mult time.
-		AddSparseBlock(*packed, sigma_mass, 0, h, -active_omega);
-		AddSparseBlock(*packed, sigma_mass, h, 0, active_omega);
+		// The imaginary half carries the omega scaling that
+		// ScaledReferenceOperator applies at Mult time.
+		mfem::SparseMatrix scaled_mass(sigma_mass);
+		scaled_mass *= active_omega;
 
-		// Port border C occupies the field/port off-diagonals of R with sign -1,
-		// mirrored into both real diagonal blocks.
-		for (int p = 0; p < layout.NPorts(); ++p)
+		mfem::SparseMatrix minus_coupling(n, n_ports);
+		mfem::SparseMatrix minus_coupling_t(n_ports, n);
+		mfem::SparseMatrix corner(n_ports, n_ports);
+		for (int p = 0; p < n_ports; ++p)
 		{
 			const mfem::Vector& column = *port_loads[p];
 			for (int d = 0; d < n; ++d)
 			{
 				const mfem::real_t value = column(d);
 				if (value == 0.0) { continue; }
-				packed->Add(d, n + p, -value);
-				packed->Add(n + p, d, -value);
-				packed->Add(h + d, h + n + p, -value);
-				packed->Add(h + n + p, h + d, -value);
+				minus_coupling.Add(d, p, -value);
+				minus_coupling_t.Add(p, d, -value);
 			}
+			corner.Add(p, p, -conductances[p] / active_omega);
+		}
+		minus_coupling.Finalize();
+		minus_coupling_t.Finalize();
+		corner.Finalize();
 
-			// Conductance corner -G_dc/omega sits in the imaginary block only,
-			// so it lands in the two off-diagonal halves with opposite signs.
-			const mfem::real_t corner = -conductances[p] / active_omega;
-			packed->Add(n + p, h + n + p, -corner);
-			packed->Add(h + n + p, n + p, corner);
+		// R = [K, -C; -C^T, 0] and I = [omega*M_sigma, 0; 0, -G_dc/omega].
+		mfem::BlockMatrix real_blocks(offsets);
+		mfem::BlockMatrix imag_blocks(offsets);
+		real_blocks.SetBlock(0, 0, &stiffness);		imag_blocks.SetBlock(0, 0, &scaled_mass);
+		if (n_ports > 0)
+		{
+			real_blocks.SetBlock(0, 1, &minus_coupling);
+			real_blocks.SetBlock(1, 0, &minus_coupling_t);
+			imag_blocks.SetBlock(1, 1, &corner);
 		}
 
-		packed->Finalize();
-		return packed;
+		std::unique_ptr<mfem::SparseMatrix> real_half(real_blocks.CreateMonolithic());
+		std::unique_ptr<mfem::SparseMatrix> imag_half(imag_blocks.CreateMonolithic());
+
+		mfem::ComplexSparseMatrix complex_matrix(
+			real_half.get(), imag_half.get(), /*ownReal=*/false, /*ownImag=*/false,
+			mfem::ComplexOperator::HERMITIAN);
+		return std::unique_ptr<mfem::SparseMatrix>(complex_matrix.GetSystemMatrix());
 	}
 
 	mfem::ComplexOperator& Operator() { return complex_operator->GetOperator(); }
@@ -231,25 +244,6 @@ public:
 	}
 
 private:
-	// Scatter scale*block into `target` at the given row/column origin. The
-	// block is assumed finalized (CSR), which the SesquilinearForm guarantees.
-	static void AddSparseBlock(mfem::SparseMatrix& target,
-							   const mfem::SparseMatrix& block,
-							   int row_offset, int col_offset,
-							   mfem::real_t scale)
-	{
-		const int* I = block.GetI();
-		const int* J = block.GetJ();
-		const mfem::real_t* data = block.GetData();
-		for (int r = 0; r < block.Height(); ++r)
-		{
-			for (int k = I[r]; k < I[r + 1]; ++k)
-			{
-				target.Add(row_offset + r, col_offset + J[k], scale * data[k]);
-			}
-		}
-	}
-
 	// complex_operator transitively references port_loads, so it is declared last
 	// and destroyed first. layout is independent and remains the size authority.
 	ComplexPortLayout layout;
