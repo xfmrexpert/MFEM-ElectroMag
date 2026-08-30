@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 #include <catch2/catch_test_macros.hpp>
-#include "config_validator.hpp"
-#include "boundary_validation.hpp"
+#include "config/config_validator.hpp"
+#include "config/boundary_validation.hpp"
 #include <limits>
 
 namespace {

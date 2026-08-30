@@ -10,13 +10,13 @@
 
 #include "mfem.hpp"
 #include "physics_solver.hpp"
-#include "axisymmetric_curl_curl_integrator.hpp"
-#include "axisymmetric_lf_integrator.hpp"
-#include "magnetic_field_coefficient.hpp"
-#include "boundary_validation.hpp"
-#include "constants.hpp"
-#include "gmsh_results_writer.hpp"
-#include "sparse_direct_solver.hpp"
+#include "../axisym/axisymmetric_curl_curl_integrator.hpp"
+#include "../axisym/axisymmetric_lf_integrator.hpp"
+#include "../coefficients/magnetic_field_coefficient.hpp"
+#include "../config/boundary_validation.hpp"
+#include "../core/constants.hpp"
+#include "../io/gmsh_results_writer.hpp"
+#include "../linalg/sparse_direct_solver.hpp"
 
 class MagnetostaticSolver : public PhysicsSolver
 {

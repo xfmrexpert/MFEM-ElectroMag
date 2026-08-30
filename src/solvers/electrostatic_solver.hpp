@@ -9,11 +9,11 @@
 #include <vector>
 #include "mfem.hpp"
 #include "physics_solver.hpp"
-#include "axisymmetric_diffusion_integrator.hpp"
-#include "boundary_validation.hpp"
-#include "gmsh_results_writer.hpp"
+#include "../axisym/axisymmetric_diffusion_integrator.hpp"
+#include "../config/boundary_validation.hpp"
+#include "../io/gmsh_results_writer.hpp"
 #include "amr_support.hpp"
-#include "sparse_direct_solver.hpp"
+#include "../linalg/sparse_direct_solver.hpp"
 
 class ElectrostaticSolver : public PhysicsSolver {
 	enum class ImprintMode { Field, CouplingPerturbation };

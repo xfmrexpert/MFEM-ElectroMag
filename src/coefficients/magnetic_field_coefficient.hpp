@@ -4,7 +4,7 @@
 #pragma once
 
 #include "mfem.hpp"
-#include "axisymmetric_mesh.hpp"
+#include "../axisym/axisymmetric_mesh.hpp"
 
 /**
  * @brief Computes B = Curl(A) in 2D Axisymmetry

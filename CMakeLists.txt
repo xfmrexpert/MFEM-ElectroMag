@@ -100,8 +100,30 @@ add_library(eigen_headers INTERFACE)
 target_include_directories(eigen_headers SYSTEM INTERFACE ${eigen_SOURCE_DIR})
 target_compile_definitions(eigen_headers INTERFACE EIGEN_MPL2_ONLY)
 
+# nlohmann/json supplies the configuration parser. Fetched rather than vendored
+# so its version is pinned in one visible place, consistent with MFEM and Eigen.
+# JSON_DIAGNOSTICS/JSON_DIAGNOSTIC_POSITIONS include the JSON pointer path and
+# byte positions in exception messages so config errors (e.g. type_error.302)
+# point at the offending field/line. They are set here as INTERFACE definitions
+# on the target: the ABI tag depends on them, so carrying them with the target
+# keeps every linked TU consistent automatically.
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.12.0  # Matches the previously vendored src/json.hpp
+  GIT_PROGRESS   TRUE     # See MFEM block above for rationale.
+)
+FetchContent_MakeAvailable(nlohmann_json)
+target_compile_definitions(nlohmann_json
+    INTERFACE JSON_DIAGNOSTICS=1 JSON_DIAGNOSTIC_POSITIONS=1)
+
 add_executable(mfem-electromag src/main.cpp)
-target_link_libraries(mfem-electromag PRIVATE mfem eigen_headers)
+target_link_libraries(mfem-electromag PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json)
+
+# Project headers are included by bare name ("physics_solver.hpp"), so that
+# neither src/ nor test/ depends on the relative path between them.
+target_include_directories(mfem-electromag PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # Build identity banner: regenerate build_info.hpp on every build so a stale
 # executable is obvious at runtime. GenerateBuildInfo.cmake uses configure_file,
@@ -111,7 +133,7 @@ add_custom_target(build_info ALL
     COMMAND ${CMAKE_COMMAND}
         -DPROJECT_VERSION=${PROJECT_VERSION}
         -DGIT_DIR=${CMAKE_SOURCE_DIR}
-        -DSRC=${CMAKE_SOURCE_DIR}/src/build_info.hpp.in
+        -DSRC=${CMAKE_SOURCE_DIR}/src/io/build_info.hpp.in
         -DDST=${CMAKE_BINARY_DIR}/generated/build_info.hpp
         -P ${CMAKE_SOURCE_DIR}/cmake/GenerateBuildInfo.cmake
     BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/build_info.hpp
@@ -120,14 +142,6 @@ add_custom_target(build_info ALL
 )
 add_dependencies(mfem-electromag build_info)
 target_include_directories(mfem-electromag PRIVATE ${CMAKE_BINARY_DIR}/generated)
-
-# nlohmann/json diagnostics: include the JSON pointer path (JSON_DIAGNOSTICS)
-# and byte positions (JSON_DIAGNOSTIC_POSITIONS) in exception messages so
-# config errors (e.g. type_error.302) point at the offending field/line.
-# Must be defined for every TU that includes json.hpp; the ABI tag depends on
-# them, so keep them consistent across all targets that link together.
-set(JSON_DIAGNOSTIC_DEFS JSON_DIAGNOSTICS=1 JSON_DIAGNOSTIC_POSITIONS=1)
-target_compile_definitions(mfem-electromag PRIVATE ${JSON_DIAGNOSTIC_DEFS})
 
 # OpenMP support
 if(USE_OPENMP)
@@ -179,8 +193,8 @@ if(BUILD_TESTING)
         test/test_status_reporter.cpp
     )
 
-    target_link_libraries(mfem_tests PRIVATE mfem eigen_headers Catch2::Catch2WithMain)
-    target_compile_definitions(mfem_tests PRIVATE ${JSON_DIAGNOSTIC_DEFS})
+    target_link_libraries(mfem_tests PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json Catch2::Catch2WithMain)
+    target_include_directories(mfem_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
     # Register tests with CTest
     list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)

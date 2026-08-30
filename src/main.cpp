@@ -6,11 +6,11 @@
 #include <memory>
 #include <string>
 #include "build_info.hpp"
-#include "input_parser.hpp"
-#include "physics_solver.hpp"
-#include "solver_factory.hpp"
-#include "config_validator.hpp"
-#include "status_reporter.hpp"
+#include "config/input_parser.hpp"
+#include "solvers/physics_solver.hpp"
+#include "solvers/solver_factory.hpp"
+#include "config/config_validator.hpp"
+#include "io/status_reporter.hpp"
 
 namespace {
 

@@ -3,8 +3,8 @@
 
 #pragma once
 #include <nlohmann/json.hpp>
-#include "constants.hpp"
-#include "problem_config.hpp"
+#include "../core/constants.hpp"
+#include "../core/problem_config.hpp"
 #include <fstream>
 #include <iostream>
 #include <unordered_map>

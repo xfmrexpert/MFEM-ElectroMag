@@ -6,9 +6,9 @@
 #include <memory>
 #include <vector>
 #include "mfem.hpp"
-#include "bordered_block_operator.hpp"
-#include "complex_block_layout.hpp"
-#include "owning_complex_block_operator.hpp"
+#include "../linalg/bordered_block_operator.hpp"
+#include "../linalg/complex_block_layout.hpp"
+#include "../linalg/owning_complex_block_operator.hpp"
 
 // The assembled time-harmonic MQS operator with massive-conductor port coupling.
 // M_sigma is assembled once and scaled by the active omega at operator-application

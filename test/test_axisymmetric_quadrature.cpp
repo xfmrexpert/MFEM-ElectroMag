@@ -4,12 +4,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
-#include "axisymmetric_curl_curl_integrator.hpp"
-#include "axisymmetric_diffusion_integrator.hpp"
-#include "axisymmetric_lf_integrator.hpp"
-#include "axisymmetric_mass_integrator.hpp"
-#include "axisymmetric_boundary_lf_integrator.hpp"
-#include "constants.hpp"
+#include "axisym/axisymmetric_curl_curl_integrator.hpp"
+#include "axisym/axisymmetric_diffusion_integrator.hpp"
+#include "axisym/axisymmetric_lf_integrator.hpp"
+#include "axisym/axisymmetric_mass_integrator.hpp"
+#include "axisym/axisymmetric_boundary_lf_integrator.hpp"
+#include "core/constants.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -4,11 +4,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-#include "input_parser.hpp"
-#include "electrostatic_solver.hpp"
-#include "magnetostatic_solver.hpp"
-#include "magnetoquasistatic_solver.hpp"
-#include "solver_factory.hpp"
+#include "config/input_parser.hpp"
+#include "solvers/electrostatic_solver.hpp"
+#include "solvers/magnetostatic_solver.hpp"
+#include "solvers/magnetoquasistatic_solver.hpp"
+#include "solvers/solver_factory.hpp"
 #include <filesystem>
 #include <fstream>
 #include <sstream>

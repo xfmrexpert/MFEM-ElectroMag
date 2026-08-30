@@ -46,7 +46,7 @@
 #include <vector>
 
 #include "mfem.hpp"
-#include "constants.hpp"
+#include "../core/constants.hpp"
 
 class MqsLossDensityCoefficient : public mfem::Coefficient {
 public:

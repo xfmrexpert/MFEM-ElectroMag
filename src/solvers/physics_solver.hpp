@@ -8,16 +8,16 @@
 #include <list>
 #include <sstream>
 #include "mfem.hpp"
-#include "problem_config.hpp"
-#include "gmsh_results_writer.hpp"
-#include "field_export.hpp"
-#include "matrix_writer.hpp"
-#include "status_reporter.hpp"
+#include "../core/problem_config.hpp"
+#include "../io/gmsh_results_writer.hpp"
+#include "../io/field_export.hpp"
+#include "../io/matrix_writer.hpp"
+#include "../io/status_reporter.hpp"
 #include "amr_support.hpp"
-#include "axisymmetric_mesh.hpp"
-#include "axisymmetric_boundary_lf_integrator.hpp"
-#include "axisymmetric_curl_curl_integrator.hpp"
-#include "marked_boundary_condition.hpp"
+#include "../axisym/axisymmetric_mesh.hpp"
+#include "../axisym/axisymmetric_boundary_lf_integrator.hpp"
+#include "../axisym/axisymmetric_curl_curl_integrator.hpp"
+#include "../core/marked_boundary_condition.hpp"
 
 /**
  * @brief Base class for physics solvers using MFEM

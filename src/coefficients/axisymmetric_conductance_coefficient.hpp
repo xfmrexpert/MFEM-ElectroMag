@@ -1,7 +1,7 @@
 #pragma once
 
 #include "mfem.hpp"
-#include "constants.hpp"
+#include "../core/constants.hpp"
 
 // Custom coefficient for axisymmetric G_dc = sigma / (2 * pi * r)
 //

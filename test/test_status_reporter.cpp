@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include <catch2/catch_test_macros.hpp>
-#include "status_reporter.hpp"
+#include "io/status_reporter.hpp"
 
 #include <sstream>
 #include <stdexcept>

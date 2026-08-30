@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <string>
 #include <algorithm>
-#include "marked_boundary_condition.hpp"
+#include "../core/marked_boundary_condition.hpp"
 
 /// Validates that boundary constraints (closures + terminals) are well-posed.
 ///
