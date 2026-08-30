@@ -1701,6 +1701,124 @@ TEST_CASE("Magnetostatic solver reproduces the field of a uniform current slab",
     fs::remove(mesh_file);
 }
 
+// The magnetostatic energy had no independent benchmark: the existing analytic
+// test checks A and B pointwise, which cannot catch an error in the assembled
+// measure that cancels out of the field solution. This closes that gap by
+// checking the global energy against a closed form, and by deriving inductance
+// from it via a route that does not reuse the solver's own extraction.
+//
+// Same slab as the pointwise test: uniform J_z in a strip of width `length`
+// with A = 0 on both vertical faces, giving
+//     A(x)   = (mu0*J/2) x (L - x)
+//     B_y(x) = mu0*J (x - L/2)
+// Per unit depth and per unit height, the stored energy is
+//     W = (1/(2 mu0)) integral_0^L B_y^2 dx = mu0 J^2 L^3 / 24.
+TEST_CASE("Magnetostatic field energy matches the analytic slab value",
+          "[solvers][analytic][magnetostatic][energy]") {
+    const std::string mesh_file = "test_magnetostatic_energy.mesh";
+    constexpr double length = 0.1;
+    constexpr double height = 0.02;
+    constexpr double current_density = 2.0e6;
+    constexpr int nx = 24;
+    constexpr int ny = 2;
+    CreatePlanarStripMesh(mesh_file, length, height, nx, ny);
+
+    json config = MakePlanarStripConfig(
+        "magnetostatics", mesh_file, 2, {{"mu_r", 1.0}}, 0.0, 0.0);
+    config["terminals"] = json::array({
+        {{"name", "Current"}, {"excitation_type", "current"},
+         {"conductor_type", "stranded"}, {"entity_group", "Domain"}}
+    });
+    config["scenarios"][0]["excitations"] = json::array({
+        {{"terminal", "Current"}, {"value", current_density * length * height}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetostaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    const FieldExportSet fields = solver.CollectExportFields();
+
+    // W = (1/(2 mu)) integral |B|^2 dOmega over the meshed cross-section.
+    const double field_integral = IntegrateVectorMagnitudeSquared(fields, "B");
+    const double magnetic_energy = 0.5 * field_integral / Constants::MU_0;
+
+    // Closed form scaled by the meshed height (the model is per unit depth).
+    const double analytic_energy = Constants::MU_0 * current_density *
+        current_density * length * length * length * height / 24.0;
+
+    REQUIRE(magnetic_energy == Catch::Approx(analytic_energy).epsilon(1e-6));
+
+    // Inductance per unit depth from W = (1/2) L I^2, with the total current
+    // I = J * area. This is an independent route to L: it uses only the field
+    // energy, not the solver's flux-linkage extraction.
+    const double total_current = current_density * length * height;
+    const double energy_inductance =
+        2.0 * magnetic_energy / (total_current * total_current);
+    const double analytic_inductance =
+        2.0 * analytic_energy / (total_current * total_current);
+    REQUIRE(energy_inductance ==
+        Catch::Approx(analytic_inductance).epsilon(1e-6));
+    REQUIRE(energy_inductance > 0.0);
+
+    fs::remove(mesh_file);
+}
+
+// The magnetostatic Neumann sign had no analytic benchmark, so a sign flip in
+// the natural boundary term would have gone unnoticed. The natural BC for the
+// A_z formulation supplies nu * dA/dn on the boundary, and since
+// B = (dA/dy, -dA/dx), prescribing a positive outward value on the right-hand
+// face must produce a specific B sign, not merely a nonzero field.
+//
+// With nu*dA/dn = g on the right face, A = 0 on the left, and no source, the
+// solution is the linear field A = mu0*g*x, giving B_y = -mu0*g exactly.
+TEST_CASE("Magnetostatic solver applies natural-flux Neumann data with correct sign",
+          "[solvers][analytic][magnetostatic][neumann]") {
+    const std::string mesh_file = "test_magnetostatic_neumann.mesh";
+    constexpr double length = 0.2;
+    constexpr double height = 0.05;
+    constexpr double gradient = 3.0;
+    constexpr int nx = 8;
+    constexpr int ny = 2;
+    CreatePlanarStripMesh(mesh_file, length, height, nx, ny);
+
+    const double reluctivity = 1.0 / Constants::MU_0;
+    json config = MakePlanarStripConfig(
+        "magnetostatics", mesh_file, 1, {{"mu_r", 1.0}}, 0.0, 0.0);
+    config["boundaries"][1]["type"] = "Neumann";
+    config["boundaries"][1]["value"] = reluctivity * gradient;
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetostaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+
+    const FieldExportSet fields = solver.CollectExportFields();
+    const mfem::IntegrationPoint point = TriangleCenter();
+    const int element = 2 * (nx / 2);
+    const FieldExport& potential_field = FindField(fields, "A");
+    const mfem::Vector physical =
+        PhysicalPoint(*potential_field.primary, element, point);
+
+    REQUIRE(SamplePrimaryScalar(fields, "A", element, point) ==
+        Catch::Approx(gradient * physical(0)).epsilon(1.0e-7));
+
+    // B = (dA/dy, -dA/dx) for A = A_z(x, y). The negative sign on B_y is the
+    // property under test: a flipped natural term would leave the magnitude
+    // right and the sign wrong.
+    const mfem::Vector magnetic_field =
+        SampleDerivedVector(fields, "B", element, point);
+    REQUIRE(magnetic_field(0) == Catch::Approx(0.0).margin(1.0e-6));
+    REQUIRE(magnetic_field(1) == Catch::Approx(-gradient).epsilon(1.0e-7));
+
+    // A sign flip in the Neumann assembly reverses the field, so pin the
+    // orientation explicitly rather than relying on the tolerance above.
+    REQUIRE(magnetic_field(1) < 0.0);
+
+    fs::remove(mesh_file);
+}
+
 TEST_CASE("Magnetoquasistatic frequency sweep updates conducting-slab skin effect",
           "[solvers][analytic][mqs]") {
     const std::string mesh_file = "test_analytic_mqs.mesh";
@@ -1918,6 +2036,96 @@ TEST_CASE("MQS coupling ignores fixed Neumann background",
 
     RequireMatricesEqual(with_background.first, baseline.first);
     RequireMatricesEqual(with_background.second, baseline.second);
+    fs::remove(resistance_file);
+    fs::remove(inductance_file);
+    fs::remove(mesh_file);
+}
+
+// Axisymmetric massive-port DC resistance against a closed form. The planar
+// heterogeneous test pins the analogous planar value, but the axisymmetric
+// conductance path is different in kind: an azimuthal conductor carries
+// E_phi = V/(2*pi*r), so
+//     G_dc = integral sigma/(2*pi*r) dA
+//          = (sigma/(2*pi)) integral_a^b integral_0^h (1/r) dz dr
+//          = sigma*h*ln(b/a)/(2*pi),
+// and R -> 1/G_dc as the frequency tends to zero. That 1/r factor is physical
+// and deliberately NOT part of the 2*pi*r volume measure, so this test also
+// guards against the two being conflated. A frequency low enough that the skin
+// depth greatly exceeds the conductor thickness isolates the DC limit.
+TEST_CASE("Axisymmetric massive-port resistance matches the analytic DC value",
+          "[solvers][analytic][mqs][axisymmetric][conductance]") {
+    const std::string mesh_file = "test_mqs_axisym_dc_port.mesh";
+    const std::string inductance_file = "inductance_matrix_dc_0_001Hz.csv";
+    const std::string resistance_file = "resistance_matrix_dc_0_001Hz.csv";
+    constexpr double r_inner = 0.05;
+    constexpr double r_outer = 0.08;
+    constexpr double height = 0.02;
+    constexpr double conductivity = 1.0e5;
+    constexpr double frequency = 1.0e-3;
+    CreateCoaxMesh(mesh_file, r_inner, r_outer, height, 24, 6);
+
+    json config{
+        {"simulation", {
+            {"physics_type", "magnetoquasistatics"},
+            {"mesh", mesh_file},
+            {"order", 2},
+            {"geometry_type", "axisymmetric"},
+            {"analysis_type", "coupling_matrix"},
+            {"solver_tolerance", 1e-14},
+            {"solver_max_iter", 4000},
+            {"solver_print_level", 0}
+        }},
+        {"entity_groups", json::array({
+            {{"name", "PortDomain"}, {"dim", 2}, {"attribute_ids", {1}}},
+            {{"name", "Outer"}, {"dim", 1}, {"attribute_ids", {2}}}
+        })},
+        {"regions", json::array({
+            {{"name", "Conductor"}, {"entity_group", "PortDomain"},
+             {"material", "Conductor"}}
+        })},
+        {"materials", json::array({
+            {{"name", "Conductor"},
+             {"properties", {{"mu_r", 1.0}, {"sigma", conductivity}}}}
+        })},
+        {"boundaries", json::array({
+            {{"name", "Outer"}, {"type", "Dirichlet"},
+             {"entity_group", "Outer"}, {"value", 0.0}}
+        })},
+        {"terminals", json::array({
+            {{"name", "Port"}, {"excitation_type", "current"},
+             {"conductor_type", "massive"}, {"entity_group", "PortDomain"}}
+        })},
+        {"scenarios", json::array({
+            {{"name", "dc"}, {"frequency", frequency},
+             {"excitations", json::array()}}
+        })}
+    };
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+    solver.SaveAnalysis();
+
+    const CsvMatrix resistance = ReadCsvMatrix(resistance_file);
+    REQUIRE(resistance.labels == std::vector<std::string>{"Port"});
+    REQUIRE(resistance.values.size() == 1);
+
+    const double conductance = conductivity * height *
+        std::log(r_outer / r_inner) / Constants::TWO_PI;
+    const double expected_resistance = 1.0 / conductance;
+
+    REQUIRE(resistance.values[0][0] ==
+        Catch::Approx(expected_resistance).epsilon(1e-4));
+
+    // Guard against the 1/r factor being dropped: without it the conductance
+    // would be sigma*area/(2*pi*r_mid)-like and the resistance would differ by
+    // a factor well outside the tolerance above.
+    const double no_radial_weight_conductance =
+        conductivity * height * (r_outer - r_inner);
+    REQUIRE(std::abs(expected_resistance - 1.0 / no_radial_weight_conductance) >
+            1e-2 * expected_resistance);
+
     fs::remove(resistance_file);
     fs::remove(inductance_file);
     fs::remove(mesh_file);
