@@ -74,7 +74,7 @@ public:
 
 		for (const auto& f : fields.Fields()) {
 			switch (f.kind) {
-				case FieldExport::Kind::PrimaryScalar:
+				case FieldExport::Kind::Primary:
 					pv.RegisterField(f.name, f.primary);
 					break;
 				case FieldExport::Kind::DerivedScalar:
@@ -158,7 +158,14 @@ private:
 
 		for (const auto& f : fields.Fields()) {
 			switch (f.kind) {
-				case FieldExport::Kind::PrimaryScalar: {
+				case FieldExport::Kind::Primary: {
+					// This path resamples through a scalar coefficient, so it only
+					// handles scalar primaries. A vector-valued primary needs a
+					// vector view instead; fail loudly rather than silently
+					// exporting component 0.
+					MFEM_VERIFY(f.primary->VectorDim() == 1,
+						"Gmsh export of vector-valued primary field '" + f.name +
+						"' is not implemented.");
 					resampled.emplace_back(&fes_scalar);
 					mfem::GridFunctionCoefficient sc(f.primary);
 					resampled.back().ProjectCoefficient(sc);

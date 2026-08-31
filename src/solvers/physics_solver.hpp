@@ -28,7 +28,13 @@ protected:
 	mfem::Mesh& mesh;
 	ProblemConfig config;
 
-    std::unique_ptr<mfem::H1_FECollection>    fec;
+    // Held as the BASE collection type deliberately. Every solver currently
+    // builds an H1 space, but nothing in this class requires H1: the FE space
+    // constructor and GetOrder() are both base-class API. Naming the concrete
+    // type here would commit every present and future solver to a nodal scalar
+    // discretization, which is a formulation choice that belongs to the derived
+    // solver, not to the shared plumbing.
+    std::unique_ptr<mfem::FiniteElementCollection> fec;
     std::unique_ptr<mfem::FiniteElementSpace> fespace;
     GeometryType geometry = GeometryType::Planar;
     mfem::Array<int> ess_bdr;
@@ -319,19 +325,27 @@ protected:
         }
     }
 
-    double CalculateRegionArea(const std::vector<int>& attribute_ids) const {
+    // Integral of 1 over the given domain attributes, i.e. the measure of that
+    // region in the MESH's own dimension: length in 1D, area in 2D, volume in 3D.
+    //
+    // Note what this deliberately is NOT. It uses a plain DomainLFIntegrator, so
+    // it carries no axisymmetric r-weight: on an axisymmetric mesh it returns the
+    // r-z cross-section area, not the revolved volume 2*pi*Int(r dA). That is the
+    // right quantity for the current caller (a conductor cross-section feeding
+    // J = I/A) but it is the wrong quantity for anything that wants a true
+    // physical volume, which must integrate the axisymmetric weight instead.
+    double CalculateRegionMeasure(const std::vector<int>& attribute_ids) const {
         // AddDomainIntegrator binds the marker by non-const reference, so it
         // cannot be const here.
         mfem::Array<int> marker =
-            DomainMarkerFromAttrs(attribute_ids, "a region area calculation");
-        mfem::LinearForm area_form(fespace.get());
+            DomainMarkerFromAttrs(attribute_ids, "a region measure calculation");
+        mfem::LinearForm measure_form(fespace.get());
         mfem::ConstantCoefficient one(1.0);
 
-        area_form.AddDomainIntegrator(new mfem::DomainLFIntegrator(one), marker);
-        area_form.Assemble();
+        measure_form.AddDomainIntegrator(new mfem::DomainLFIntegrator(one), marker);
+        measure_form.Assemble();
 
-        double region_area = area_form.Sum();
-        return region_area;
+        return measure_form.Sum();
     }
 
     // Shared per-scenario serialization: recover the field set ONCE, then fan it

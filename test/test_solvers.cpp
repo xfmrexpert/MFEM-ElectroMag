@@ -800,7 +800,7 @@ mfem::Vector PhysicalPoint(const mfem::GridFunction& field, int element,
 double SamplePrimaryScalar(const FieldExportSet& fields, const std::string& name,
                            int element, const mfem::IntegrationPoint& point) {
     const FieldExport& field = FindField(fields, name);
-    REQUIRE(field.kind == FieldExport::Kind::PrimaryScalar);
+    REQUIRE(field.kind == FieldExport::Kind::Primary);
     return field.primary->GetValue(element, point);
 }
 
@@ -852,8 +852,8 @@ double RelativeComplexL2Error(
     const std::function<std::complex<double>(const mfem::Vector&)>& exact) {
     const FieldExport& real_field = FindField(fields, "A_Real");
     const FieldExport& imag_field = FindField(fields, "A_Imag");
-    REQUIRE(real_field.kind == FieldExport::Kind::PrimaryScalar);
-    REQUIRE(imag_field.kind == FieldExport::Kind::PrimaryScalar);
+    REQUIRE(real_field.kind == FieldExport::Kind::Primary);
+    REQUIRE(imag_field.kind == FieldExport::Kind::Primary);
 
     const mfem::FiniteElementSpace* space = real_field.primary->FESpace();
     double error_squared = 0.0;
@@ -2987,4 +2987,194 @@ TEST_CASE("AMR with multiple scenarios writes a shared conforming mesh", "[solve
     fs::remove(mesh_file);
     std::error_code ec;
     fs::remove_all(tmp_dir, ec);
+}
+
+// Axisymmetric open-boundary mesh: a fixed rectangular coil section (attribute
+// 2) embedded in air (attribute 1), surrounded by a pad of air out to the
+// truncation surface. Boundary attributes are assigned by geometry:
+// 1 = symmetry axis (r=0), 2 = outer radial surface (r=r_far),
+// 3 = top/bottom surfaces (z=+/-z_far).
+//
+// The cell layout inside the coil is FIXED regardless of the pad, and the air
+// cell SIZE is held constant by scaling the air cell count with the pad. Both
+// matter: holding the air cell count fixed instead would stretch the air
+// elements as the pad grows, so the discretization would coarsen in step with
+// the truncation distance and the two effects could not be told apart. With
+// cell size pinned, the only thing that changes between cases is how much air
+// separates the coil from the truncation surface.
+void CreateOpenCoilMesh(const std::string& filename,
+                        double r_coil_inner, double r_coil_outer,
+                        double z_coil_half, double pad) {
+    const double r_far = r_coil_outer + pad;
+    const double z_far = z_coil_half + pad;
+
+    // Air cells per unit length, matched to the coil band's own resolution.
+    constexpr int kAirCellsPerCoilRadius = 8;
+    const int pad_cells = static_cast<int>(
+        std::lround(kAirCellsPerCoilRadius * pad / r_coil_outer));
+
+    auto fill = [](std::vector<double>& out, double a, double b, int cells) {
+        for (int i = 1; i <= cells; ++i) {
+            out.push_back(a + (b - a) * static_cast<double>(i) / cells);
+        }
+    };
+
+    std::vector<double> r{0.0};
+    fill(r, 0.0, r_coil_inner, 4);
+    fill(r, r_coil_inner, r_coil_outer, 2);
+    fill(r, r_coil_outer, r_far, pad_cells);
+
+    std::vector<double> z{-z_far};
+    fill(z, -z_far, -z_coil_half, pad_cells);
+    fill(z, -z_coil_half, z_coil_half, 2);
+    fill(z, z_coil_half, z_far, pad_cells);
+
+    const int nr = static_cast<int>(r.size()) - 1;
+    const int nz = static_cast<int>(z.size()) - 1;
+    const int nvr = nr + 1;
+    auto vid = [nvr](int i, int j) { return j * nvr + i; };
+
+    std::ofstream m(filename);
+    m << "MFEM mesh v1.0\n\n";
+    m << "dimension\n2\n\n";
+
+    m << "elements\n" << (2 * nr * nz) << "\n";
+    for (int j = 0; j < nz; ++j) {
+        for (int i = 0; i < nr; ++i) {
+            const double rc = 0.5 * (r[i] + r[i + 1]);
+            const double zc = 0.5 * (z[j] + z[j + 1]);
+            const bool coil = rc > r_coil_inner && rc < r_coil_outer &&
+                              zc > -z_coil_half && zc < z_coil_half;
+            const int attribute = coil ? 2 : 1;
+            const int v00 = vid(i, j);
+            const int v10 = vid(i + 1, j);
+            const int v11 = vid(i + 1, j + 1);
+            const int v01 = vid(i, j + 1);
+            m << attribute << " 2 " << v00 << " " << v10 << " " << v11 << "\n";
+            m << attribute << " 2 " << v00 << " " << v11 << " " << v01 << "\n";
+        }
+    }
+    m << "\n";
+
+    std::vector<std::array<int, 3>> bdr; // {attr, va, vb}
+    for (int j = 0; j < nz; ++j) {
+        bdr.push_back({ 1, vid(0, j),  vid(0, j + 1) });
+        bdr.push_back({ 2, vid(nr, j), vid(nr, j + 1) });
+    }
+    for (int i = 0; i < nr; ++i) {
+        bdr.push_back({ 3, vid(i, 0),  vid(i + 1, 0) });
+        bdr.push_back({ 3, vid(i, nz), vid(i + 1, nz) });
+    }
+
+    m << "boundary\n" << bdr.size() << "\n";
+    for (const auto& b : bdr) {
+        m << b[0] << " 1 " << b[1] << " " << b[2] << "\n";
+    }
+    m << "\n";
+
+    m << "vertices\n" << (nvr * (nz + 1)) << "\n2\n";
+    for (int j = 0; j <= nz; ++j) {
+        for (int i = 0; i <= nr; ++i) {
+            m << r[i] << " " << z[j] << "\n";
+        }
+    }
+    m.close();
+}
+
+// The far-field truncation study that decides whether an absorbing (Robin)
+// boundary condition is worth building at all.
+//
+// An open-boundary model is currently approximated by placing a Dirichlet
+// A_phi = 0 surface at a finite distance. That surface forces the return flux
+// to close early, so it UNDERESTIMATES the self inductance; the error is a
+// property of the truncation distance, not of the mesh. Moving the surface
+// outward while holding the coil and its discretization fixed isolates it.
+//
+// The assertion is convergence rather than a fixed value: no closed form gives
+// the self inductance of a finite-section loop, and pinning a number here would
+// make the test a change detector instead of a physics check. What must hold is
+// that the sequence rises (flux is progressively less confined) and that the
+// increments shrink (the truncation error is actually converging). A run that
+// violated either would mean the far-field treatment is not converging at all,
+// which is the only result that would make an ABC mandatory rather than
+// optional.
+TEST_CASE("Magnetostatic far-field truncation error converges as the boundary recedes",
+          "[solvers][magnetostatic][axisymmetric][farfield][truncation]") {
+    constexpr double r_coil_inner = 0.02;
+    constexpr double r_coil_outer = 0.03;
+    constexpr double z_coil_half  = 0.005;
+    const std::string matrix_file = "inductance_matrix.csv";
+
+    auto self_inductance = [&](int index, double pad) {
+        const std::string mesh_file =
+            "test_ms_farfield_" + std::to_string(index) + ".mesh";
+        CreateOpenCoilMesh(mesh_file, r_coil_inner, r_coil_outer, z_coil_half, pad);
+
+        json config = json{
+            {"simulation", {
+                {"physics_type", "magnetostatics"},
+                {"mesh", mesh_file},
+                {"order", 1},
+                {"geometry_type", "axisymmetric"},
+                {"analysis_type", "coupling_matrix"},
+                {"solver_tolerance", 1e-12},
+                {"solver_max_iter", 4000},
+                {"solver_print_level", 0}
+            }},
+            {"entity_groups", json::array({
+                {{"name", "AirDomain"},  {"dim", 2}, {"attribute_ids", {1}}},
+                {{"name", "CoilDomain"}, {"dim", 2}, {"attribute_ids", {2}}},
+                {{"name", "FarField"},   {"dim", 1}, {"attribute_ids", {2, 3}}}
+            })},
+            {"regions", json::array({
+                {{"name", "Air"},  {"entity_group", "AirDomain"},  {"material", "Air"}},
+                {{"name", "Coil"}, {"entity_group", "CoilDomain"}, {"material", "Air"}}
+            })},
+            {"materials", json::array({
+                {{"name", "Air"}, {"properties", {{"mu_r", 1.0}}}}
+            })},
+            // The axis (attribute 1) is deliberately unassigned: A_phi = 0 there
+            // is imposed by the solver's axis regularity, not by an authored
+            // condition. Only the truncation surface is Dirichlet.
+            {"boundary_conditions", json::array({
+                {{"name", "FarField"}, {"type", "dirichlet"},
+                 {"entity_group", "FarField"}, {"value", 0.0}}
+            })},
+            {"terminals", json::array({
+                {{"name", "Coil"}, {"quantity", "current"},
+                 {"entity_group", "CoilDomain"}}
+            })},
+            {"scenarios", json::array({
+                {{"name", "unit"}, {"excitations", json::array()}}
+            })}
+        };
+
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        MagnetostaticSolver solver(mesh, DecodeConfig(config));
+        solver.Setup();
+        solver.Run();
+        solver.SaveAnalysis();
+
+        const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+        REQUIRE(matrix.labels == std::vector<std::string>{"Coil"});
+        fs::remove(mesh_file);
+        return matrix.values[0][0];
+    };
+
+    const double near = self_inductance(0, 1.0 * r_coil_outer);
+    const double mid  = self_inductance(1, 2.0 * r_coil_outer);
+    const double far  = self_inductance(2, 4.0 * r_coil_outer);
+
+    // Reported so the test doubles as the measurement: this is the number that
+    // says whether Dirichlet-at-distance is good enough for a given model.
+    const double truncation_error = (far - near) / far;
+    INFO("L(pad=1x) = " << near << ", L(pad=2x) = " << mid << ", L(pad=4x) = " << far
+         << "; tightest-truncation relative error = " << truncation_error);
+
+    REQUIRE(near > 0.0);
+    REQUIRE(mid > near);
+    REQUIRE(far > mid);
+    REQUIRE((far - mid) < (mid - near));
+
+    fs::remove(matrix_file);
 }

@@ -7,8 +7,11 @@
 // (field_writers.hpp) that decide HOW to sample/serialize it.
 //
 // A field is one of:
-//   - PrimaryScalar: a solution GridFunction, borrowed. Writers that can render
-//     it at native (high) order do so (ParaView); others resample.
+//   - Primary: a solution GridFunction, borrowed. Writers that can render it at
+//     native (high) order do so (ParaView); others resample. The descriptor
+//     names the field's ROLE, not its representation: a GridFunction may be
+//     scalar or vector-valued (VDim > 1), and writers must branch on the
+//     GridFunction rather than on the Kind to tell them apart.
 //   - DerivedScalar:  a scalar Coefficient (material property, |B|, ...).
 //   - DerivedVector:  a vector Coefficient (E = -grad V, B = curl A, ...).
 //
@@ -30,11 +33,11 @@
 #include "mfem.hpp"
 
 struct FieldExport {
-	enum class Kind { PrimaryScalar, DerivedScalar, DerivedVector };
+	enum class Kind { Primary, DerivedScalar, DerivedVector };
 
 	Kind        kind;
 	std::string name;
-	mfem::GridFunction*      primary = nullptr; // PrimaryScalar: borrowed solution GF
+	mfem::GridFunction*      primary = nullptr; // Primary: borrowed solution GF
 	mfem::Coefficient*       scalar  = nullptr; // DerivedScalar
 	mfem::VectorCoefficient* vector  = nullptr; // DerivedVector
 };
@@ -42,9 +45,9 @@ struct FieldExport {
 class FieldExportSet {
 public:
 	// A borrowed solution GridFunction. Caller guarantees it outlives the write.
-	void AddPrimaryScalar(std::string name, mfem::GridFunction& gf) {
+	void AddPrimary(std::string name, mfem::GridFunction& gf) {
 		fields_.push_back(
-			{ FieldExport::Kind::PrimaryScalar, std::move(name), &gf, nullptr, nullptr });
+			{ FieldExport::Kind::Primary, std::move(name), &gf, nullptr, nullptr });
 	}
 
 	// A derived scalar field; the set takes ownership of the coefficient and

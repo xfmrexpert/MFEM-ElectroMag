@@ -132,6 +132,14 @@ public:
 
 		// Snapshot the UNCONSTRAINED stiffness matrix (used for charge Q = K0*x)
 		// before FormSystemMatrix eliminates the essential DOFs from a's SpMat.
+		//
+		// INVARIANT: K0 must contain the DOMAIN stiffness and nothing else. The
+		// charge extraction Q = K0*x is Gauss's law over the volume; a boundary
+		// term added to `a` is part of the operator but not part of that
+		// relation, so it would silently shift every extracted charge and
+		// capacitance with no error and no failing assertion. Any future
+		// boundary contribution (a Robin/impedance condition being the likely
+		// one) must therefore be added to `a` AFTER this snapshot, never before.
 		K0 = std::make_unique<mfem::SparseMatrix>(a->SpMat());
 
 		// Linear Form (RHS)
@@ -307,7 +315,7 @@ public:
 	// per-region permittivity. Serialization is handled by the base class.
 	FieldExportSet CollectExportFields() const override {
 		FieldExportSet fields;
-		fields.AddPrimaryScalar("V", *x);
+		fields.AddPrimary("V", *x);
 
 		auto grad = std::make_unique<mfem::GradientGridFunctionCoefficient>(x.get());
 		auto& grad_ref = fields.Own(std::move(grad));

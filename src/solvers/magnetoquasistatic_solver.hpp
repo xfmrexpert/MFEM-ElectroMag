@@ -873,8 +873,8 @@ public:
 	// base class.
 	FieldExportSet CollectExportFields() const override {
 		FieldExportSet fields;
-		fields.AddPrimaryScalar("A_Real", A->real());
-		fields.AddPrimaryScalar("A_Imag", A->imag());
+		fields.AddPrimary("A_Real", A->real());
+		fields.AddPrimary("A_Imag", A->imag());
 
 		mfem::VectorCoefficient* b_re;
 		mfem::VectorCoefficient* b_im;

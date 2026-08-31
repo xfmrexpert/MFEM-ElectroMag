@@ -185,11 +185,17 @@ protected:
 
 	// Uniform current density I/area over the terminal's domain attributes,
 	// laid out per mesh attribute for a PWConstCoefficient.
+	//
+	// This is a 2D-reduction relation. The terminal region is a conductor
+	// CROSS-SECTION here, so its measure is an area and I/area is a current
+	// density. In a full 3D model the same attributes would bound a volume, whose
+	// measure is not a cross-section, and the current would have to be given a
+	// direction as well as a magnitude; this scalar form does not generalize.
 	mfem::Vector BuildTerminalCurrentDensity(
 		const std::string& terminal_name, double current) const {
 		const Terminal& term = config.Terminals.at(terminal_name);
 		const EntityGroup& group = config.EntityGroups.at(term.EntityGroupName);
-		const double area = CalculateRegionArea(group.AttributeIds);
+		const double area = CalculateRegionMeasure(group.AttributeIds);
 		MFEM_VERIFY(area > 0.0,
 			"Current terminal '" + terminal_name + "' has zero cross-section.");
 

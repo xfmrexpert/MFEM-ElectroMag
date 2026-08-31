@@ -301,7 +301,7 @@ public:
 	FieldExportSet CollectExportFields() const override
 	{
 		FieldExportSet fields;
-		fields.AddPrimaryScalar("A", *A);
+		fields.AddPrimary("A", *A);
 
 		if (geometry == GeometryType::Axisymmetric) {
 			fields.AddVector("B", std::make_unique<MagneticFieldCoefficient>(
