@@ -13,7 +13,7 @@
 #include <algorithm>
 #include "../core/marked_boundary_condition.hpp"
 
-/// Validates that boundary constraints (closures + terminals) are well-posed.
+/// Validates that boundary constraints (bcs + terminals) are well-posed.
 ///
 /// Three checks are performed:
 ///   1. Dirichlet value conflicts - a DOF pinned to two different fixed values
@@ -86,12 +86,12 @@ public:
     BoundaryConditionValidator(mfem::Mesh& m, mfem::FiniteElementSpace& fes)
         : mesh(m), fespace(fes) {}
 
-    /// @param closures      Typed closure conditions with boundary markers.
+    /// @param bcs           Authored boundary conditions with boundary markers.
     /// @param terminals     terminal name -> boundary marker for voltage terminals.
     /// @param allow_overlap If true, warn but don't throw on detected problems.
     /// @throws std::runtime_error if problems are detected and !allow_overlap.
     void ValidateBoundaryConditions(
-        const std::vector<MarkedBoundaryCondition>& closures,
+        const std::vector<MarkedBoundaryCondition>& bcs,
         const std::unordered_map<std::string, mfem::Array<int>>& terminals,
         bool allow_overlap = false)
     {
@@ -100,10 +100,10 @@ public:
 
         // (1) Dirichlet value conflicts: weak conditions do not pin DOFs.
         std::map<int, std::vector<std::tuple<double, int, int>>> dof_values;
-        for (const auto& closure : closures) {
-            if (closure.Condition.Type != BoundaryConditionType::Dirichlet) continue;
-            const auto& marker = closure.Marker;
-            const double value = closure.Condition.Value;
+        for (const auto& bc : bcs) {
+            if (bc.Condition.Type != BoundaryConditionType::Dirichlet) continue;
+            const auto& marker = bc.Marker;
+            const double value = bc.Condition.Value;
             for (int i = 0; i < fespace.GetNBE(); ++i) {
                 int attr = mesh.GetBdrAttribute(i);
                 if (attr < 1 || attr > marker.Size() || !marker[attr - 1]) continue;
@@ -131,7 +131,7 @@ public:
 
             std::ostringstream oss;
             oss << "DOF " << dof << " (" << DescribeDof(dof, std::get<2>(values[0]))
-                << ") is pinned by closures to DIFFERENT values:\n";
+                << ") is pinned by bcs to DIFFERENT values:\n";
             std::map<std::pair<int, double>, int> grouped;
             for (const auto& t : values) grouped[{std::get<1>(t), std::get<0>(t)}]++;
             for (const auto& [key, count] : grouped) {
@@ -144,10 +144,10 @@ public:
 
         // Two configured conditions may meet at vertices, but they must not claim
         // the same boundary attribute (and therefore the same boundary elements).
-        for (size_t i = 0; i < closures.size(); ++i) {
-            for (size_t j = i + 1; j < closures.size(); ++j) {
-                const auto& lhs = closures[i];
-                const auto& rhs = closures[j];
+        for (size_t i = 0; i < bcs.size(); ++i) {
+            for (size_t j = i + 1; j < bcs.size(); ++j) {
+                const auto& lhs = bcs[i];
+                const auto& rhs = bcs[j];
                 const int marker_size = std::min(lhs.Marker.Size(), rhs.Marker.Size());
                 for (int attr = 0; attr < marker_size; ++attr) {
                     if (!lhs.Marker[attr] || !rhs.Marker[attr]) continue;
@@ -155,7 +155,7 @@ public:
                     oss << "Boundary attribute " << (attr + 1)
                         << " is assigned to both '" << lhs.Condition.EntityGroupName
                         << "' and '" << rhs.Condition.EntityGroupName
-                        << "'. Each boundary entity must have one closure condition.";
+                        << "'. Each boundary entity must have one boundary condition.";
                     problems.push_back(oss.str());
                     break;
                 }
@@ -170,16 +170,16 @@ public:
         // A boundary attribute has one physical owner. In particular, a weak
         // Neumann load on a voltage-terminal attribute would be silently removed
         // when the terminal's essential DOFs are eliminated.
-        for (const auto& closure : closures) {
+        for (const auto& bc : bcs) {
             for (const auto& name : term_names) {
                 const auto& terminal = terminals.at(name);
-                const int marker_size = std::min(closure.Marker.Size(), terminal.Size());
+                const int marker_size = std::min(bc.Marker.Size(), terminal.Size());
                 for (int attr = 0; attr < marker_size; ++attr) {
-                    if (!closure.Marker[attr] || !terminal[attr]) continue;
+                    if (!bc.Marker[attr] || !terminal[attr]) continue;
                     std::ostringstream oss;
                     oss << "Boundary attribute " << (attr + 1)
-                        << " is assigned to closure '"
-                        << closure.Condition.EntityGroupName
+                        << " is assigned to boundary condition '"
+                        << bc.Condition.EntityGroupName
                         << "' and voltage terminal '" << name
                         << "'. Each boundary entity must have one physical role.";
                     problems.push_back(oss.str());
@@ -188,11 +188,11 @@ public:
             }
         }
 
-        // (2) Terminal ownership/overlap: only Dirichlet closures are essential.
-        std::map<int, int> closure_dofs;  // dof -> touching bdr element
-        for (const auto& closure : closures) {
-            if (closure.Condition.Type == BoundaryConditionType::Dirichlet) {
-                CollectMarkerDofs(closure.Marker, closure_dofs);
+        // (2) Terminal ownership/overlap: only Dirichlet bcs are essential.
+        std::map<int, int> bc_dofs;  // dof -> touching bdr element
+        for (const auto& bc : bcs) {
+            if (bc.Condition.Type == BoundaryConditionType::Dirichlet) {
+                CollectMarkerDofs(bc.Marker, bc_dofs);
             }
         }
 
@@ -209,8 +209,8 @@ public:
 
         for (const auto& [dof, names] : dof_terminals) {
             const bool multi_terminal = names.size() > 1;
-            const bool hits_closure   = closure_dofs.count(dof) > 0;
-            if (!multi_terminal && !hits_closure) continue;
+            const bool hits_bc   = bc_dofs.count(dof) > 0;
+            if (!multi_terminal && !hits_bc) continue;
 
             int be = terminal_dof_be.count(dof) ? terminal_dof_be.at(dof) : -1;
             std::ostringstream oss;
@@ -226,8 +226,8 @@ public:
             } else {
                 oss << "    terminal: " << names[0] << "\n";
             }
-            if (hits_closure) {
-                oss << "    closure boundary condition (also pins this DOF)\n";
+            if (hits_bc) {
+                oss << "    boundary condition (also pins this DOF)\n";
             }
             problems.push_back(oss.str());
         }

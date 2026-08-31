@@ -11,7 +11,8 @@
   "entity_groups": [
     { "name": "Air", "dim": 2, "attribute_ids": [1] },
     { "name": "Coil", "dim": 2, "attribute_ids": [2] },
-    { "name": "FarField", "dim": 1, "attribute_ids": [101] }
+    { "name": "FarField", "dim": 1, "attribute_ids": [1] },
+    { "name": "Axis", "dim": 1, "attribute_ids": [2] }
   ],
   "regions": [
     { "entity_group": "Air", "material": "Air" },
@@ -34,15 +35,15 @@
   "terminals": [
     {
       "name": "CoilCurrent",
-      "excitation_type": "current",
+      "quantity": "current",
       "entity_group": "Coil"
     }
   ],
-  "boundaries": [
+  "boundary_conditions": [
     {
       "name": "FarField",
       "entity_group": "FarField",
-      "type": "Dirichlet",
+      "type": "dirichlet",
       "value": 0.0
     }
   ],
@@ -50,7 +51,7 @@
     {
       "name": "energized",
       "excitations": [
-        { "terminal": "CoilCurrent", "value": 166666.67 }
+        { "terminal": "CoilCurrent", "value": 1000.0 }
       ]
     }
   ]

@@ -34,6 +34,11 @@ B = μ₀ N I / L = 4π × 10⁻⁷ × 1000 × 1 / 0.2
 ```
 
 **Current density in coil:**
+
+The input file specifies the terminal excitation as a **total current** in
+amperes (here the full ampere-turns, N I = 1000 A); the solver divides by the
+coil cross-section to obtain the source current density:
+
 ```
 J = N I / A_coil
 ```

@@ -55,13 +55,14 @@ public:
 		// Axisymmetric or Planar
 		geometry = config.GeometryType;
 		for (const auto& [term_name, term] : config.Terminals) {
-			MFEM_VERIFY(term.ExcitationType == Quantity::Current,
+			MFEM_VERIFY(term.DriveQuantity == Quantity::Current,
 				"Magnetostatic terminal '" + term_name +
 				"' must use a current excitation.");
 		}
 
-		// Reject negative radii and record whether the domain reaches r = 0.
-		ValidateAxisymmetricGeometry();
+		// Reject negative radii, record whether the domain reaches r = 0, and
+		// report under-resolved near-axis curl-curl quadrature.
+		ValidateMagneticAxisymmetricGeometry();
 
 		// FE collection
 		fec = std::make_unique<mfem::H1_FECollection>(order, dim);
@@ -70,13 +71,8 @@ public:
 		nu_coeff = MaterialCoefficient(1.0 / Constants::MU_0, [](const Material& m) {
 			return 1.0 / (Constants::MU_0 * m.RelPermeability); });
 
-		closure_bcs = BuildClosureBcs();
-
-		std::vector<mfem::Array<int>> ess_markers =
-			DirichletClosureMarkers(closure_bcs);
-		ess_bdr = EssentialBdrFrom(ess_markers);
-
-		ImposeAxisRegularity();
+		boundary_conditions = BuildBoundaryConditions();
+		BuildEssentialBoundaryMarker();
 
 		// Build the FE space and everything bound to it for the starting mesh.
 		BuildOperators();
@@ -84,7 +80,7 @@ public:
 
 		BoundaryConditionValidator validator(mesh, *fespace);
 		validator.ValidateBoundaryConditions(
-			closure_bcs, /*terminals=*/{}, /*allow_overlap=*/false);
+			boundary_conditions.Entries(), /*terminals=*/{}, /*allow_overlap=*/false);
 
 	}
 
@@ -184,17 +180,14 @@ public:
 	void ImprintScenario(const Scenario& sc, ImprintMode mode) {
 		*A = 0.0; // Reset solution for new scenario
 
-		// Re-apply non-zero essential (closure) BC values on this mesh's A.
+		// Re-apply non-zero essential BC values on this mesh's A.
 		// ess_tdof values are lifted into the RHS by FormLinearSystem at solve time,
 		// so they must be set AFTER the *A = 0.0 reset, every scenario.
 		if (mode == ImprintMode::Field) {
-			for (const auto& bc : config.BoundaryConditions) {
-				if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
-					auto marker = MarkerFromGroup(bc.EntityGroupName);
-					mfem::ConstantCoefficient c(bc.Value);
-					A->ProjectBdrCoefficient(c, marker);
-				}
-			}
+			ForEachNonzeroDirichlet([&](mfem::Array<int>& marker, double value) {
+				mfem::ConstantCoefficient c(value);
+				A->ProjectBdrCoefficient(c, marker);
+			});
 		}
 		// Axis stays at A=0 (already zero from the reset; no projection needed).
 
@@ -230,7 +223,7 @@ public:
 			// CouplingMatrix synthesizes a unit-current scenario per terminal, so
 			// every terminal must be current-driven for the drive to be meaningful.
 			for (const auto& [term_name, term] : config.Terminals) {
-				MFEM_VERIFY(term.ExcitationType == Quantity::Current,
+				MFEM_VERIFY(term.DriveQuantity == Quantity::Current,
 					"CouplingMatrix terminal '" + term_name +
 					"' must be a Current terminal for the magnetostatic solver.");
 
@@ -367,29 +360,10 @@ private:
 		return winding_functional * *A;
 	}
 
-	// Source current density for a scenario, summed over its excitations.
-	// Current enters the model only through Terminals, so this is a pure
-	// function of sc.Excitations: a terminal with no matching excitation
-	// contributes nothing. In CouplingPerturbation mode the scenario carries a
-	// single unit excitation, so this IS the drive for that column rather than
-	// background data, and must not be suppressed the way closure data is.
+	// Source current density for a scenario. Magnetostatics has no conductor-type
+	// distinction, so every current terminal contributes.
 	mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
-		mfem::Vector j_src(mesh.attributes.Max());
-		j_src = 0.0;
-
-		for (const auto& [term_name, term] : config.Terminals) {
-			if (term.ExcitationType == Quantity::Current) {
-				double I = 0.0;
-				for (const auto& exc : sc.Excitations) {
-					if (exc.TerminalName == term_name) {
-						I = exc.Value;
-					}
-				}
-
-				if (I == 0.0) continue;
-				j_src += BuildTerminalCurrentDensity(term_name, I);
-			}
-		}
-		return j_src;
+		return MagneticSolver::BuildCurrentDensity(
+			sc, [](const Terminal&) { return true; });
 	}
 };

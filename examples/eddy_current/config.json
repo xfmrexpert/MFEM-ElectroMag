@@ -12,7 +12,8 @@
     { "name": "Air", "dim": 2, "attribute_ids": [1] },
     { "name": "AluminumConductor", "dim": 2, "attribute_ids": [2] },
     { "name": "Coil", "dim": 2, "attribute_ids": [3] },
-    { "name": "FarField", "dim": 1, "attribute_ids": [1] }
+    { "name": "FarField", "dim": 1, "attribute_ids": [1] },
+    { "name": "Axis", "dim": 1, "attribute_ids": [2] }
   ],
   "regions": [
     {
@@ -54,15 +55,16 @@
   "terminals": [
     {
       "name": "ExcitationCoil",
-      "excitation_type": "current",
+      "quantity": "current",
+      "conductor_type": "stranded",
       "entity_group": "Coil"
     }
   ],
-  "boundaries": [
+  "boundary_conditions": [
     {
       "name": "FarField",
       "entity_group": "FarField",
-      "type": "Dirichlet",
+      "type": "dirichlet",
       "value": 0.0
     }
   ],
@@ -76,7 +78,7 @@
         "points": 5
       },
       "excitations": [
-        { "terminal": "ExcitationCoil", "value": 100000.0 }
+        { "terminal": "ExcitationCoil", "value": 240.0 }
       ]
     }
   ]

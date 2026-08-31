@@ -81,8 +81,8 @@ TEST_CASE("Electrostatic solver applies natural-flux Neumann data",
     json config = MakePlanarStripConfig(
         "electrostatics", mesh_file, 1,
         {{"epsilon_r", relative_permittivity}}, 0.0, 0.0);
-    config["boundaries"][1]["type"] = "Neumann";
-    config["boundaries"][1]["value"] = permittivity * gradient;
+    config["boundary_conditions"][1]["type"] = "neumann";
+    config["boundary_conditions"][1]["value"] = permittivity * gradient;
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
     ElectrostaticSolver solver(mesh, DecodeConfig(config));
@@ -115,17 +115,17 @@ TEST_CASE("Boundary closures and voltage terminals have distinct ownership",
         json config = MakePlanarStripConfig(
             "electrostatics", mesh_file, 1, {{"epsilon_r", 1.0}}, 0.0, 0.0);
         config["terminals"] = json::array({
-            {{"name", "LeftTerminal"}, {"excitation_type", "voltage"},
+            {{"name", "LeftTerminal"}, {"quantity", "voltage"},
              {"entity_group", "Left"}}
         });
-        config["boundaries"].erase(config["boundaries"].begin());
+        config["boundary_conditions"].erase(config["boundary_conditions"].begin());
         return config;
     };
 
     SECTION("same boundary attribute is rejected") {
         json config = terminal_config();
-        config["boundaries"].push_back(
-            {{"name", "LeftFlux"}, {"type", "Neumann"},
+        config["boundary_conditions"].push_back(
+            {{"name", "LeftFlux"}, {"type", "neumann"},
              {"entity_group", "Left"}, {"value", 1.0}});
 
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
@@ -138,8 +138,8 @@ TEST_CASE("Boundary closures and voltage terminals have distinct ownership",
         json config = terminal_config();
         config["entity_groups"].push_back(
             {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
-        config["boundaries"].push_back(
-            {{"name", "HorizontalFlux"}, {"type", "Neumann"},
+        config["boundary_conditions"].push_back(
+            {{"name", "HorizontalFlux"}, {"type", "neumann"},
              {"entity_group", "Horizontal"}, {"value", 0.0}});
 
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
@@ -171,8 +171,8 @@ TEST_CASE("Axisymmetric magnetic solvers enforce zero A_phi on the axis",
     auto add_horizontal_dirichlet = [](json& config, double value) {
         config["entity_groups"].push_back(
             {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
-        config["boundaries"].push_back(
-            {{"name", "Horizontal"}, {"type", "Dirichlet"},
+        config["boundary_conditions"].push_back(
+            {{"name", "Horizontal"}, {"type", "dirichlet"},
              {"entity_group", "Horizontal"}, {"value", value}});
     };
 
@@ -264,8 +264,8 @@ TEST_CASE("Magnetoquasistatic Neumann data loads only the real field",
     json config = MakePlanarStripConfig(
         "magnetoquasistatics", mesh_file, 1,
         {{"mu_r", 1.0}, {"sigma", 0.0}}, 0.0, 0.0);
-    config["boundaries"][1]["type"] = "Neumann";
-    config["boundaries"][1]["value"] = reluctivity * gradient;
+    config["boundary_conditions"][1]["type"] = "neumann";
+    config["boundary_conditions"][1]["value"] = reluctivity * gradient;
     config["scenarios"][0]["frequency"] = 60.0;
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
@@ -295,8 +295,8 @@ TEST_CASE("Solvers reject reserved Robin boundary conditions during setup",
     auto robin_config = [&](const std::string& physics, const json& material) {
         json config = MakePlanarStripConfig(
             physics, mesh_file, 1, material, 0.0, 0.0);
-        config["boundaries"][1]["type"] = "Robin";
-        config["boundaries"][1]["robin_coefficient"] = 1.0;
+        config["boundary_conditions"][1]["type"] = "robin";
+        config["boundary_conditions"][1]["robin_coefficient"] = 1.0;
         if (physics == "magnetoquasistatics") {
             config["scenarios"][0]["frequency"] = 60.0;
         }
@@ -455,11 +455,11 @@ TEST_CASE("ElectrostaticSolver can be constructed", "[solvers]") {
                 {"properties", {{"epsilon_r", 2.0}}}
             }
         })},
-        {"boundaries", json::array({
+        {"boundary_conditions", json::array({
             {
                 {"name", "ground"},
                 {"entity_group", "Ground"},
-                {"type", "Dirichlet"},
+                {"type", "dirichlet"},
                 {"value", 0.0}
             }
         })}
@@ -544,11 +544,11 @@ TEST_CASE("MagnetostaticSolver can be constructed", "[solvers]") {
                 {"properties", {{"mu_r", 1000.0}}}
             }
         })},
-        {"boundaries", json::array({
+        {"boundary_conditions", json::array({
             {
                 {"name", "far_field"},
                 {"entity_group", "FarField"},
-                {"type", "Dirichlet"},
+                {"type", "dirichlet"},
                 {"value", 0.0}
             }
         })}
@@ -591,11 +591,11 @@ TEST_CASE("MagnetoquasistaticSolver can be constructed", "[solvers]") {
                 }}
             }
         })},
-        {"boundaries", json::array({
+        {"boundary_conditions", json::array({
             {
                 {"name", "far_field"},
                 {"entity_group", "FarField"},
-                {"type", "Dirichlet"},
+                {"type", "dirichlet"},
                 {"value", 0.0}
             }
         })},
@@ -766,9 +766,9 @@ json MakePlanarStripConfig(const std::string& physics,
         {"materials", json::array({
             {{"name", "Material"}, {"properties", material_properties}}
         })},
-        {"boundaries", json::array({
-            {{"name", "Left"},  {"type", "Dirichlet"}, {"entity_group", "Left"},  {"value", left_value}},
-            {{"name", "Right"}, {"type", "Dirichlet"}, {"entity_group", "Right"}, {"value", right_value}}
+        {"boundary_conditions", json::array({
+            {{"name", "Left"},  {"type", "dirichlet"}, {"entity_group", "Left"},  {"value", left_value}},
+            {{"name", "Right"}, {"type", "dirichlet"}, {"entity_group", "Right"}, {"value", right_value}}
         })},
         {"scenarios", json::array({
             {{"name", "analytic"}, {"excitations", json::array()}}
@@ -1113,13 +1113,13 @@ json MakeShieldedTurnsConfig(const std::string& mesh_file, double frequency) {
             {{"name", "Aluminum"}, {"properties", {{"mu_r", 1.0}, {"sigma", 3.5e7}}}},
             {{"name", "Copper"},   {"properties", {{"mu_r", 1.0}, {"sigma", 5.8e7}}}}
         })},
-        {"boundaries", json::array({
-            {{"name", "Outer"}, {"type", "Dirichlet"}, {"entity_group", "Outer"}, {"value", 0.0}}
+        {"boundary_conditions", json::array({
+            {{"name", "Outer"}, {"type", "dirichlet"}, {"entity_group", "Outer"}, {"value", 0.0}}
         })},
         {"terminals", json::array({
-            {{"name", "TurnA"}, {"excitation_type", "current"},
+            {{"name", "TurnA"}, {"quantity", "current"},
              {"conductor_type", "massive"}, {"entity_group", "TurnADomain"}},
-            {{"name", "TurnB"}, {"excitation_type", "current"},
+            {{"name", "TurnB"}, {"quantity", "current"},
              {"conductor_type", "massive"}, {"entity_group", "TurnBDomain"}}
         })},
         {"scenarios", json::array({
@@ -1161,8 +1161,8 @@ json MakeCoaxAmrConfig(const std::string& mesh_file, int max_iterations) {
             {{"name", "Vacuum"}, {"properties", {{"epsilon_r", 1.0}}}}
         })},
         {"terminals", json::array({
-            {{"name", "Inner"}, {"excitation_type", "voltage"}, {"entity_group", "Inner"}},
-            {{"name", "Outer"}, {"excitation_type", "voltage"}, {"entity_group", "Outer"}}
+            {{"name", "Inner"}, {"quantity", "voltage"}, {"entity_group", "Inner"}},
+            {{"name", "Outer"}, {"quantity", "voltage"}, {"entity_group", "Outer"}}
         })},
         {"scenarios", json::array({
             {{"name", "energized"}, {"excitations", json::array({
@@ -1368,9 +1368,9 @@ TEST_CASE("Electrostatic solver satisfies dielectric interface conditions",
             {{"name", "LowPermittivity"}, {"properties", {{"epsilon_r", epsilon_r_left}}}},
             {{"name", "HighPermittivity"}, {"properties", {{"epsilon_r", epsilon_r_right}}}}
         })},
-        {"boundaries", json::array({
-            {{"name", "Left"},  {"type", "Dirichlet"}, {"entity_group", "Left"},  {"value", voltage}},
-            {{"name", "Right"}, {"type", "Dirichlet"}, {"entity_group", "Right"}, {"value", 0.0}}
+        {"boundary_conditions", json::array({
+            {{"name", "Left"},  {"type", "dirichlet"}, {"entity_group", "Left"},  {"value", voltage}},
+            {{"name", "Right"}, {"type", "dirichlet"}, {"entity_group", "Right"}, {"value", 0.0}}
         })},
         {"scenarios", json::array({
             {{"name", "interface"}, {"excitations", json::array()}}
@@ -1420,10 +1420,10 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
         "electrostatics", mesh_file, 1,
         {{"epsilon_r", relative_permittivity}}, 0.0, 0.0);
     config["simulation"]["analysis_type"] = "coupling_matrix";
-    config["boundaries"] = json::array();
+    config["boundary_conditions"] = json::array();
     config["terminals"] = json::array({
-        {{"name", "Left"}, {"excitation_type", "voltage"}, {"entity_group", "Left"}},
-        {{"name", "Right"}, {"excitation_type", "voltage"}, {"entity_group", "Right"}}
+        {{"name", "Left"}, {"quantity", "voltage"}, {"entity_group", "Left"}},
+        {{"name", "Right"}, {"quantity", "voltage"}, {"entity_group", "Right"}}
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
@@ -1499,10 +1499,10 @@ TEST_CASE("Electrostatic coupling ignores fixed Neumann background",
     json config = MakePlanarStripConfig(
         "electrostatics", mesh_file, 1, {{"epsilon_r", 2.5}}, 0.0, 0.0);
     config["simulation"]["analysis_type"] = "coupling_matrix";
-    config["boundaries"] = json::array();
+    config["boundary_conditions"] = json::array();
     config["terminals"] = json::array({
-        {{"name", "Left"}, {"excitation_type", "voltage"}, {"entity_group", "Left"}},
-        {{"name", "Right"}, {"excitation_type", "voltage"}, {"entity_group", "Right"}}
+        {{"name", "Left"}, {"quantity", "voltage"}, {"entity_group", "Left"}},
+        {{"name", "Right"}, {"quantity", "voltage"}, {"entity_group", "Right"}}
     });
 
     auto solve = [&]() {
@@ -1517,8 +1517,8 @@ TEST_CASE("Electrostatic coupling ignores fixed Neumann background",
     const CsvMatrix baseline = solve();
     config["entity_groups"].push_back(
         {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
-    config["boundaries"].push_back(
-        {{"name", "BackgroundFlux"}, {"type", "Neumann"},
+    config["boundary_conditions"].push_back(
+        {{"name", "BackgroundFlux"}, {"type", "neumann"},
          {"entity_group", "Horizontal"}, {"value", 3.0}});
     const CsvMatrix with_background = solve();
 
@@ -1589,8 +1589,8 @@ TEST_CASE("Magnetostatic inductance matrix is reciprocal and distinguishes rows"
         {{"name", "CoilB"}, {"entity_group", "CoilB"}, {"material", "Material"}}
     });
     config["terminals"] = json::array({
-        {{"name", "CoilA"}, {"excitation_type", "current"}, {"entity_group", "CoilA"}},
-        {{"name", "CoilB"}, {"excitation_type", "current"}, {"entity_group", "CoilB"}}
+        {{"name", "CoilA"}, {"quantity", "current"}, {"entity_group", "CoilA"}},
+        {{"name", "CoilB"}, {"quantity", "current"}, {"entity_group", "CoilB"}}
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
@@ -1629,8 +1629,8 @@ TEST_CASE("Magnetostatic coupling ignores fixed Neumann background",
         {{"name", "CoilB"}, {"entity_group", "CoilB"}, {"material", "Material"}}
     });
     config["terminals"] = json::array({
-        {{"name", "CoilA"}, {"excitation_type", "current"}, {"entity_group", "CoilA"}},
-        {{"name", "CoilB"}, {"excitation_type", "current"}, {"entity_group", "CoilB"}}
+        {{"name", "CoilA"}, {"quantity", "current"}, {"entity_group", "CoilA"}},
+        {{"name", "CoilB"}, {"quantity", "current"}, {"entity_group", "CoilB"}}
     });
 
     auto solve = [&]() {
@@ -1644,8 +1644,8 @@ TEST_CASE("Magnetostatic coupling ignores fixed Neumann background",
     const CsvMatrix baseline = solve();
     config["entity_groups"].push_back(
         {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
-    config["boundaries"].push_back(
-        {{"name", "BackgroundFlux"}, {"type", "Neumann"},
+    config["boundary_conditions"].push_back(
+        {{"name", "BackgroundFlux"}, {"type", "neumann"},
          {"entity_group", "Horizontal"}, {"value", 2.0}});
     const CsvMatrix with_background = solve();
 
@@ -1667,7 +1667,7 @@ TEST_CASE("Magnetostatic solver reproduces the field of a uniform current slab",
     json config = MakePlanarStripConfig(
         "magnetostatics", mesh_file, 2, {{"mu_r", 1.0}}, 0.0, 0.0);
     config["terminals"] = json::array({
-        {{"name", "Current"}, {"excitation_type", "current"},
+        {{"name", "Current"}, {"quantity", "current"},
          {"conductor_type", "stranded"}, {"entity_group", "Domain"}}
     });
     config["scenarios"][0]["excitations"] = json::array({
@@ -1726,7 +1726,7 @@ TEST_CASE("Magnetostatic field energy matches the analytic slab value",
     json config = MakePlanarStripConfig(
         "magnetostatics", mesh_file, 2, {{"mu_r", 1.0}}, 0.0, 0.0);
     config["terminals"] = json::array({
-        {{"name", "Current"}, {"excitation_type", "current"},
+        {{"name", "Current"}, {"quantity", "current"},
          {"conductor_type", "stranded"}, {"entity_group", "Domain"}}
     });
     config["scenarios"][0]["excitations"] = json::array({
@@ -1786,8 +1786,8 @@ TEST_CASE("Magnetostatic solver applies natural-flux Neumann data with correct s
     const double reluctivity = 1.0 / Constants::MU_0;
     json config = MakePlanarStripConfig(
         "magnetostatics", mesh_file, 1, {{"mu_r", 1.0}}, 0.0, 0.0);
-    config["boundaries"][1]["type"] = "Neumann";
-    config["boundaries"][1]["value"] = reluctivity * gradient;
+    config["boundary_conditions"][1]["type"] = "neumann";
+    config["boundary_conditions"][1]["value"] = reluctivity * gradient;
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
     MagnetostaticSolver solver(mesh, DecodeConfig(config));
@@ -1952,9 +1952,9 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
          {"material", "MassiveMaterial"}}
     });
     config["terminals"] = json::array({
-        {{"name", "Massive"}, {"excitation_type", "current"},
+        {{"name", "Massive"}, {"quantity", "current"},
          {"conductor_type", "massive"}, {"entity_group", "MassiveDomain"}},
-        {{"name", "Stranded"}, {"excitation_type", "current"},
+        {{"name", "Stranded"}, {"quantity", "current"},
          {"conductor_type", "stranded"}, {"entity_group", "StrandedDomain"}}
     });
 
@@ -2012,7 +2012,7 @@ TEST_CASE("MQS coupling ignores fixed Neumann background",
         {{"name", "Domain"}, {"entity_group", "Domain"}, {"material", "Material"}}
     });
     config["terminals"] = json::array({
-        {{"name", "Drive"}, {"excitation_type", "current"},
+        {{"name", "Drive"}, {"quantity", "current"},
          {"conductor_type", "massive"}, {"entity_group", "DriveDomain"}}
     });
 
@@ -2029,8 +2029,8 @@ TEST_CASE("MQS coupling ignores fixed Neumann background",
     const auto baseline = solve();
     config["entity_groups"].push_back(
         {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
-    config["boundaries"].push_back(
-        {{"name", "BackgroundFlux"}, {"type", "Neumann"},
+    config["boundary_conditions"].push_back(
+        {{"name", "BackgroundFlux"}, {"type", "neumann"},
          {"entity_group", "Horizontal"}, {"value", 2.0}});
     const auto with_background = solve();
 
@@ -2087,12 +2087,12 @@ TEST_CASE("Axisymmetric massive-port resistance matches the analytic DC value",
             {{"name", "Conductor"},
              {"properties", {{"mu_r", 1.0}, {"sigma", conductivity}}}}
         })},
-        {"boundaries", json::array({
-            {{"name", "Outer"}, {"type", "Dirichlet"},
+        {"boundary_conditions", json::array({
+            {{"name", "Outer"}, {"type", "dirichlet"},
              {"entity_group", "Outer"}, {"value", 0.0}}
         })},
         {"terminals", json::array({
-            {{"name", "Port"}, {"excitation_type", "current"},
+            {{"name", "Port"}, {"quantity", "current"},
              {"conductor_type", "massive"}, {"entity_group", "PortDomain"}}
         })},
         {"scenarios", json::array({
@@ -2177,12 +2177,12 @@ TEST_CASE("MQS Joule loss matches the analytic DC value",
             {{"name", "Conductor"},
              {"properties", {{"mu_r", 1.0}, {"sigma", conductivity}}}}
         })},
-        {"boundaries", json::array({
-            {{"name", "Outer"}, {"type", "Dirichlet"},
+        {"boundary_conditions", json::array({
+            {{"name", "Outer"}, {"type", "dirichlet"},
              {"entity_group", "Outer"}, {"value", 0.0}}
         })},
         {"terminals", json::array({
-            {{"name", "Port"}, {"excitation_type", "current"},
+            {{"name", "Port"}, {"quantity", "current"},
              {"conductor_type", "massive"}, {"entity_group", "PortDomain"}}
         })},
         {"scenarios", json::array({
@@ -2253,11 +2253,11 @@ TEST_CASE("MQS heterogeneous massive-port conductance is piecewise and order ind
         config["regions"].push_back(
             {{"name", "RightRegion"}, {"entity_group", "RightDomain"},
              {"material", "RightMaterial"}});
-        config["boundaries"].push_back(
-            {{"name", "Horizontal"}, {"type", "Dirichlet"},
+        config["boundary_conditions"].push_back(
+            {{"name", "Horizontal"}, {"type", "dirichlet"},
              {"entity_group", "Horizontal"}, {"value", 0.0}});
         config["terminals"] = json::array({
-            {{"name", "Port"}, {"excitation_type", "current"},
+            {{"name", "Port"}, {"quantity", "current"},
              {"conductor_type", "massive"}, {"entity_group", "PortDomain"}}
         });
 
@@ -2321,7 +2321,7 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
         {{"name", "PassiveRegion"}, {"entity_group", "PassiveDomain"}, {"material", "Material"}}
     });
     config["terminals"] = json::array({
-        {{"name", "Drive"}, {"excitation_type", "current"},
+        {{"name", "Drive"}, {"quantity", "current"},
          {"conductor_type", "massive"}, {"entity_group", "DriveDomain"}}
     });
 
@@ -2606,9 +2606,9 @@ TEST_CASE("MQS loss excludes non-conducting and stranded regions",
          {"material", "MassiveMaterial"}}
     });
     config["terminals"] = json::array({
-        {{"name", "Massive"}, {"excitation_type", "current"},
+        {{"name", "Massive"}, {"quantity", "current"},
          {"conductor_type", "massive"}, {"entity_group", "MassiveDomain"}},
-        {{"name", "Stranded"}, {"excitation_type", "current"},
+        {{"name", "Stranded"}, {"quantity", "current"},
          {"conductor_type", "stranded"}, {"entity_group", "StrandedDomain"}}
     });
     config["scenarios"] = json::array({
@@ -2900,10 +2900,10 @@ TEST_CASE("Axisymmetric magnetostatic AMR applies reluctivity once",
          {"material", "HighPermeability"}}
     });
     config.erase("terminals");
-    config["boundaries"] = json::array({
-        {{"name", "Inner"}, {"type", "Dirichlet"},
+    config["boundary_conditions"] = json::array({
+        {{"name", "Inner"}, {"type", "dirichlet"},
          {"entity_group", "Inner"}, {"value", 1.0}},
-        {{"name", "Outer"}, {"type", "Dirichlet"},
+        {{"name", "Outer"}, {"type", "dirichlet"},
          {"entity_group", "Outer"}, {"value", 0.0}}
     });
     config["scenarios"] = json::array({

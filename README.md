@@ -194,7 +194,11 @@ Field analyses write one result per expanded point. For MQS
 `coupling_matrix` analyses, each scenario defines a frequency point and the
 solver writes a separate frequency-labeled resistance/inductance CSV pair.
 
-For detailed mathematical formulation, see `docs/math_formulation.md`.
+For the complete input file schema, required and optional fields, validation
+rules, and definitions of every term, see `docs/input_file_format.md`. For
+detailed mathematical formulation, see `docs/math_formulation.md`. For the
+vocabulary and modeling rules governing boundaries, boundary conditions, and
+terminals, see `docs/boundary_and_terminal_model.md`.
 
 ## Output
 

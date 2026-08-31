@@ -30,17 +30,32 @@ enum class Quantity { Voltage, Current };
 //               its accuracy does not depend on a residual tolerance.
 enum class LinearSolverType { Iterative, Direct };
 
-enum class EntityDim { Boundary, Domain };
-
 enum class ConductorType { Massive, Stranded };
 
 enum class RegionCurrentConstraint { None, Open };
 
 enum class BoundaryConditionType { Dirichlet, Neumann, Robin };
 
+// A name bound to a set of mesh attribute ids of one entity dimension.
+//
+// Dim is the topological dimension of the entities the ids refer to: 1 for
+// curves, 2 for surfaces, 3 for volumes. This is the mesher's own notion, not
+// a role: Gmsh numbers physical groups independently per dimension, so the
+// same id may name both a curve and a surface in one model, and MFEM preserves
+// that split as bdr_attributes vs. attributes. An id alone is therefore
+// ambiguous and the group must state which dimension it means.
+//
+// Whether a group is a boundary or a domain is DERIVED by comparing Dim to the
+// mesh dimension; it is not authored. See IsBoundary()/IsDomain() below.
 struct EntityGroup {
-	EntityDim Dim;              // boundary or domain
-	std::vector<int> AttributeIds;   // mesh attribute ids (boundary or domain, depending on context)
+	int Dim = 0;                    // 1 = curve, 2 = surface, 3 = volume
+	std::vector<int> AttributeIds;  // ids within the namespace selected by Dim
+
+	// Entities of the mesh's own dimension carry the PDE and a material.
+	bool IsDomain(int mesh_dim) const { return Dim == mesh_dim; }
+
+	// Codimension-one entities bound the solved region.
+	bool IsBoundary(int mesh_dim) const { return Dim == mesh_dim - 1; }
 };
 
 struct Region {
@@ -50,10 +65,10 @@ struct Region {
 };
 
 // A driven/measured excitation site. Single primitive for both physics
-//   Excitation == Voltage -> AttributeIds are BOUNDARY attrs (essential BC)
-//   Excitation == Current -> AttributeIds are DOMAIN   attrs (RHS source)
+//   DriveQuantity == Voltage -> AttributeIds are BOUNDARY attrs (essential BC)
+//   DriveQuantity == Current -> AttributeIds are DOMAIN   attrs (RHS source)
 struct Terminal {
-    Quantity ExcitationType = Quantity::Voltage;
+    Quantity DriveQuantity = Quantity::Voltage;
     ConductorType Conductor = ConductorType::Massive;
 	std::string EntityGroupName;   // mesh boundary (essential BC) or domain (RHS source) group name (validated)
 };
@@ -70,7 +85,7 @@ struct Material {
 	double RelPermeability = 1.0;   // mu_r     (vacuum default)
 };
 
-// A boundary closure condition. For Neumann data, Value is the prescribed
+// An authored boundary condition. For Neumann data, Value is the prescribed
 // outward natural flux n.material_flux; zero is the implicit natural condition.
 // Robin metadata is retained for forward compatibility but is not yet assembled.
 // Terminals and magnetic axis regularity are modeled separately.

@@ -30,18 +30,18 @@
       "properties": { "mu_r": 1.0, "sigma": 59.6e6 }
     }
   ],
-  "boundaries": [
+  "boundary_conditions": [
     {
       "name": "Axis_and_FarField",
       "entity_group": "Axis_and_FarField",
-      "type": "Dirichlet",
+      "type": "dirichlet",
       "value": 0.0
     }
   ],
   "terminals": [
     {
       "name": "Loop_Current",
-      "excitation_type": "current",
+      "quantity": "current",
       "entity_group": "Coil_Source"
     }
   ],

@@ -31,6 +31,11 @@ class ElectrostaticSolver : public PhysicsSolver {
 	std::unique_ptr<mfem::SparseMatrix> K0;
 	std::unique_ptr<mfem::DenseMatrix> C; // Coupling Matrix for terminals
 
+	// Terminal name -> boundary marker, resolved once at setup. This solver
+	// realizes every voltage terminal as an essential constraint, so these feed
+	// ess_bdr; they are also how per-terminal charge is gathered.
+	std::unordered_map<std::string, mfem::Array<int>> terminal_markers;
+
 	// Cached constrained system for the CURRENT mesh. The matrix is identical
 	// for every solve on a given mesh (same bilinear form and essential DOFs),
 	// so it is assembled once per mesh in BuildOperators() and reused for all
@@ -40,8 +45,6 @@ class ElectrostaticSolver : public PhysicsSolver {
 	// Factorization of A_op, built once per mesh when the direct solver is
 	// selected and reused for every scenario's RHS. Null when solving iteratively.
 	std::unique_ptr<SparseDirectSolver> direct_solver;
-
-	std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
 
 public:
 	ElectrostaticSolver(mfem::Mesh& m, const ProblemConfig& c) : PhysicsSolver(m, c) {}
@@ -53,7 +56,7 @@ public:
 		// Axisymmetric or Planar
 		geometry = config.GeometryType;
 		for (const auto& [term_name, term] : config.Terminals) {
-			MFEM_VERIFY(term.ExcitationType == Quantity::Voltage,
+			MFEM_VERIFY(term.DriveQuantity == Quantity::Voltage,
 				"Electrostatic terminal '" + term_name +
 				"' must use a voltage excitation.");
 		}
@@ -72,19 +75,18 @@ public:
 		epsilon_coeff = MaterialCoefficient(0.0, [](const Material& m) {
 			return m.RelPermittivity * Constants::EPSILON_0; });
 
-		// Closures + voltage terminals are all essential (Dirichlet).
-		closure_bcs = BuildClosureBcs();
+		boundary_conditions = BuildBoundaryConditions();
 
+		// Voltage terminals are realized as essential constraints in this
+		// formulation. They are not boundary conditions: the value is
+		// scenario-dependent and is projected in ImprintScenario(). See
+		// docs/boundary_and_terminal_model.md.
 		terminal_markers.clear();
-		for (const auto& [term_name, term] : config.Terminals)
+		for (const auto& [term_name, term] : config.Terminals) {
 			terminal_markers[term_name] = MarkerFromGroup(term.EntityGroupName);
-
-		std::vector<mfem::Array<int>> ess_markers;
-		for (const auto& marker : DirichletClosureMarkers(closure_bcs)) {
-			ess_markers.push_back(marker);
 		}
-		for (const auto& [name, marker] : terminal_markers) ess_markers.push_back(marker);
-		ess_bdr = EssentialBdrFrom(ess_markers);
+
+		BuildEssentialBoundaryMarker();
 
 		// Build the FE space and everything bound to it for the starting mesh.
 		BuildOperators();
@@ -93,13 +95,25 @@ public:
 		// invariant) mesh topology / attributes; it merely needs an FE space for
 		// DOF queries, so running it after the first BuildOperators() is correct.
 		BoundaryConditionValidator validator(mesh, *fespace);
-		validator.ValidateBoundaryConditions(closure_bcs, terminal_markers, /*allow_overlap=*/false);
+		validator.ValidateBoundaryConditions(boundary_conditions.Entries(),
+			terminal_markers, /*allow_overlap=*/false);
+	}
+
+	// Driven electrodes pin their DOFs exactly as a Dirichlet condition does, so
+	// every terminal marker joins the authored Dirichlet ones. Only the VALUE
+	// differs in origin, and that is supplied per scenario in ImprintScenario().
+	void BuildEssentialBoundaryMarker() override {
+		PhysicsSolver::BuildEssentialBoundaryMarker();
+
+		for (const auto& [term_name, marker] : terminal_markers) {
+			MergeMarker(ess_bdr, marker);
+		}
 	}
 
 	// (Re)build the FE space and every object bound to it for the CURRENT mesh.
 	// Called once from Setup() and again after each AMR refinement. The
-	// refinement-invariant data (fec, epsilon_coeff, ess_bdr, terminal_markers)
-	// persists across calls and is reused.
+	// refinement-invariant data (fec, epsilon_coeff, ess_bdr, boundary_conditions,
+	// terminal_markers) persists across calls and is reused.
 	//
 	// The constrained system matrix is assembled here; within a single mesh that
 	// matrix is reused for every scenario / coupling column (the bilinear form
@@ -209,7 +223,7 @@ public:
 		return peak;
 	}
 
-	// Field analysis imprints the configured closure data (nonzero Dirichlet
+	// Field analysis imprints the configured boundary data (nonzero Dirichlet
 	// values and the Neumann load). CouplingPerturbation analysis omits it:
 	// a coupling coefficient is a derivative with respect to terminal drive,
 	// so each column must be the homogeneous response to a unit terminal
@@ -221,23 +235,16 @@ public:
 
 		if (mode == ImprintMode::Field) {
 			*b = neumann_rhs;
-			for (const auto& bc : config.BoundaryConditions) {
-				if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
-					auto marker = MarkerFromGroup(bc.EntityGroupName);
-					mfem::ConstantCoefficient c(bc.Value);
-					x->ProjectBdrCoefficient(c, marker);
-				}
-			}
+			ForEachNonzeroDirichlet([&](mfem::Array<int>& marker, double value) {
+				mfem::ConstantCoefficient c(value);
+				x->ProjectBdrCoefficient(c, marker);
+			});
 		}
 		for (const auto& [term_name, term] : config.Terminals) {
-			if (term.ExcitationType == Quantity::Voltage) {
-				for (const auto& exc : sc.Excitations) {
-					if (term_name == exc.TerminalName) {
-						auto marker = MarkerFromGroup(term.EntityGroupName);
-						mfem::ConstantCoefficient c(exc.Value);
-						x->ProjectBdrCoefficient(c, marker);
-					}
-				}
+			if (term.DriveQuantity == Quantity::Voltage) {
+				mfem::Array<int> marker(terminal_markers.at(term_name));
+				mfem::ConstantCoefficient c(ExcitationFor(sc, term_name));
+				x->ProjectBdrCoefficient(c, marker);
 			}
 			else
 			{
@@ -340,7 +347,7 @@ private:
 
 		for (int k = 0; k < static_cast<int>(terms.size()); ++k) {
 			mfem::Array<int> vdofs_k;
-			fespace->GetEssentialVDofs(terminal_markers[terms[k]->first], vdofs_k);
+			fespace->GetEssentialVDofs(terminal_markers.at(terms[k]->first), vdofs_k);
 			double Qk = 0.0;
 			for (int n = 0; n < vdofs_k.Size(); ++n) {
 				if (vdofs_k[n]) Qk += Q(n);
@@ -353,7 +360,7 @@ private:
 	// C(k,i) is the charge induced on conductor k when conductor i is held at
 	// 1 V and all other conductors at 0 V. The matrix is symmetric; diagonals
 	// are positive and off-diagonals negative. Each row sums to that
-	// conductor's capacitance to the grounded/closure boundary. 
+	// conductor's capacitance to the grounded boundary. 
 	void WriteCouplingMatrix() {
 		if (!C) {
 			Reporter().Warning("WriteCouplingMatrix: coupling matrix not computed.");

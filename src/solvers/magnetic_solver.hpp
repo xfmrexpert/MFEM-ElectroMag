@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <iomanip>
+#include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -31,6 +34,13 @@ protected:
 	// derived Setup() via MaterialCoefficient(); everything below reads it.
 	std::unique_ptr<mfem::PWConstCoefficient> nu_coeff;
 
+	// Radial extent and scale-relative axis tolerance of the (r,z) mesh. Owned
+	// here rather than by PhysicsSolver because every consumer is magnetic: the
+	// tolerance feeds the curl-curl 1/r axis limit and the B-field recovery,
+	// and TouchesAxis drives the A_phi = 0 regularity condition. Planar runs
+	// leave it at its default.
+	axisym::AxisGeometry axisymmetric_mesh;
+
 	// Boundary attributes lying entirely on r = 0. Discovered here rather than
 	// during geometric classification because only an A_phi formulation needs a
 	// dedicated axis attribute; an electrostatic run on the same mesh does not.
@@ -38,19 +48,89 @@ protected:
 
 	MagneticSolver(mfem::Mesh& m, const ProblemConfig& c) : PhysicsSolver(m, c) {}
 
-	// Axis regularity, imposition half: locate the dedicated r=0 boundary
-	// attribute and merge it into the essential marker so A_phi = 0 there. Call
-	// after ess_bdr is built from the closure BCs and before BuildOperators().
-	void ImposeAxisRegularity() {
+	// Validate the axisymmetric mesh as (r,z) input, keep the resulting radial
+	// extent, then add what only an A_phi formulation cares about: whether the
+	// domain reaches r = 0, and whether any near-axis element leaves the 1/r
+	// quadrature under-resolved.
+	//
+	// Both are regularity concerns. Axis regularity exists because A_phi is the
+	// component of a vector field that must vanish on the axis to stay
+	// single-valued; a scalar potential carries no such constraint, so an
+	// electrostatic run has no use for either report.
+	void ValidateMagneticAxisymmetricGeometry() {
+		axisymmetric_mesh = ValidateAxisymmetricGeometry();
+		if (geometry != GeometryType::Axisymmetric) { return; }
+
+		Reporter().Diagnostic(
+			axisymmetric_mesh.TouchesAxis()
+				? "Axisymmetric domain touches the symmetry axis: "
+				  "axis regularity A_phi = 0 will be enforced."
+				: "Axisymmetric domain is annular: no axis condition required.");
+
+		WarnOnUnderResolvedRadialQuadrature();
+	}
+
+	// The curl-curl 1/r term is integrated by a geometry-aware rule whose cost
+	// is set by s = r_min/h per element (see
+	// AxisymmetricCurlCurlIntegrator::RadialExtraOrder). 1/r is rational, so no
+	// polynomial rule integrates it exactly and the rule must be capped; an
+	// element that is both very thin radially and very close to the axis can
+	// therefore fall outside the accuracy target. Such an element is rare and
+	// always a meshing choice, but the resulting error is silent, so report it
+	// once. The electrostatic r-weighted diffusion integrand is polynomial and
+	// is integrated exactly, so no equivalent concern exists there.
+	void WarnOnUnderResolvedRadialQuadrature() {
+		int worst_element = -1;
+		double worst_ratio = std::numeric_limits<double>::max();
+
+		for (int e = 0; e < mesh.GetNE(); ++e) {
+			double min_radius = 0.0;
+			double radial_width = 0.0;
+			AxisymmetricCurlCurlIntegrator::RadialExtent(
+				*mesh.GetElementTransformation(e), min_radius, radial_width);
+
+			// Elements meeting the axis are excluded by design: there the
+			// divergent directions are removed by the A_phi = 0 constraint.
+			if (!(radial_width > 0.0)) { continue; }
+			if (axisymmetric_mesh.IsOnAxisGeometry(min_radius)) { continue; }
+
+			const double ratio = min_radius / radial_width;
+			if (ratio < worst_ratio) {
+				worst_ratio = ratio;
+				worst_element = e;
+			}
+		}
+
+		if (worst_element < 0) { return; }
+		if (worst_ratio >= AxisymmetricCurlCurlIntegrator::kResolvedRadiusRatio) {
+			return;
+		}
+
+		std::ostringstream msg;
+		msg << std::setprecision(3)
+			<< "Element " << worst_element << " has r_min/width = " << worst_ratio
+			<< ", below the ratio " << AxisymmetricCurlCurlIntegrator::kResolvedRadiusRatio
+			<< " at which the curl-curl 1/r quadrature reaches its accuracy "
+			   "target. The capped rule integrates such elements approximately; "
+			   "widen the innermost radial band or move it away from the axis if "
+			   "near-axis accuracy matters.";
+		Reporter().Warning(msg.str());
+	}
+
+	// Axis regularity, imposition half: A_phi = 0 on r = 0. The dedicated axis
+	// boundary attribute joins the authored Dirichlet conditions in ess_bdr, so
+	// the ordering (merge before BuildOperators() reads ess_bdr) is structural
+	// rather than a convention the caller has to remember.
+	void BuildEssentialBoundaryMarker() override {
+		PhysicsSolver::BuildEssentialBoundaryMarker();
+
 		if (geometry != GeometryType::Axisymmetric) { return; }
 
 		axis_boundary = axisym::FindAxisBoundaryMarker(mesh, axisymmetric_mesh);
 
 		MFEM_VERIFY(ess_bdr.Size() == axis_boundary.Size(),
 			"Axis boundary marker does not match the mesh boundary attributes.");
-		for (int i = 0; i < ess_bdr.Size(); ++i) {
-			ess_bdr[i] = ess_bdr[i] || axis_boundary[i];
-		}
+		MergeMarker(ess_bdr, axis_boundary);
 	}
 
 	// Axis regularity, verification half: a nonzero Dirichlet value on the axis
@@ -72,12 +152,12 @@ protected:
 			is_axis_tdof[axis_tdofs[i]] = 1;
 		}
 
-		for (const auto& bc : closure_bcs) {
-			if (bc.Condition.Type != BoundaryConditionType::Dirichlet ||
-				bc.Condition.Value == 0.0) continue;
+		for (const auto& bc : boundary_conditions) {
+			if (!bc.IsNonzeroDirichlet()) continue;
 
+			mfem::Array<int> marker(bc.Marker);
 			mfem::Array<int> boundary_tdofs;
-			fespace->GetEssentialTrueDofs(bc.Marker, boundary_tdofs);
+			fespace->GetEssentialTrueDofs(marker, boundary_tdofs);
 			for (int i = 0; i < boundary_tdofs.Size(); ++i) {
 				const int tdof = boundary_tdofs[i];
 				MFEM_VERIFY(!is_axis_tdof[tdof],
@@ -113,14 +193,29 @@ protected:
 		MFEM_VERIFY(area > 0.0,
 			"Current terminal '" + terminal_name + "' has zero cross-section.");
 
-		mfem::Vector current_density(mesh.attributes.Max());
-		current_density = 0.0;
-		const double density = current / area;
-		for (int attr : group.AttributeIds) {
-			if (attr > 0 && attr <= current_density.Size()) {
-				current_density[attr - 1] = density;
-			}
+		return AttributeVector(group.AttributeIds, current / area);
+	}
+
+	// Scenario source current density, summed over the terminals @p include
+	// accepts. Current enters the model only through Terminals, so this is a
+	// pure function of sc.Excitations: a terminal the scenario does not drive
+	// contributes nothing. In CouplingMatrix mode the scenario carries a single
+	// unit excitation, so this IS the drive for that column rather than
+	// background data, and must not be suppressed the way boundary data is.
+	mfem::Vector BuildCurrentDensity(
+		const Scenario& sc,
+		const std::function<bool(const Terminal&)>& include) const {
+		mfem::Vector j_src(mesh.attributes.Max());
+		j_src = 0.0;
+
+		for (const auto& [term_name, term] : config.Terminals) {
+			if (term.DriveQuantity != Quantity::Current) continue;
+			if (!include(term)) continue;
+
+			const double I = ExcitationFor(sc, term_name);
+			if (I == 0.0) continue;
+			j_src += BuildTerminalCurrentDensity(term_name, I);
 		}
-		return current_density;
+		return j_src;
 	}
 };

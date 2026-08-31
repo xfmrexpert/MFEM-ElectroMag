@@ -14,7 +14,8 @@ This example demonstrates time-harmonic eddy current analysis for a conducting c
 - The 60 Hz calculations below provide a power-frequency reference
 - Angular frequency: ω = 2πf = 377 rad/s
 - Conductor: Aluminum (σ = 3.5 × 10⁷ S/m, μᵣ = 1.0)
-- Coil: Copper (J_source = 1 × 10⁵ A/m²)
+- Coil: stranded winding driven with a total current of 240 A, which over the
+  0.0024 m² coil cross-section gives J_source = 1 × 10⁵ A/m²
 
 **Boundary Conditions:**
 - Far field: A_φ = 0 (Dirichlet)

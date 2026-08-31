@@ -325,11 +325,25 @@ private:
 		std::unordered_map<std::string, EntityGroup> groups;
 		if (config.contains("entity_groups")) {
 			for (const auto& g : config["entity_groups"]) {
-                EntityGroup group;
+				EntityGroup group;
 				std::string name = g.value("name", std::string{});
-				if (g.contains("dim")) {
-					int dim = g["dim"];
-					group.Dim = (dim == 1) ? EntityDim::Boundary : EntityDim::Domain;
+				const std::string ctx = "entity group '" + name + "'";
+				if (g.contains("kind")) {
+					throw std::runtime_error(ctx + ": unsupported field 'kind'; use "
+						"'dim' with the entity dimension (1 = curve, 2 = surface, "
+						"3 = volume)");
+				}
+				if (!g.contains("dim")) {
+					throw std::runtime_error(ctx + ": missing required field 'dim'");
+				}
+				if (!g["dim"].is_number_integer()) {
+					throw std::runtime_error(ctx + ": field 'dim' must be an integer "
+						"entity dimension (1 = curve, 2 = surface, 3 = volume)");
+				}
+				group.Dim = g["dim"].get<int>();
+				if (group.Dim < 1 || group.Dim > 3) {
+					throw std::runtime_error(ctx + ": invalid dim " +
+						std::to_string(group.Dim) + "; must be 1, 2 or 3");
 				}
 				if (g.contains("attribute_ids")) {
 					for (int attr : g["attribute_ids"]) {
@@ -348,10 +362,10 @@ private:
             for (auto& t : config["terminals"]) {
 				Terminal terminal;
 				std::string name = Get(t, "name", std::string{});
-				terminal.ExcitationType = ParseRequiredEnum(t, "excitation_type", Quantity::Voltage,
-															"terminal '" + name + "'",
-															{{"voltage", Quantity::Voltage},
-															 {"current", Quantity::Current}});
+				terminal.DriveQuantity = ParseRequiredEnum(t, "quantity", Quantity::Voltage,
+														   "terminal '" + name + "'",
+														   {{"voltage", Quantity::Voltage},
+															{"current", Quantity::Current}});
 				terminal.Conductor = ParseEnum(t, "conductor_type", ConductorType::Massive,
 											   {{"massive",  ConductorType::Massive},
 												{"stranded", ConductorType::Stranded}});
@@ -404,15 +418,15 @@ private:
     }
 
     // --------------------------------------------------------
-    // Boundary Conditions (closures: far-field, symmetry, axis)
+    // Boundary conditions (far-field, symmetry, prescribed flux)
     // --------------------------------------------------------
 
     std::vector<BoundaryCondition> GetBoundaries() const {
 
         std::vector<BoundaryCondition> bcs;
 
-        if (config.contains("boundaries")) {
-            for (auto &bc : config["boundaries"]) {
+        if (config.contains("boundary_conditions")) {
+            for (auto &bc : config["boundary_conditions"]) {
                 if (!bc.contains("type") || !bc.contains("value") || !bc.contains("entity_group")) {
                      continue; // Skip invalid entries, let validator handle reporting
                 }
@@ -429,9 +443,9 @@ private:
     }
 
     static BoundaryConditionType ParseBoundaryConditionType(const std::string& type) {
-        if (type == "Dirichlet") return BoundaryConditionType::Dirichlet;
-        if (type == "Neumann") return BoundaryConditionType::Neumann;
-        if (type == "Robin") return BoundaryConditionType::Robin;
+        if (type == "dirichlet") return BoundaryConditionType::Dirichlet;
+        if (type == "neumann") return BoundaryConditionType::Neumann;
+        if (type == "robin") return BoundaryConditionType::Robin;
         throw std::invalid_argument("Unsupported boundary condition type: " + type);
     }
 

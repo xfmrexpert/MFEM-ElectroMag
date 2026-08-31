@@ -48,11 +48,11 @@ json CanonicalConfig() {
              {"properties", {{"sigma", 5.8e7}, {"epsilon_r", 2.5}, {"mu_r", 1.2}}}}
         })},
         {"terminals", json::array({
-            {{"name", "Coil"}, {"excitation_type", "current"},
+            {{"name", "Coil"}, {"quantity", "current"},
              {"conductor_type", "stranded"}, {"entity_group", "Conductor"}}
         })},
-        {"boundaries", json::array({
-            {{"type", "Robin"}, {"entity_group", "FarField"},
+        {"boundary_conditions", json::array({
+            {{"type", "robin"}, {"entity_group", "FarField"},
              {"value", 4.0}, {"robin_coefficient", 2.0}}
         })},
         {"scenarios", json::array({
@@ -88,9 +88,11 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
     REQUIRE(config.Amr.ErrorFraction == Catch::Approx(0.6));
     REQUIRE(config.Amr.ErrorTolerance == Catch::Approx(1e-5));
 
-    REQUIRE(config.EntityGroups.at("Conductor").Dim == EntityDim::Domain);
+    REQUIRE(config.EntityGroups.at("Conductor").Dim == 2);
+    REQUIRE(config.EntityGroups.at("Conductor").IsDomain(2));
     REQUIRE((config.EntityGroups.at("Conductor").AttributeIds == std::vector<int>{1, 2}));
-    REQUIRE(config.EntityGroups.at("FarField").Dim == EntityDim::Boundary);
+    REQUIRE(config.EntityGroups.at("FarField").Dim == 1);
+    REQUIRE(config.EntityGroups.at("FarField").IsBoundary(2));
     REQUIRE(config.Regions[0].CurrentConstraint == RegionCurrentConstraint::Open);
     REQUIRE(config.Regions.size() == 1);
     REQUIRE(config.Regions[0].EntityGroupName == "Conductor");
@@ -99,7 +101,7 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
     REQUIRE(config.Materials.at("Copper").RelPermittivity == Catch::Approx(2.5));
     REQUIRE(config.Materials.at("Copper").RelPermeability == Catch::Approx(1.2));
 
-    REQUIRE(config.Terminals.at("Coil").ExcitationType == Quantity::Current);
+    REQUIRE(config.Terminals.at("Coil").DriveQuantity == Quantity::Current);
     REQUIRE(config.Terminals.at("Coil").Conductor == ConductorType::Stranded);
     REQUIRE(config.Terminals.at("Coil").EntityGroupName == "Conductor");
     REQUIRE(config.BoundaryConditions.size() == 1);
@@ -117,9 +119,9 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
 TEST_CASE("InputParser decodes typed Dirichlet and Neumann boundaries",
           "[input_parser][boundaries]") {
     json source = CanonicalConfig();
-    source["boundaries"] = json::array({
-        {{"type", "Dirichlet"}, {"entity_group", "FarField"}, {"value", 3.0}},
-        {{"type", "Neumann"}, {"entity_group", "FarField"}, {"value", -2.0}}
+    source["boundary_conditions"] = json::array({
+        {{"type", "dirichlet"}, {"entity_group", "FarField"}, {"value", 3.0}},
+        {{"type", "neumann"}, {"entity_group", "FarField"}, {"value", -2.0}}
     });
 
     const auto boundaries = InputParser(source).GetProblemConfig().BoundaryConditions;
@@ -235,31 +237,60 @@ TEST_CASE("InputParser wraps decoding type failures", "[input_parser]") {
     REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
 }
 
-TEST_CASE("InputParser requires terminal excitation_type", "[input_parser]") {
+TEST_CASE("InputParser requires terminal quantity", "[input_parser]") {
     SECTION("missing key is rejected") {
         json source = CanonicalConfig();
-        source["terminals"][0].erase("excitation_type");
+        source["terminals"][0].erase("quantity");
         REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
     }
 
     SECTION("null value is rejected") {
         json source = CanonicalConfig();
-        source["terminals"][0]["excitation_type"] = nullptr;
+        source["terminals"][0]["quantity"] = nullptr;
         REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
     }
 
-    SECTION("the legacy 'excitation' spelling does not satisfy the requirement") {
+    SECTION("the superseded 'excitation_type' spelling does not satisfy the requirement") {
         json source = CanonicalConfig();
-        source["terminals"][0].erase("excitation_type");
-        source["terminals"][0]["excitation"] = "current";
+        source["terminals"][0].erase("quantity");
+        source["terminals"][0]["excitation_type"] = "current";
         REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
     }
 
     SECTION("the error names the offending terminal") {
         json source = CanonicalConfig();
-        source["terminals"][0].erase("excitation_type");
+        source["terminals"][0].erase("quantity");
         REQUIRE_THROWS_WITH(InputParser(source).GetProblemConfig(),
                             Catch::Matchers::ContainsSubstring("Coil") &&
-                            Catch::Matchers::ContainsSubstring("excitation_type"));
+                            Catch::Matchers::ContainsSubstring("quantity"));
+    }
+}
+
+TEST_CASE("InputParser requires an entity group dimension", "[input_parser]") {
+    SECTION("missing key is rejected") {
+        json source = CanonicalConfig();
+        source["entity_groups"][0].erase("dim");
+        REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
+    }
+
+    SECTION("a non-integer dimension is rejected") {
+        json source = CanonicalConfig();
+        source["entity_groups"][0]["dim"] = "domain";
+        REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
+    }
+
+    SECTION("an out-of-range dimension is rejected") {
+        json source = CanonicalConfig();
+        source["entity_groups"][0]["dim"] = 4;
+        REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
+    }
+
+    SECTION("the superseded 'kind' spelling does not satisfy the requirement") {
+        json source = CanonicalConfig();
+        source["entity_groups"][0].erase("dim");
+        source["entity_groups"][0]["kind"] = "domain";
+        REQUIRE_THROWS_WITH(InputParser(source).GetProblemConfig(),
+                            Catch::Matchers::ContainsSubstring("kind") &&
+                            Catch::Matchers::ContainsSubstring("dim"));
     }
 }

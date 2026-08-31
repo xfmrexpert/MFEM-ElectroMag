@@ -7,6 +7,8 @@
 #include <vector>
 #include <set>
 #include <map>
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <stdexcept>
 #include <functional>
@@ -143,9 +145,17 @@ private:
             }
         }
 
+        if (config.contains("boundaries")) {
+            AddError("boundaries", "Unsupported section; use 'boundary_conditions'");
+        }
+
         CheckObjectArrayTypes(config, "entity_groups", [&](const json& group, const std::string& prefix) {
             CheckFieldType(group, "name", prefix + ".name", ExpectedType::String);
             CheckFieldType(group, "dim", prefix + ".dim", ExpectedType::Integer);
+            if (group.contains("kind")) {
+                AddError(prefix + ".kind", "Unsupported field; use 'dim' with the entity "
+                        "dimension (1 = curve, 2 = surface, 3 = volume)");
+            }
             CheckFieldType(group, "attribute_ids", prefix + ".attribute_ids", ExpectedType::Array);
             if (group.contains("attribute_ids") && group["attribute_ids"].is_array()) {
                 for (size_t i = 0; i < group["attribute_ids"].size(); ++i) {
@@ -175,12 +185,18 @@ private:
 
         CheckObjectArrayTypes(config, "terminals", [&](const json& terminal, const std::string& prefix) {
             CheckFieldType(terminal, "name", prefix + ".name", ExpectedType::String);
-            CheckFieldType(terminal, "excitation_type", prefix + ".excitation_type", ExpectedType::String);
+            CheckFieldType(terminal, "quantity", prefix + ".quantity", ExpectedType::String);
+            if (terminal.contains("excitation_type")) {
+                AddError(prefix + ".excitation_type", "Unsupported field; use 'quantity'");
+            }
+            if (terminal.contains("excitation")) {
+                AddError(prefix + ".excitation", "Unsupported field; use 'quantity'");
+            }
             CheckFieldType(terminal, "conductor_type", prefix + ".conductor_type", ExpectedType::String);
             CheckFieldType(terminal, "entity_group", prefix + ".entity_group", ExpectedType::String);
         });
 
-        CheckObjectArrayTypes(config, "boundaries", [&](const json& boundary, const std::string& prefix) {
+        CheckObjectArrayTypes(config, "boundary_conditions", [&](const json& boundary, const std::string& prefix) {
             CheckFieldType(boundary, "type", prefix + ".type", ExpectedType::String);
             CheckFieldType(boundary, "entity_group", prefix + ".entity_group", ExpectedType::String);
             CheckFieldType(boundary, "value", prefix + ".value", ExpectedType::Number);
@@ -232,11 +248,14 @@ private:
         return {};
     }
 
+    // Which kind of entity group a reference is required to name.
+    enum class RequiredGroupKind { Any, Boundary, Domain };
+
     // Verify that an "entity_group" reference points at a declared group and,
-    // when expected_kind is set, that the group has the matching dimensionality
-    // (1 => boundary, 2 => domain; 0 => either). Mirrors how the solvers resolve
-    // EntityGroupName -> EntityGroup via config.EntityGroups.at(name).
-    void CheckEntityGroupRef(const json& node, const std::string& field, int expected_kind) {
+    // when required is not Any, that the group is of the matching kind. Mirrors
+    // how the solvers resolve EntityGroupName -> EntityGroup via
+    // config.EntityGroups.at(name).
+    void CheckEntityGroupRef(const json& node, const std::string& field, RequiredGroupKind required) {
         if (!node.is_string()) {
             AddError(field, "Entity group reference must be a string");
             return;
@@ -247,10 +266,10 @@ private:
                     "'. No entity group with that name is declared in 'entity_groups'");
             return;
         }
-        if (expected_kind == 1 && boundary_group_names_.count(ref) == 0) {
-            AddError(field, "Entity group '" + ref + "' must be a boundary group (dim = 1)");
-        } else if (expected_kind == 2 && domain_group_names_.count(ref) == 0) {
-            AddError(field, "Entity group '" + ref + "' must be a domain group (dim != 1)");
+        if (required == RequiredGroupKind::Boundary && boundary_group_names_.count(ref) == 0) {
+            AddError(field, "Entity group '" + ref + "' must be a boundary group (kind = 'boundary')");
+        } else if (required == RequiredGroupKind::Domain && domain_group_names_.count(ref) == 0) {
+            AddError(field, "Entity group '" + ref + "' must be a domain group (kind = 'domain')");
         }
     }
 
@@ -357,6 +376,21 @@ private:
         const int max_dom = mesh ? mesh->attributes.Max() : 0;
         const int max_bdr = mesh ? mesh->bdr_attributes.Max() : 0;
 
+        // The role of a group (boundary vs. domain) is derived by comparing its
+        // entity dimension to the mesh dimension, so a reference dimension is
+        // needed before any group can be classified. With a mesh loaded that is
+        // simply its dimension. Without one, the highest dimension any group
+        // declares is used: domain groups carry the mesh's own dimension, so the
+        // maximum over all groups equals it in any well-formed file.
+        int mesh_dim = mesh ? mesh->Dimension() : 0;
+        if (!mesh) {
+            for (const auto& g : groups) {
+                if (g.contains("dim") && g["dim"].is_number_integer()) {
+                    mesh_dim = std::max(mesh_dim, g["dim"].get<int>());
+                }
+            }
+        }
+
         for (size_t i = 0; i < groups.size(); ++i) {
             const auto& g = groups[i];
             std::string prefix = "entity_groups[" + std::to_string(i) + "]";
@@ -368,16 +402,33 @@ private:
                 AddError(prefix + ".name", "Duplicate entity group name '" + name + "'");
             }
 
-            // dim == 1 => boundary group, otherwise domain group (matches InputParser).
+            // 'dim' is the topological dimension of the entities the ids name,
+            // which is what selects the attribute namespace. Boundary/domain is
+            // derived from it, not authored (matches InputParser).
             bool is_boundary = false;
-            if (!g.contains("dim")) {
+            if (g.contains("kind")) {
+                AddError(prefix + ".kind", "Unsupported field 'kind'; use 'dim' with the "
+                        "entity dimension (1 = curve, 2 = surface, 3 = volume)");
+            } else if (!g.contains("dim")) {
                 AddError(prefix + ".dim", "Missing required field 'dim'");
+            } else if (!g["dim"].is_number_integer()) {
+                AddError(prefix + ".dim", "Must be an integer entity dimension "
+                        "(1 = curve, 2 = surface, 3 = volume)");
             } else {
-                int dim = g["dim"];
-                if (dim != 1 && dim != 2) {
-                    AddError(prefix + ".dim", "Dimension must be 1 (boundary) or 2 (domain)");
+                const int dim = g["dim"];
+                if (dim < 1 || dim > 3) {
+                    AddError(prefix + ".dim", "Invalid dim " + std::to_string(dim) +
+                            ". Must be 1, 2 or 3");
+                } else if (mesh_dim > 0 && dim != mesh_dim && dim != mesh_dim - 1) {
+                    // Anything other than the mesh dimension or one below it
+                    // names entities this solver cannot use: too low and it is a
+                    // corner/edge of the boundary, too high and it does not exist.
+                    AddError(prefix + ".dim", "Entity dimension " + std::to_string(dim) +
+                            " is unusable in a " + std::to_string(mesh_dim) +
+                            "D mesh. Must be " + std::to_string(mesh_dim) +
+                            " (domain) or " + std::to_string(mesh_dim - 1) + " (boundary)");
                 }
-                is_boundary = (dim == 1);
+                is_boundary = (dim == mesh_dim - 1);
             }
 
             if (!name.empty()) {
@@ -461,7 +512,7 @@ private:
             if (!reg.contains("entity_group")) {
                 AddError(prefix + ".entity_group", "Missing required field 'entity_group'");
             } else {
-                CheckEntityGroupRef(reg["entity_group"], prefix + ".entity_group", /*domain*/2);
+                CheckEntityGroupRef(reg["entity_group"], prefix + ".entity_group", RequiredGroupKind::Domain);
             }
 
             if (!reg.contains("material")) {
@@ -648,42 +699,48 @@ private:
     }
 
     void ValidateBoundaries(const json& config, const mfem::Mesh* mesh = nullptr) {
-        if (!config.contains("boundaries")) {
-            return; // Boundaries might be optional
+        if (!config.contains("boundary_conditions")) {
+            return; // Boundary conditions are optional; absent means homogeneous Neumann
         }
 
-        const auto& boundaries = config["boundaries"];
+        const auto& boundaries = config["boundary_conditions"];
         if (!boundaries.is_array()) {
-            AddError("boundaries", "Boundaries must be an array");
+            AddError("boundary_conditions", "Boundary conditions must be an array");
             return;
         }
 
         for (size_t i = 0; i < boundaries.size(); ++i) {
             const auto& bc = boundaries[i];
-            std::string prefix = "boundaries[" + std::to_string(i) + "]";
+            std::string prefix = "boundary_conditions[" + std::to_string(i) + "]";
 
             if (!bc.contains("type")) {
                 AddError(prefix + ".type", "Missing required field 'type'");
             } else if (bc["type"].is_string()) {
                 std::string bc_type = bc["type"];
-                if (bc_type != "Dirichlet" && bc_type != "Neumann" && bc_type != "Robin") {
-                    AddError(prefix + ".type", "Invalid boundary type '" + bc_type + "'. Must be 'Dirichlet', 'Neumann', or 'Robin'");
+                if (bc_type != "dirichlet" && bc_type != "neumann" && bc_type != "robin") {
+                    std::string lowered = bc_type;
+                    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    const bool is_case_slip = (lowered == "dirichlet" || lowered == "neumann" || lowered == "robin");
+                    AddError(prefix + ".type", is_case_slip
+                        ? "Boundary condition type '" + bc_type + "' must be lowercase; use '" + lowered + "'"
+                        : "Invalid boundary condition type '" + bc_type + "'. Must be 'dirichlet', 'neumann', or 'robin'");
                 }
 
-                if (bc_type == "Robin" && !bc.contains("robin_coefficient")) {
+                if (bc_type == "robin" && !bc.contains("robin_coefficient")) {
                     AddError(prefix + ".robin_coefficient",
-                             "Robin boundaries require 'robin_coefficient'");
+                             "Robin boundary conditions require 'robin_coefficient'");
                 }
-                if (bc_type != "Robin" && bc.contains("robin_coefficient")) {
+                if (bc_type != "robin" && bc.contains("robin_coefficient")) {
                     AddError(prefix + ".robin_coefficient",
-                             "'robin_coefficient' is only valid for Robin boundaries");
+                             "'robin_coefficient' is only valid for Robin boundary conditions");
                 }
             }
 
             if (!bc.contains("entity_group")) {
                 AddError(prefix + ".entity_group", "Missing required field 'entity_group'");
             } else {
-                CheckEntityGroupRef(bc["entity_group"], prefix + ".entity_group", /*boundary*/1);
+                CheckEntityGroupRef(bc["entity_group"], prefix + ".entity_group", RequiredGroupKind::Boundary);
             }
 
             if (!bc.contains("value")) {
@@ -739,30 +796,29 @@ private:
                 }
             }
 
-            // 'excitation_type' is required rather than defaulting to voltage: a
+            // 'quantity' is required rather than defaulting to voltage: a
             // silent default turns a renamed or misspelled key into a confusing
             // downstream "must be a boundary group" error instead of naming the
-            // real problem. The legacy spelling gets the actionable message on
-            // its own so the two errors do not stack.
-            if (t.contains("excitation")) {
-                AddError(prefix + ".excitation", "Unsupported field; use 'excitation_type'");
-            }
-            else if (!t.contains("excitation_type")) {
-                AddError(prefix + ".excitation_type", "Missing required field 'excitation_type'");
+            // real problem. A superseded spelling already got the actionable
+            // rename message, so the generic error is suppressed there.
+            const bool has_legacy_spelling =
+                t.contains("excitation_type") || t.contains("excitation");
+            if (!t.contains("quantity") && !has_legacy_spelling) {
+                AddError(prefix + ".quantity", "Missing required field 'quantity'");
             }
 
-            std::string excitation = t.value("excitation_type", "voltage");
+            std::string excitation = t.value("quantity", "voltage");
             if (excitation != "voltage" && excitation != "current") {
-                AddError(prefix + ".excitation_type", "Invalid excitation_type '" + excitation + "'. Must be 'voltage' or 'current'");
+                AddError(prefix + ".quantity", "Invalid quantity '" + excitation + "'. Must be 'voltage' or 'current'");
             }
             else if (type == "electrostatics" && excitation != "voltage") {
-                AddError(prefix + ".excitation_type",
-                    "Electrostatic terminals must use excitation_type 'voltage'");
+                AddError(prefix + ".quantity",
+                    "Electrostatic terminals must use quantity 'voltage'");
             }
             else if ((type == "magnetostatics" || type == "magnetoquasistatics") &&
                      excitation != "current") {
-                AddError(prefix + ".excitation_type",
-                    "Magnetic terminals must use excitation_type 'current'; "
+                AddError(prefix + ".quantity",
+                    "Magnetic terminals must use quantity 'current'; "
                     "massive MQS terminal voltage is a solved output");
             }
 
@@ -777,7 +833,8 @@ private:
                 AddError(prefix + ".entity_group", "Missing required field 'entity_group'");
             } else {
                 CheckEntityGroupRef(t["entity_group"], prefix + ".entity_group",
-                                    is_current ? /*domain*/2 : /*boundary*/1);
+                                    is_current ? RequiredGroupKind::Domain
+                                               : RequiredGroupKind::Boundary);
             }
         }
     }

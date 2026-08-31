@@ -47,32 +47,32 @@
   "terminals": [
     {
       "name": "High_Voltage",
-      "excitation_type": "voltage",
+      "quantity": "voltage",
       "entity_group": "High_Voltage"
     },
     {
       "name": "Low_Voltage_GND",
-      "excitation_type": "voltage",
+      "quantity": "voltage",
       "entity_group": "Low_Voltage_GND"
     },
     {
       "name": "Regulating_Windings_GND",
-      "excitation_type": "voltage",
+      "quantity": "voltage",
       "entity_group": "Regulating_Windings_GND"
     },
     {
       "name": "Static_Rings_GND",
-      "excitation_type": "voltage",
+      "quantity": "voltage",
       "entity_group": "Static_Rings_GND"
     },
     {
       "name": "Clamping_Ring_GND",
-      "excitation_type": "voltage",
+      "quantity": "voltage",
       "entity_group": "Clamping_Ring_GND"
     },
     {
       "name": "Tank_Wall",
-      "excitation_type": "voltage",
+      "quantity": "voltage",
       "entity_group": "Tank_Wall"
     }
   ],

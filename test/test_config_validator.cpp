@@ -30,10 +30,10 @@ json ValidConfig() {
 			{{"name", "Dielectric"}, {"properties", {{"epsilon_r", 1.0}}}}
 		})},
 		{"terminals", json::array({
-			{{"name", "Drive"}, {"excitation_type", "voltage"}, {"entity_group", "Boundary"}}
+			{{"name", "Drive"}, {"quantity", "voltage"}, {"entity_group", "Boundary"}}
 		})},
-		{"boundaries", json::array({
-			{{"type", "Dirichlet"}, {"entity_group", "Boundary"}, {"value", 0.0}}
+		{"boundary_conditions", json::array({
+			{{"type", "dirichlet"}, {"entity_group", "Boundary"}, {"value", 0.0}}
 		})},
 		{"scenarios", json::array({
 			{{"name", "Driven"}, {"excitations", json::array({
@@ -43,7 +43,7 @@ json ValidConfig() {
 	};
 }
 
-TEST_CASE("BoundaryConditionValidator distinguishes essential and weak closures",
+TEST_CASE("BoundaryConditionValidator distinguishes essential and natural conditions",
 		  "[boundary_validation]") {
 	mfem::Mesh mesh = mfem::Mesh::MakeCartesian2D(
 		1, 1, mfem::Element::QUADRILATERAL, true, 1.0, 1.0);
@@ -112,12 +112,12 @@ TEST_CASE("BoundaryConditionValidator distinguishes essential and weak closures"
 	}
 }
 
-TEST_CASE("ConfigValidator validates boundary values and Robin metadata",
-		  "[config_validator][boundaries]") {
+TEST_CASE("ConfigValidator validates boundary condition values and Robin metadata",
+		  "[config_validator][boundary_conditions]") {
 	SECTION("accepts Neumann without a Robin coefficient") {
 		json config = ValidConfig();
-		config["boundaries"][0]["type"] = "Neumann";
-		config["boundaries"][0]["value"] = -2.5;
+		config["boundary_conditions"][0]["type"] = "neumann";
+		config["boundary_conditions"][0]["value"] = -2.5;
 
 		ConfigValidator validator;
 		REQUIRE(validator.Validate(config));
@@ -125,40 +125,40 @@ TEST_CASE("ConfigValidator validates boundary values and Robin metadata",
 
 	SECTION("rejects non-finite boundary values") {
 		json config = ValidConfig();
-		config["boundaries"][0]["value"] =
+		config["boundary_conditions"][0]["value"] =
 			std::numeric_limits<double>::infinity();
 
 		ConfigValidator validator;
 		REQUIRE_FALSE(validator.Validate(config));
-		REQUIRE(HasError(validator, "boundaries[0].value"));
+		REQUIRE(HasError(validator, "boundary_conditions[0].value"));
 	}
 
 	SECTION("requires a finite coefficient for Robin") {
 		json missing = ValidConfig();
-		missing["boundaries"][0]["type"] = "Robin";
+		missing["boundary_conditions"][0]["type"] = "robin";
 
 		ConfigValidator missing_validator;
 		REQUIRE_FALSE(missing_validator.Validate(missing));
 		REQUIRE(HasError(missing_validator,
-						 "boundaries[0].robin_coefficient"));
+						 "boundary_conditions[0].robin_coefficient"));
 
 		json non_finite = missing;
-		non_finite["boundaries"][0]["robin_coefficient"] =
+		non_finite["boundary_conditions"][0]["robin_coefficient"] =
 			std::numeric_limits<double>::infinity();
 
 		ConfigValidator finite_validator;
 		REQUIRE_FALSE(finite_validator.Validate(non_finite));
 		REQUIRE(HasError(finite_validator,
-						 "boundaries[0].robin_coefficient"));
+						 "boundary_conditions[0].robin_coefficient"));
 	}
 
 	SECTION("rejects a Robin coefficient on non-Robin boundaries") {
 		json config = ValidConfig();
-		config["boundaries"][0]["robin_coefficient"] = 1.0;
+		config["boundary_conditions"][0]["robin_coefficient"] = 1.0;
 
 		ConfigValidator validator;
 		REQUIRE_FALSE(validator.Validate(config));
-		REQUIRE(HasError(validator, "boundaries[0].robin_coefficient"));
+		REQUIRE(HasError(validator, "boundary_conditions[0].robin_coefficient"));
 	}
 }
 
@@ -166,7 +166,7 @@ json ValidMqsConfig() {
 	json config = ValidConfig();
 	config["simulation"]["physics_type"] = "magnetoquasistatics";
 	config["materials"][0]["properties"] = {{"mu_r", 1.0}, {"sigma", 0.0}};
-	config["terminals"][0]["excitation_type"] = "current";
+	config["terminals"][0]["quantity"] = "current";
 	config["terminals"][0]["entity_group"] = "Domain";
 	config["scenarios"][0]["frequency"] = 60.0;
 	return config;
@@ -219,7 +219,7 @@ TEST_CASE("ConfigValidator validates open-current MQS regions",
 		config["materials"][0]["properties"]["sigma"] = 1.0e6;
 		config["regions"][0]["current_constraint"] = "open";
 		config["terminals"] = json::array({
-			{{"name", "Port"}, {"excitation_type", "current"},
+			{{"name", "Port"}, {"quantity", "current"},
 			 {"conductor_type", "massive"}, {"entity_group", "Domain"}}
 		});
 		config["scenarios"][0]["excitations"] = json::array();
@@ -364,7 +364,7 @@ TEST_CASE("ConfigValidator enforces physics-specific terminal types",
 		config["materials"][0]["properties"] = {
 			{"mu_r", 1.0}, {"sigma", 5.8e7}
 		};
-		config["terminals"][0]["excitation_type"] = excitation;
+		config["terminals"][0]["quantity"] = excitation;
 		config["terminals"][0]["conductor_type"] = conductor;
 		config["terminals"][0]["entity_group"] =
 			excitation == "current" ? "Domain" : "Boundary";
@@ -381,12 +381,12 @@ TEST_CASE("ConfigValidator enforces physics-specific terminal types",
 
 	SECTION("rejects electrostatic current terminals") {
 		json config = ValidConfig();
-		config["terminals"][0]["excitation_type"] = "current";
+		config["terminals"][0]["quantity"] = "current";
 		config["terminals"][0]["entity_group"] = "Domain";
 
 		ConfigValidator validator;
 		REQUIRE_FALSE(validator.Validate(config));
-		REQUIRE(HasError(validator, "terminals[0].excitation_type"));
+		REQUIRE(HasError(validator, "terminals[0].quantity"));
 	}
 
 	SECTION("accepts magnetostatic current terminals") {
@@ -399,7 +399,7 @@ TEST_CASE("ConfigValidator enforces physics-specific terminal types",
 		ConfigValidator validator;
 		REQUIRE_FALSE(validator.Validate(
 			magnetic_config("magnetostatics", "voltage")));
-		REQUIRE(HasError(validator, "terminals[0].excitation_type"));
+		REQUIRE(HasError(validator, "terminals[0].quantity"));
 	}
 
 	SECTION("accepts massive and stranded MQS current terminals") {
@@ -414,7 +414,7 @@ TEST_CASE("ConfigValidator enforces physics-specific terminal types",
 		ConfigValidator validator;
 		REQUIRE_FALSE(validator.Validate(
 			magnetic_config("magnetoquasistatics", "voltage")));
-		REQUIRE(HasError(validator, "terminals[0].excitation_type"));
+		REQUIRE(HasError(validator, "terminals[0].quantity"));
 	}
 }
 
@@ -447,25 +447,71 @@ TEST_CASE("ConfigValidator enforces canonical simulation field names", "[config_
 }
 
 TEST_CASE("ConfigValidator enforces canonical terminal field names", "[config_validator]") {
-	json config = ValidConfig();
-	config["terminals"][0].erase("excitation_type");
-	config["terminals"][0]["excitation"] = "voltage";
+	for (const std::string legacy : {"excitation", "excitation_type"}) {
+		json config = ValidConfig();
+		config["terminals"][0].erase("quantity");
+		config["terminals"][0][legacy] = "voltage";
 
-	ConfigValidator validator;
-	REQUIRE_FALSE(validator.Validate(config));
-	REQUIRE(HasError(validator, "terminals[0].excitation"));
-	// The legacy spelling gets the actionable rename message on its own; the
-	// generic "missing required field" error would only add noise here.
-	REQUIRE_FALSE(HasError(validator, "terminals[0].excitation_type"));
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "terminals[0]." + legacy));
+		// The superseded spelling gets the actionable rename message on its own;
+		// the generic "missing required field" error would only add noise here.
+		REQUIRE_FALSE(HasError(validator, "terminals[0].quantity"));
+	}
 }
 
-TEST_CASE("ConfigValidator requires terminal excitation_type", "[config_validator]") {
+TEST_CASE("ConfigValidator enforces canonical schema section and field names", "[config_validator]") {
+	SECTION("the superseded 'boundaries' section is rejected") {
+		json config = ValidConfig();
+		config["boundaries"] = config["boundary_conditions"];
+		config.erase("boundary_conditions");
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "boundaries"));
+	}
+
+	SECTION("the superseded entity group 'kind' field is rejected") {
+		json config = ValidConfig();
+		config["entity_groups"][0].erase("dim");
+		config["entity_groups"][0]["kind"] = "domain";
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "entity_groups[0].kind"));
+	}
+
+	SECTION("a dimension unusable in the mesh is rejected") {
+		// The mesh is 2D, so only dim 2 (domain) and dim 1 (boundary) name
+		// entities this solver can use. A volume group is neither.
+		mfem::Mesh mesh = mfem::Mesh::MakeCartesian2D(
+			1, 1, mfem::Element::QUADRILATERAL, true, 1.0, 1.0);
+		json config = ValidConfig();
+		config["entity_groups"][0]["dim"] = 3;
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config, &mesh));
+		REQUIRE(HasError(validator, "entity_groups[0].dim"));
+	}
+
+	SECTION("capitalized boundary condition types name the lowercase form") {
+		json config = ValidConfig();
+		config["boundary_conditions"][0]["type"] = "Dirichlet";
+
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "boundary_conditions[0].type"));
+	}
+}
+
+TEST_CASE("ConfigValidator requires terminal quantity", "[config_validator]") {
 	json config = ValidConfig();
-	config["terminals"][0].erase("excitation_type");
+	config["terminals"][0].erase("quantity");
 
 	ConfigValidator validator;
 	REQUIRE_FALSE(validator.Validate(config));
-	REQUIRE(HasError(validator, "terminals[0].excitation_type"));
+	REQUIRE(HasError(validator, "terminals[0].quantity"));
 }
 
 TEST_CASE("ConfigValidator rejects duplicate names", "[config_validator]") {
@@ -481,7 +527,7 @@ TEST_CASE("ConfigValidator rejects duplicate names", "[config_validator]") {
 	SECTION("terminals") {
 		json config = ValidConfig();
 		config["terminals"].push_back(
-			{{"name", "Drive"}, {"excitation_type", "voltage"}, {"entity_group", "Boundary"}});
+			{{"name", "Drive"}, {"quantity", "voltage"}, {"entity_group", "Boundary"}});
 		ConfigValidator validator;
 		REQUIRE_FALSE(validator.Validate(config));
 		REQUIRE(HasError(validator, "terminals[1].name"));
@@ -497,7 +543,7 @@ TEST_CASE("ConfigValidator rejects duplicate names", "[config_validator]") {
 	}
 }
 
-TEST_CASE("ConfigValidator checks entity group references and dimensions", "[config_validator]") {
+TEST_CASE("ConfigValidator checks entity group references and kinds", "[config_validator]") {
 	SECTION("unknown group") {
 		json config = ValidConfig();
 		config["regions"][0]["entity_group"] = "Missing";
@@ -506,7 +552,7 @@ TEST_CASE("ConfigValidator checks entity group references and dimensions", "[con
 		REQUIRE(HasError(validator, "regions[0].entity_group"));
 	}
 
-	SECTION("wrong group dimension") {
+	SECTION("wrong group kind") {
 		json config = ValidConfig();
 		config["terminals"][0]["entity_group"] = "Domain";
 		ConfigValidator validator;
@@ -532,7 +578,7 @@ TEST_CASE("ConfigValidator rejects invalid ranges and enum values", "[config_val
 		{"error_fraction", 1.5},
 		{"error_tolerance", -1.0}
 	};
-	config["entity_groups"][0]["dim"] = 3;
+	config["entity_groups"][0]["dim"] = 7;
 	config["materials"][0]["properties"]["sigma"] = -1.0;
 	config["terminals"][0]["conductor_type"] = "unknown";
 

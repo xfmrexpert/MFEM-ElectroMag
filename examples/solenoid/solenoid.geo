@@ -60,54 +60,94 @@ Rectangle(8) = {coil_r_inner, -far_field_z, 0, coil_r_outer - coil_r_inner, far_
 // Outer region (r > coil_outer)
 Rectangle(9) = {coil_r_outer, -far_field_z, 0, far_field_r - coil_r_outer, far_field_z + coil_z_start};
 
-// Define physical surfaces (material attributes)
-Physical Surface("Coil", 2) = {2};  // Coil with current density
-Physical Surface("Air", 1) = {1, 3, 4, 5, 6, 7, 8, 9};  // All air regions (including core)
+// Make the independently created rectangles share edges and nodes so the
+// mesh is conforming across every material interface.
+BooleanFragments{ Surface{1:9}; Delete; }{}
 
-// Define physical curves for boundaries
-// Far field boundary (outer edges)
-Physical Curve("FarField", 1) = {
-    26,  // Right edge bottom (r=far_field_r)
-    30,  // Right edge middle bottom
-    11,  // Right edge beside coil
-    22,  // Right edge middle top
-    18,  // Right edge top
-    19,  // Top edge (z=far_field_z)
-    25   // Bottom edge (z=-far_field_z)
-};
+// Define physical surfaces (material attributes)
+// The coil is the only non-air region; identify it by its bounding box so the
+// attribute assignment survives any renumbering done by the boolean operation.
+eps = 1e-6;
+coil_surfaces() = Surface In BoundingBox{
+    coil_r_inner - eps, coil_z_start - eps, -eps,
+    coil_r_outer + eps, coil_z_end + eps, eps};
+Physical Surface("Coil", 2) = {coil_surfaces()};
+
+all_surfaces() = Surface{:};
+air_surfaces() = {};
+For i In {0 : #all_surfaces() - 1}
+    is_coil = 0;
+    For j In {0 : #coil_surfaces() - 1}
+        If (all_surfaces(i) == coil_surfaces(j))
+            is_coil = 1;
+        EndIf
+    EndFor
+    If (is_coil == 0)
+        air_surfaces() += all_surfaces(i);
+    EndIf
+EndFor
+Physical Surface("Air", 1) = {air_surfaces()};
+
+// Define physical curves for boundaries.
+// Select geometrically rather than by hard-coded ids, which are not stable
+// across Gmsh versions or boolean operations.
+axis_curves() = Curve In BoundingBox{
+    -eps, -far_field_z - eps, -eps,
+    eps, far_field_z + eps, eps};
+
+right_curves() = Curve In BoundingBox{
+    far_field_r - eps, -far_field_z - eps, -eps,
+    far_field_r + eps, far_field_z + eps, eps};
+bottom_curves() = Curve In BoundingBox{
+    -eps, -far_field_z - eps, -eps,
+    far_field_r + eps, -far_field_z + eps, eps};
+top_curves() = Curve In BoundingBox{
+    -eps, far_field_z - eps, -eps,
+    far_field_r + eps, far_field_z + eps, eps};
+
+// The symmetry axis needs its own attribute so A_phi = 0 is enforced there
+// without contaminating the far-field boundary.
+Physical Curve("FarField", 1) = {right_curves(), bottom_curves(), top_curves()};
+Physical Curve("Axis", 2) = {axis_curves()};
 
 // Mesh refinement
 // Fine mesh in coil
 Field[1] = Distance;
-Field[1].SurfacesList = {2};  // Distance from coil
+Field[1].SurfacesList = {coil_surfaces()};  // Distance from coil
 
 Field[2] = Threshold;
 Field[2].InField = 1;
 Field[2].SizeMin = lc_coil;
-Field[2].SizeMax = lc_air;
+Field[2].SizeMax = lc_far;
 Field[2].DistMin = 0;
 Field[2].DistMax = 0.05;  // Grade over 5 cm
 
 // Fine mesh in core
+core_surfaces() = Surface In BoundingBox{
+    -eps, coil_z_start - eps, -eps,
+    coil_r_inner + eps, coil_z_end + eps, eps};
+
 Field[3] = Distance;
-Field[3].SurfacesList = {1};  // Distance from core
+Field[3].SurfacesList = {core_surfaces()};  // Distance from core
 
 Field[4] = Threshold;
 Field[4].InField = 3;
 Field[4].SizeMin = lc_core;
-Field[4].SizeMax = lc_air;
+Field[4].SizeMax = lc_far;
 Field[4].DistMin = 0;
 Field[4].DistMax = 0.05;
 
 // Coarse mesh at far field
 Field[5] = Distance;
-Field[5].SurfacesList = {7, 9, 4, 6};  // Distance from far regions
+Field[5].CurvesList = {right_curves(), bottom_curves(), top_curves()};  // Distance from far field
 
 Field[6] = Threshold;
 Field[6].InField = 5;
-Field[6].SizeMin = lc_air;
-Field[6].SizeMax = lc_far;
-Field[6].DistMin = 0.1;
+// Distance is now measured from the far-field boundary, so the coarse size
+// applies at distance 0 and grades back down toward the interior.
+Field[6].SizeMin = lc_far;
+Field[6].SizeMax = lc_air;
+Field[6].DistMin = 0.0;
 Field[6].DistMax = 0.2;
 
 // Combine fields
@@ -117,9 +157,9 @@ Background Field = 7;
 
 // Mesh settings
 Mesh.Algorithm = 6;        // Frontal-Delaunay
-Mesh.RecombineAll = 1;     // Recombine triangles into quads
-Mesh.RecombineAll = 1;
-Mesh.RecombinationAlgorithm = 2;
+// Triangles are used rather than recombined quads: the graded sizes here make
+// recombination fail on some subregions, and MFEM handles triangles natively.
+Mesh.RecombineAll = 0;
 Mesh.ElementOrder = 1;     // Linear elements
 Mesh.SecondOrderIncomplete = 0;
 

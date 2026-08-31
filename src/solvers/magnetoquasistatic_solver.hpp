@@ -54,12 +54,19 @@ class MagnetoquasistaticSolver : public MagneticSolver {
     // Coefficients
     std::unique_ptr<mfem::PWConstCoefficient> sigma_coeff;
     std::unique_ptr<mfem::PWConstCoefficient> j_coeff;     
-    mfem::Vector conductivity_values;
     mfem::Vector neumann_rhs;
     std::vector<mfem::real_t> port_conductances;
     
-    mfem::Array<int> ess_mesh_tdofs;   // scalar-space essential mesh true DOFs
-    std::unordered_map<std::string, mfem::Array<int>> terminal_markers; // Terminal name to boundary marker mapping
+    // Two DISTINCT index spaces, both essential-DOF lists. Keeping them
+    // separately named is deliberate: mixing them silently eliminates the wrong
+    // rows, because the packed system is larger than the FE space.
+    mfem::Array<int> ess_mesh_tdofs;    // indices into the FE space, [0, N_DOFs)
+    mfem::Array<int> ess_packed_tdofs;  // indices into the packed block system,
+                                        // [0, N_DOFs + N_Ports); each scalar
+                                        // mesh DOF constrains its Re and Im copy.
+                                        // Used INSTEAD of PhysicsSolver::ess_tdof_list,
+                                        // which is an FE-space list and does not
+                                        // apply to this formulation.
 
     struct CouplingResult {
         std::string Name;
@@ -109,8 +116,8 @@ class MagnetoquasistaticSolver : public MagneticSolver {
     mfem::DenseMatrix* resistance_matrix = nullptr;
     mfem::DenseMatrix* inductance_matrix = nullptr;
 
-    // Material property pickers for MaterialVector, named instead of inlined as
-    // lambdas so the Setup() coefficient construction reads at a glance.
+    // Material property pickers for MaterialCoefficient, named instead of inlined
+    // as lambdas so the Setup() coefficient construction reads at a glance.
     static double Reluctivity(const Material& m) {
         return 1.0 / (Constants::MU_0 * m.RelPermeability);
     }
@@ -227,10 +234,10 @@ class MagnetoquasistaticSolver : public MagneticSolver {
     // ConstComplexPortVectorView (complex_block_layout.hpp) name the four slots
     // so callers never compute packed indices by hand.
 
-    // Lift the essential (closure) values currently projected into *A onto the
+    // Lift the essential boundary values currently projected into *A onto the
     // matching slots of the packed solution vector. FormLinearSystem constrains
     // essential DOFs to whatever it finds there, so without this the projected
-    // non-zero closures would be forced back to zero.
+    // non-zero Dirichlet values would be forced back to zero.
     void LiftEssentialInto(mfem::Vector& x_packed) const {
         auto x = port_operator->View(x_packed);
         for (int k = 0; k < ess_mesh_tdofs.Size(); ++k) {
@@ -484,14 +491,15 @@ public:
         // Axisymmetric or Planar
         geometry = config.GeometryType;
         for (const auto& [term_name, term] : config.Terminals) {
-            MFEM_VERIFY(term.ExcitationType == Quantity::Current,
+            MFEM_VERIFY(term.DriveQuantity == Quantity::Current,
                 "Magnetoquasistatic terminal '" + term_name +
                 "' must use a current excitation; massive terminal voltage "
                 "is a solved output.");
         }
 
-        // Reject negative radii and record whether the domain reaches r = 0.
-        ValidateAxisymmetricGeometry();
+        // Reject negative radii, record whether the domain reaches r = 0, and
+        // report under-resolved near-axis curl-curl quadrature.
+        ValidateMagneticAxisymmetricGeometry();
 
         // FE spaces
         fec = std::make_unique<mfem::H1_FECollection>(order, mesh.Dimension());
@@ -502,16 +510,12 @@ public:
 
         // Assemble conductivity without frequency scaling so the mass matrix can
         // be reused at every sweep point.
-        conductivity_values = MaterialVector(0.0, Conductivity);
-        sigma_coeff = std::make_unique<mfem::PWConstCoefficient>(conductivity_values);
+        sigma_coeff = MaterialCoefficient(0.0, Conductivity);
 
-        closure_bcs = BuildClosureBcs();
-
-        std::vector<mfem::Array<int>> ess_markers =
-            DirichletClosureMarkers(closure_bcs);
-        ess_bdr = EssentialBdrFrom(ess_markers);
-
-        ImposeAxisRegularity();
+        // MQS terminals are ports driven through the port block, not essential
+        // boundaries, so they are deliberately NOT registered into the set here.
+        boundary_conditions = BuildBoundaryConditions();
+        BuildEssentialBoundaryMarker();
 
         // Build the FE space and everything bound to it for the starting mesh.
         BuildOperators();
@@ -520,7 +524,7 @@ public:
         // Validate that BCs don't create physical conflicts
         BoundaryConditionValidator validator(mesh, *fespace);
         validator.ValidateBoundaryConditions(
-            closure_bcs, /*terminals=*/{}, false);  // Strict mode - reject conflicts
+            boundary_conditions.Entries(), /*terminals=*/{}, false);  // Strict mode - reject conflicts
     }
 
 	void BuildOperators() override {
@@ -600,7 +604,7 @@ public:
 
         // Each scalar essential DOF constrains both its real and imaginary copy
         // in the packed [Re|Im] layout (half-size = N_DOFs + N_Ports).
-        ess_tdof_list = port_operator->MakeEssentialTDofs(ess_mesh_tdofs);
+        ess_packed_tdofs = port_operator->MakeEssentialTDofs(ess_mesh_tdofs);
 
 		// Grid Function (for solution recovery later)
 		A = std::make_unique<mfem::ComplexGridFunction>(fespace.get());
@@ -632,18 +636,15 @@ public:
         ActivateFrequency(sc);
         *A = 0.0;
 
-        // Re-apply non-zero essential (closure) BC values on this mesh's A.
+        // Re-apply non-zero essential BC values on this mesh's A.
         // ess_tdof values are lifted into the RHS by FormLinearSystem at solve time,
         // so they must be set AFTER the *A = 0.0 reset, every scenario.
         if (mode == ImprintMode::Field) {
-            for (const auto& bc : config.BoundaryConditions) {
-                if (bc.Type == BoundaryConditionType::Dirichlet && bc.Value != 0.0) {
-                    auto marker = MarkerFromGroup(bc.EntityGroupName);
-                    mfem::ConstantCoefficient c_re(bc.Value);
-                    mfem::ConstantCoefficient c_im(0.0);
-                    A->ProjectBdrCoefficient(c_re, c_im, marker);
-                }
-            }
+            ForEachNonzeroDirichlet([&](mfem::Array<int>& marker, double value) {
+                mfem::ConstantCoefficient c_re(value);
+                mfem::ConstantCoefficient c_im(0.0);
+                A->ProjectBdrCoefficient(c_re, c_im, marker);
+            });
         }
         // Axis stays at A=0 (already zero from the reset; no projection needed).
 
@@ -680,9 +681,7 @@ public:
         int p = 0;
         for (const auto& [term_name, term] : config.Terminals) {
             if (term.Conductor != ConductorType::Massive) continue;   // keep p aligned
-            for (const auto& exc : sc.Excitations)
-                if (exc.TerminalName == term_name)
-                    b.ImPort(p) = -exc.Value / omega;
+            b.ImPort(p) = -ExcitationFor(sc, term_name) / omega;
             ++p;
         }
 
@@ -733,7 +732,7 @@ public:
         mfem::Operator* A_op_ptr;
 
 		mfem::ComplexOperator& complex_system = port_operator->Operator();
-		complex_system.FormLinearSystem(ess_tdof_list, *x_combined, *b_combined, A_op_ptr, X_vec, B_vec);
+		complex_system.FormLinearSystem(ess_packed_tdofs, *x_combined, *b_combined, A_op_ptr, X_vec, B_vec);
 		bool own_A = (A_op_ptr != &complex_system);
 		A_op.Reset(A_op_ptr, own_A);
 
@@ -781,8 +780,8 @@ public:
         // constrained operator applies matrix-free. FormLinearSystem has already
         // folded the essential values into B_vec and placed them in X_vec, so a
         // unit diagonal on the eliminated rows reproduces them exactly.
-        for (int i = 0; i < ess_tdof_list.Size(); ++i) {
-            packed_matrix->EliminateRowCol(ess_tdof_list[i], mfem::Operator::DIAG_ONE);
+        for (int i = 0; i < ess_packed_tdofs.Size(); ++i) {
+            packed_matrix->EliminateRowCol(ess_packed_tdofs[i], mfem::Operator::DIAG_ONE);
         }
 
         direct_solver = std::make_unique<SparseLUSolver>(*packed_matrix);
@@ -943,7 +942,7 @@ public:
 	void PrepareAnalysis() {
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
             for (const auto& [term_name, term] : config.Terminals) {
-                MFEM_VERIFY(term.ExcitationType == Quantity::Current,
+                MFEM_VERIFY(term.DriveQuantity == Quantity::Current,
                     "MQS CouplingMatrix terminal '" + term_name +
                     "' must be a Current terminal.");
             }
@@ -1037,29 +1036,12 @@ public:
         };
     }
 
-    // Stranded-conductor source current density for a scenario. Current enters
-    // the model only through Terminals, so this is a pure function of
-    // sc.Excitations: a terminal with no matching excitation contributes
-    // nothing. In CouplingPerturbation mode the scenario carries a single unit
-    // excitation, so this IS the drive for that column rather than background
-    // data, and must not be suppressed the way closure data is.
+    // Stranded-conductor source current density for a scenario. Massive
+    // conductors are driven through the port block instead, so they are
+    // excluded here.
     mfem::Vector BuildCurrentDensity(const Scenario& sc) const {
-        mfem::Vector j_src(mesh.attributes.Max());
-        j_src = 0.0;
-
-        for (const auto& [term_name, term] : config.Terminals) {
-            if (term.ExcitationType == Quantity::Current && term.Conductor == ConductorType::Stranded) {
-                double I = 0.0;
-                for (const auto& exc : sc.Excitations) {
-                    if (exc.TerminalName == term_name) {
-                        I = exc.Value;
-                    }
-                }
-
-                if (I == 0.0) continue;
-                j_src += BuildTerminalCurrentDensity(term_name, I);
-            }
-        }
-        return j_src;
+        return MagneticSolver::BuildCurrentDensity(sc, [](const Terminal& term) {
+            return term.Conductor == ConductorType::Stranded;
+        });
     }
 };

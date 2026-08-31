@@ -43,20 +43,20 @@
   "terminals": [
     {
       "name": "TopPlate",
-      "excitation_type": "voltage",
+      "quantity": "voltage",
       "entity_group": "TopPlate"
     },
     {
       "name": "BottomPlate",
-      "excitation_type": "voltage",
+      "quantity": "voltage",
       "entity_group": "BottomPlate"
     }
   ],
-  "boundaries": [
+  "boundary_conditions": [
     {
       "name": "FarField",
       "entity_group": "FarField",
-      "type": "Dirichlet",
+      "type": "dirichlet",
       "value": 0.0
     }
   ],

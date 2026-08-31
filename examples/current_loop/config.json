@@ -11,7 +11,8 @@
   "entity_groups": [
     { "name": "Vacuum", "dim": 2, "attribute_ids": [1] },
     { "name": "Loop", "dim": 2, "attribute_ids": [2] },
-    { "name": "Outer", "dim": 1, "attribute_ids": [1] }
+    { "name": "Outer", "dim": 1, "attribute_ids": [1] },
+    { "name": "Axis", "dim": 1, "attribute_ids": [2] }
   ],
   "regions": [
     {
@@ -36,15 +37,15 @@
   "terminals": [
     {
       "name": "LoopCurrent",
-      "excitation_type": "current",
+      "quantity": "current",
       "entity_group": "Loop"
     }
   ],
-  "boundaries": [
+  "boundary_conditions": [
     {
       "name": "Outer",
       "entity_group": "Outer",
-      "type": "Dirichlet",
+      "type": "dirichlet",
       "value": 0.0
     }
   ],
@@ -52,7 +53,7 @@
     {
       "name": "energized",
       "excitations": [
-        { "terminal": "LoopCurrent", "value": 250000.0 }
+        { "terminal": "LoopCurrent", "value": 1.0 }
       ]
     }
   ]

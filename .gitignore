@@ -85,3 +85,5 @@ examples/simple_capacitor/results_electrostatic/*
 /examples/simple_capacitor/results_electrostatic_Bottom Plate/Cycle000000
 /examples/simple_capacitor/results_electrostatic_Top Plate/Cycle000000
 /examples/simple_capacitor/results_electrostatic_Top Plate/Cycle000000/data.pvtu
+/results_electrostatics_Bottom Plate/Cycle000000
+/results_electrostatics_Top Plate/Cycle000000
