@@ -7,7 +7,7 @@
 #include "axisymmetric_measure.hpp"
 
 // -----------------------------------------------------------------------------
-// 2. Linear Form Integrator: Current Density (J_phi)
+// Linear Form Integrator: Current Density (J_phi)
 // -----------------------------------------------------------------------------
 // Solves: Integral( J_phi * v * 2*pi*r * dr * dz )
 // Carries the full axisymmetric measure (see axisymmetric_measure.hpp).
@@ -47,6 +47,9 @@ public:
       elvect.SetSize(nd);
       elvect = 0.0;
 
+      MFEM_VERIFY(Trans.GetSpaceDim() == 2,
+         "AxisymmetricLFIntegrator requires a 2D (r,z) mesh.");
+
       mfem::Vector shape(nd);
       mfem::Vector pos(Trans.GetSpaceDim());
 
@@ -58,10 +61,10 @@ public:
          Trans.SetIntPoint(&ip);
          Trans.Transform(ip, pos);
 
-         const double r = pos(0);
-         const double val = src->Eval(Trans, ip);
+         const mfem::real_t r = pos(0);
+         const mfem::real_t val = src->Eval(Trans, ip);
 
-         const double w = ip.weight * Trans.Weight() * Axisymmetric::Measure(r) * val;
+         const mfem::real_t w = ip.weight * Trans.Weight() * Axisymmetric::Measure(r) * val;
 
          el.CalcShape(ip, shape);
          elvect.Add(w, shape);

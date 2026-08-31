@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "axisym/axisymmetric_curl_curl_integrator.hpp"
 #include "axisym/axisymmetric_mesh_validation.hpp"
@@ -111,6 +112,82 @@ TEST_CASE("Axisymmetric radial validation classifies the mesh",
 
 	  REQUIRE(axisym::InspectAxisGeometry(*mesh).relation ==
 			  axisym::AxisRelation::NegativeRadius);
+   }
+}
+
+// FindAxisBoundaryMarker has two distinct jobs, and only the first was covered
+// above: it FINDS the axis attribute, and it REJECTS meshes where the axis is
+// not tagged as an attribute of its own. The rejection half matters because the
+// marker it returns is merged straight into ess_bdr, so a partly-on-axis
+// attribute would silently impose A_phi = 0 on whatever else shares that tag.
+// That is a wrong answer rather than an error, which is exactly the class of bug
+// worth pinning down.
+TEST_CASE("Axis boundary tagging is rejected when the axis is not its own attribute",
+		  "[axisymmetric][axis]")
+{
+   SECTION("an attribute only partly on the axis is rejected")
+   {
+	  // Collapse every boundary edge onto one attribute. The axis edges are now
+	  // a subset of a tag that also covers r = r_max and both z faces, so no
+	  // marker can select the axis alone.
+	  auto mesh = MakeRadialMesh(2, 0.0);
+	  for (int be = 0; be < mesh->GetNBE(); ++be)
+	  {
+		 mesh->SetBdrAttribute(be, 1);
+	  }
+	  mesh->SetAttributes();
+
+	  const axisym::AxisGeometry info = axisym::ValidateMesh(*mesh);
+	  REQUIRE(info.TouchesAxis());
+	  REQUIRE_THROWS_WITH(
+		 axisym::FindAxisBoundaryMarker(*mesh, info),
+		 Catch::Matchers::ContainsSubstring("elements on the symmetry axis"));
+   }
+
+   SECTION("an axis attribute extended by one off-axis edge is rejected")
+   {
+	  // The near-miss the blunt case above cannot catch: the axis attribute is
+	  // almost correct and fails by a single edge. Counting on-axis vs total per
+	  // attribute is what detects this; a boolean "any element on axis" test
+	  // would accept it and quietly over-constrain that edge.
+	  auto mesh = MakeRadialMesh(2, 0.0);
+	  const mfem::Array<int> original(mesh->bdr_attributes);
+	  const int axis_attr = 4;
+
+	  bool retagged = false;
+	  for (int be = 0; be < mesh->GetNBE() && !retagged; ++be)
+	  {
+		 if (mesh->GetBdrAttribute(be) != axis_attr)
+		 {
+			mesh->SetBdrAttribute(be, axis_attr);
+			retagged = true;
+		 }
+	  }
+	  REQUIRE(retagged);
+	  mesh->SetAttributes();
+
+	  const axisym::AxisGeometry info = axisym::ValidateMesh(*mesh);
+	  REQUIRE(info.TouchesAxis());
+	  REQUIRE_THROWS_WITH(
+		 axisym::FindAxisBoundaryMarker(*mesh, info),
+		 Catch::Matchers::ContainsSubstring("elements on the symmetry axis"));
+   }
+
+   SECTION("an annular mesh is not required to tag an axis")
+   {
+	  // The rejection must be conditional on actually reaching r = 0. A mesh
+	  // that never touches the axis has no axis attribute to tag, and demanding
+	  // one would break every annular model.
+	  auto mesh = MakeRadialMesh(2, 1.0);
+	  for (int be = 0; be < mesh->GetNBE(); ++be)
+	  {
+		 mesh->SetBdrAttribute(be, 1);
+	  }
+	  mesh->SetAttributes();
+
+	  const axisym::AxisGeometry info = axisym::ValidateMesh(*mesh);
+	  REQUIRE_FALSE(info.TouchesAxis());
+	  REQUIRE(axisym::FindAxisBoundaryMarker(*mesh, info).Max() == 0);
    }
 }
 

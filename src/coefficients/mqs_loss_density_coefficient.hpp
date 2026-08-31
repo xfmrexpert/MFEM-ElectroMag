@@ -1,45 +1,11 @@
 // Copyright (c) 2026 T. C. Raymond
 // SPDX-License-Identifier: MIT
-//
-// Time-averaged Joule (eddy-current) loss density for the magnetoquasistatic
-// formulation, using the peak (amplitude) phasor convention:
-//
-//     P = 0.5 * sigma * |E|^2,   E = E_drive - j*omega*A
-//
-// The 1/2 is the time average of a peak-amplitude phasor product, matching the
-// convention used by the coupling-matrix extraction (R = Re(V/I)) and by the
-// common commercial AC/DC and eddy-current tools.
-//
-// Splitting E into real and imaginary parts with A = A_re + j*A_im:
-//
-//     -j*omega*A = omega*A_im - j*omega*A_re
-//
-// so
-//
-//     Re E = E_drive_re + omega*A_im
-//     Im E = E_drive_im - omega*A_re
-//
-// IMPORTANT (why E_drive cannot be dropped):
-//   The simplification P = 0.5*sigma*omega^2*|A|^2 is valid ONLY where
-//   E_drive = 0. That holds for conductive regions with no port unknown (a flux
-//   shield or a steel brace), but NOT for massive terminals or open-current
-//   regions, whose solved port voltage is exactly what enforces their current
-//   constraint. Using the simplified form there silently under- or over-reports
-//   the loss, so the drive term is carried explicitly.
-//
-// The per-attribute drive table is zero-initialised and populated only where a
-// port unknown exists. Unported conductors therefore fall out of the general
-// expression with no special case, which is why this one coefficient serves
-// driven terminals, open-current regions, and passive conductors alike.
-//
-// Geometry enters in one place only. For an azimuthal massive conductor the
-// drive field produced by a port voltage V is
-//
-//     E_phi = V / (2*pi*r)
-//
-// the same physical 1/r that appears in AxisymmetricConductanceCoeff. That
-// factor is a property of the field, entirely distinct from the 2*pi*r volume
-// measure supplied by the integrator when this density is integrated.
+
+/**
+ * @file mqs_loss_density_coefficient.hpp
+ * @brief Time-averaged Joule (eddy-current) loss density for the
+ *        magnetoquasistatic formulation.
+ */
 
 #pragma once
 
@@ -48,16 +14,100 @@
 #include "mfem.hpp"
 #include "../core/constants.hpp"
 
+/**
+ * @brief Time-averaged Joule loss density \f$P = \frac{1}{2}\sigma|E|^2\f$
+ *        with \f$E = E_{drive} - j\omega A\f$.
+ *
+ * The factor \f$\frac{1}{2}\f$ is the time average of a product of
+ * peak-amplitude phasors. This peak (amplitude) convention matches the
+ * coupling-matrix extraction \f$R = \mathrm{Re}(V/I)\f$ used elsewhere in this
+ * project, and the convention of the common commercial AC/DC and eddy-current
+ * tools. Passing RMS phasors instead would apply the averaging twice and halve
+ * every reported loss.
+ *
+ * @warning The convention is established by the prescribed excitation value
+ * (see Excitation in problem_config.hpp) and is carried unscaled through the
+ * RHS into the solved potentials and port voltages. It is documented but NOT
+ * enforced: no code validates or converts it. An RMS excitation -- the natural
+ * reading of a nameplate current -- is silently accepted and halves every
+ * number this coefficient produces.
+ *
+ * Splitting \f$E\f$ into real and imaginary parts with
+ * \f$A = A_{re} + jA_{im}\f$, so that
+ * \f$-j\omega A = \omega A_{im} - j\omega A_{re}\f$, gives
+ * \f[
+ *   \mathrm{Re}\,E = E_{drive,re} + \omega A_{im}, \qquad
+ *   \mathrm{Im}\,E = E_{drive,im} - \omega A_{re}.
+ * \f]
+ *
+ * @par Why the drive term cannot be dropped
+ * The simplification \f$P = \frac{1}{2}\sigma\omega^2|A|^2\f$ is valid ONLY
+ * where \f$E_{drive} = 0\f$. That holds for conductive regions with no port
+ * unknown (a flux shield or a steel brace), but NOT for massive terminals or
+ * open-current regions, whose solved port voltage is exactly what enforces
+ * their current constraint. Using the simplified form there silently under- or
+ * over-reports the loss, so the drive term is carried explicitly.
+ *
+ * The per-attribute drive table is zero-initialised and populated only where a
+ * port unknown exists. Unported conductors therefore fall out of the general
+ * expression with no special case, which is why this one coefficient serves
+ * driven terminals, open-current regions, and passive conductors alike.
+ *
+ * @par Geometry
+ * Geometry enters in one place only. For an azimuthal massive conductor the
+ * drive field produced by a port voltage \f$V\f$ is
+ * \f$E_\phi = V/(2\pi r)\f$, the same physical \f$1/r\f$ that appears in
+ * AxisymmetricConductanceCoeff. That factor is a property of the field, and is
+ * entirely distinct from the \f$2\pi r\f$ volume measure supplied by the
+ * integrator when this density is integrated. Integrating this coefficient
+ * with a planar integrator on an axisymmetric problem therefore omits that
+ * measure and yields a per-radian, not a total, loss.
+ *
+ * @par Assumed background
+ * The vector potential is assumed to be the azimuthal component \f$A_\phi\f$ of
+ * a time-harmonic solution at the single frequency @a omega, in the same peak
+ * phasor convention as the drive amplitudes. The induced field
+ * \f$-j\omega A\f$ is only the whole story because the formulation is
+ * quasistatic: displacement current is neglected.
+ *
+ * @par Limitations
+ * - Linear, isotropic, non-hysteretic conduction only. This is resistive
+ *   dissipation alone; hysteresis and excess (anomalous) losses are not
+ *   represented, so total loss in laminated steel is underestimated.
+ * - Single-frequency only. The result is meaningless for a transient solution
+ *   or for a superposition of several frequencies.
+ * - Axisymmetric mode assumes an azimuthal conductor on an \f$(r,z)\f$ mesh and
+ *   reads the radius from component 0 of the transformed point.
+ * - A driven azimuthal conductor may not touch the symmetry axis; see Eval().
+ *
+ * @par Ownership and lifetime
+ * @a sigma, @a a_re and @a a_im are held by reference and are NOT owned. The
+ * caller must keep all three alive for the lifetime of this coefficient, and
+ * must rebuild this object if a mesh refinement invalidates the referenced
+ * GridFunction objects. The two drive tables are copied and are self-owned.
+ */
 class MqsLossDensityCoefficient : public mfem::Coefficient {
 public:
-	// @param sigma       Piecewise conductivity; also selects which regions
-	//                    dissipate at all (sigma = 0 yields exactly zero).
-	// @param a_re,a_im   Real and imaginary parts of the vector potential.
-	// @param omega       Angular frequency [rad/s].
-	// @param drive_re    Per-attribute real part of the drive amplitude, indexed
-	// @param drive_im    by (attribute - 1). Both are zero for unported regions.
-	// @param axisymmetric  When true the drive amplitude carries the physical
-	//                      1/(2*pi*r) factor.
+	/**
+	 * @brief Construct the loss-density coefficient.
+	 *
+	 * @param sigma        Piecewise conductivity \f$\sigma\f$ [S/m]. Also
+	 *                     selects which regions dissipate at all:
+	 *                     \f$\sigma \le 0\f$ yields exactly zero. Referenced,
+	 *                     not owned; must outlive this object.
+	 * @param a_re         Real part of the vector potential. Referenced, not
+	 *                     owned; must outlive this object.
+	 * @param a_im         Imaginary part of the vector potential. Referenced,
+	 *                     not owned; must outlive this object.
+	 * @param omega        Angular frequency \f$\omega\f$ [rad/s].
+	 * @param drive_re     Per-attribute real part of the drive amplitude,
+	 *                     indexed by (attribute - 1). Zero for unported
+	 *                     regions. Copied into the object.
+	 * @param drive_im     Per-attribute imaginary part, same indexing and
+	 *                     ownership. Must match @a drive_re in size.
+	 * @param axisymmetric When true the drive amplitude carries the physical
+	 *                     \f$1/(2\pi r)\f$ factor described above.
+	 */
 	MqsLossDensityCoefficient(mfem::Coefficient& sigma,
 							  const mfem::GridFunction& a_re,
 							  const mfem::GridFunction& a_im,
@@ -72,6 +122,20 @@ public:
 					"Drive amplitude tables must have matching sizes");
 	}
 
+	/**
+	 * @brief Evaluate the time-averaged loss density at an integration point.
+	 *
+	 * @param T  Element transformation; its integration point is set here, and
+	 *           its Attribute selects the drive-table entry.
+	 * @param ip Integration point in reference coordinates.
+	 * @return Loss density \f$\frac{1}{2}\sigma|E|^2\f$ [W/m^3], or exactly
+	 *         zero in a non-conducting region.
+	 *
+	 * @note Returns double rather than mfem::real_t to match the base class
+	 *       declaration in the default build. If this project is ever built
+	 *       with MFEM_USE_SINGLE, this signature must become mfem::real_t or it
+	 *       will silently stop overriding Coefficient::Eval.
+	 */
 	double Eval(mfem::ElementTransformation& T,
 				const mfem::IntegrationPoint& ip) override {
 		T.SetIntPoint(&ip);
@@ -92,10 +156,27 @@ public:
 	}
 
 private:
-	// Drive field for the element's attribute, zero where no port unknown
-	// exists. Attributes are 1-based in MFEM; an attribute beyond the table is
-	// treated as unported rather than as an error, since the table is sized to
-	// the mesh and a larger attribute cannot carry a port.
+	/**
+	 * @brief Look up the drive field for the element's attribute.
+	 *
+	 * Yields zero where no port unknown exists. Attributes are 1-based in
+	 * MFEM; an attribute beyond the table is treated as unported rather than
+	 * as an error, since the table is sized to the mesh and a larger attribute
+	 * cannot carry a port.
+	 *
+	 * @param      T    Element transformation, supplying both the attribute and
+	 *                  (in axisymmetric mode) the radius.
+	 * @param      ip   Integration point in reference coordinates.
+	 * @param[out] e_re Real part of the drive field [V/m]; set to zero when the
+	 *                  region is unported.
+	 * @param[out] e_im Imaginary part of the drive field [V/m].
+	 *
+	 * @warning In axisymmetric mode this asserts \f$r > 0\f$ for a ported
+	 *          region, because \f$E_\phi = V/(2\pi r)\f$ is singular on the
+	 *          axis. A massive port reaching the axis is already rejected at
+	 *          assembly time (its DC conductance integral diverges), so
+	 *          reaching that check means the earlier guard was bypassed.
+	 */
 	void DriveField(mfem::ElementTransformation& T,
 					const mfem::IntegrationPoint& ip,
 					double& e_re, double& e_im) const {
@@ -124,11 +205,18 @@ private:
 		e_im *= scale;
 	}
 
+	/// Piecewise conductivity [S/m]. Referenced, not owned.
 	mfem::Coefficient& sigma_;
+	/// Real part of the vector potential. Referenced, not owned.
 	const mfem::GridFunction& a_re_;
+	/// Imaginary part of the vector potential. Referenced, not owned.
 	const mfem::GridFunction& a_im_;
+	/// Angular frequency [rad/s].
 	double omega_;
+	/// Real part of the drive amplitude by (attribute - 1). Owned copy.
 	std::vector<double> drive_re_;
+	/// Imaginary part of the drive amplitude by (attribute - 1). Owned copy.
 	std::vector<double> drive_im_;
+	/// When true, the drive amplitude carries the 1/(2*pi*r) field factor.
 	bool axisymmetric_;
 };

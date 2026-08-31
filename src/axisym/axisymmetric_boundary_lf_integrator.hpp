@@ -34,6 +34,12 @@ public:
 		elvect.SetSize(nd);
 		elvect = 0.0;
 
+		// A meridional boundary element is 1D, but it is embedded in the 2D
+		// (r,z) plane; the radius comes from the SPACE dimension, not the
+		// element dimension.
+		MFEM_VERIFY(trans.GetSpaceDim() == 2,
+			"AxisymmetricBoundaryLFIntegrator requires a 2D (r,z) mesh.");
+
 		mfem::Vector shape(nd);
 		mfem::Vector pos(trans.GetSpaceDim());
 		const mfem::IntegrationRule* ir = GetIntegrationRule(el, trans);
@@ -44,9 +50,9 @@ public:
 			trans.SetIntPoint(&ip);
 			trans.Transform(ip, pos);
 
-			const double r = pos(0);
-			const double value = load->Eval(trans, ip);
-			const double weight = ip.weight * trans.Weight()
+			const mfem::real_t r = pos(0);
+			const mfem::real_t value = load->Eval(trans, ip);
+			const mfem::real_t weight = ip.weight * trans.Weight()
 				* Axisymmetric::Measure(r) * value;
 
 			el.CalcShape(ip, shape);

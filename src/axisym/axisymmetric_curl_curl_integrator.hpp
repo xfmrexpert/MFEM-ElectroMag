@@ -52,7 +52,7 @@ public:
    //                        integrator shares the mesh's axis policy.
    explicit AxisymmetricCurlCurlIntegrator(
       mfem::Coefficient &reluctivity,
-      double axis_tolerance,
+      mfem::real_t axis_tolerance,
       const mfem::IntegrationRule *ir = nullptr)
       : mfem::BilinearFormIntegrator(ir), nu_(&reluctivity),
         axis_tolerance_(axis_tolerance)
@@ -60,7 +60,11 @@ public:
       MFEM_ASSERT(nu_ != nullptr, "Reluctivity coefficient cannot be null");
    }
 
-   // Relative accuracy targeted for the non-polynomial 1/r term.
+   // Relative accuracy targeted for the non-polynomial 1/r term. This is a
+   // quadrature-design target, not a field value, so it stays double: the
+   // Bernstein-ellipse analysis in RadialExtraOrder is done in double
+   // regardless of MFEM's storage precision, and 1e-10 is not representable
+   // as a meaningful float target.
    static constexpr double kRadialQuadratureTolerance = 1.0e-10;
 
    // Ceiling on the extra points added for the 1/r term. Reached only for
@@ -124,14 +128,14 @@ public:
    // Radial extent of an element, sampled through its transformation so curved
    // geometry is respected.
    static void RadialExtent(const mfem::ElementTransformation &Trans,
-                            double &min_radius, double &radial_width)
+                            mfem::real_t &min_radius, mfem::real_t &radial_width)
    {
       auto &T = const_cast<mfem::ElementTransformation &>(Trans);
       const mfem::IntegrationRule &vertices =
          *mfem::Geometries.GetVertices(T.GetGeometryType());
 
-      double min_r = std::numeric_limits<double>::max();
-      double max_r = std::numeric_limits<double>::lowest();
+      mfem::real_t min_r = std::numeric_limits<mfem::real_t>::max();
+      mfem::real_t max_r = std::numeric_limits<mfem::real_t>::lowest();
       mfem::Vector pos(T.GetSpaceDim());
       for (int i = 0; i < vertices.GetNPoints(); ++i)
       {
@@ -161,8 +165,8 @@ public:
 
       // Non-polynomial 1/r part: cost is set by the element's geometry, not by
       // the basis degree, so it must be added on top.
-      double min_radius = 0.0;
-      double radial_width = 0.0;
+      mfem::real_t min_radius = 0.0;
+      mfem::real_t radial_width = 0.0;
       RadialExtent(Trans, min_radius, radial_width);
       const int order = polynomial_order
          + RadialExtraOrder(min_radius, radial_width);
@@ -181,7 +185,8 @@ public:
       const int nd  = el.GetDof();
       const int dim = el.GetDim();
 
-      MFEM_ASSERT(dim == 2, "AxisymmetricCurlCurlIntegrator expects a 2D (r,z) finite element.");
+      MFEM_VERIFY(dim == 2 && Trans.GetSpaceDim() == 2,
+         "AxisymmetricCurlCurlIntegrator expects a 2D (r,z) finite element.");
 
       elmat.SetSize(nd);
       elmat = 0.0;
@@ -201,7 +206,7 @@ public:
 
          // Physical coordinates: pos(0)=r, pos(1)=z
          Trans.Transform(ip, pos);
-         const double r = pos(0);
+         const mfem::real_t r = pos(0);
 
          // Interior quadrature keeps r > 0 even for elements touching the axis.
          // A non-positive radius here means an invalid mesh or a custom rule
@@ -211,10 +216,10 @@ public:
             << r << "). The 1/r term is singular there: use an interior "
             "integration rule and a mesh with non-negative radii.");
 
-         const double nu = nu_->Eval(Trans, ip);
+         const mfem::real_t nu = nu_->Eval(Trans, ip);
 
          // Axisymmetric weight: ip.weight * detJ * 2*pi*r * nu
-         const double w = ip.weight * Trans.Weight()
+         const mfem::real_t w = ip.weight * Trans.Weight()
             * Axisymmetric::Measure(r) * nu;
 
          el.CalcShape(ip, shape);
@@ -226,23 +231,23 @@ public:
 
          for (int j = 0; j < nd; j++)
          {
-            const double Nj     = shape(j);
-            const double dNj_dr = dshape_phys(j, 0);
-            const double dNj_dz = dshape_phys(j, 1);
+            const mfem::real_t Nj     = shape(j);
+            const mfem::real_t dNj_dr = dshape_phys(j, 0);
+            const mfem::real_t dNj_dz = dshape_phys(j, 1);
 
             for (int k = j; k < nd; k++)
             {
-               const double Nk     = shape(k);
-               const double dNk_dr = dshape_phys(k, 0);
-               const double dNk_dz = dshape_phys(k, 1);
+               const mfem::real_t Nk     = shape(k);
+               const mfem::real_t dNk_dr = dshape_phys(k, 0);
+               const mfem::real_t dNk_dz = dshape_phys(k, 1);
 
-               const double Br_j = -dNj_dz;
-               const double Bz_j = dNj_dr + Nj / r;
+               const mfem::real_t Br_j = -dNj_dz;
+               const mfem::real_t Bz_j = dNj_dr + Nj / r;
 
-               const double Br_k = -dNk_dz;
-               const double Bz_k = dNk_dr + Nk / r;
+               const mfem::real_t Br_k = -dNk_dz;
+               const mfem::real_t Bz_k = dNk_dr + Nk / r;
 
-               const double val = Br_j * Br_k + Bz_j * Bz_k;
+               const mfem::real_t val = Br_j * Br_k + Bz_j * Bz_k;
 
                elmat(j, k) += w * val;
             }
@@ -271,7 +276,7 @@ public:
        const int dim = el.GetDim();
        const int space_dim = Trans.GetSpaceDim();
 
-       MFEM_ASSERT(dim == 2 && space_dim == 2,
+       MFEM_VERIFY(dim == 2 && space_dim == 2,
            "AxisymmetricCurlCurlIntegrator expects a 2D (r,z) mesh.");
        MFEM_ASSERT(u.Size() == nd,
            "Element solution has an unexpected size.");
@@ -305,18 +310,18 @@ public:
            inv_jacobian.MultTranspose(grad_ref, grad_phys);
 
            Trans.Transform(ip, pos);
-           const double r = pos(0);
-           const double A_phi = shape * u;
+           const mfem::real_t r = pos(0);
+           const mfem::real_t A_phi = shape * u;
 
            // curl(A_phi e_phi) in the (r,z) component ordering, with the axis
            // limit applied under the shared scale-relative tolerance.
-           double B_r = -grad_phys(1);
-           double B_z = axisym::AxialFluxDensity(A_phi, grad_phys(0), r,
+           mfem::real_t B_r = -grad_phys(1);
+           mfem::real_t B_z = axisym::AxialFluxDensity(A_phi, grad_phys(0), r,
                                                  axis_tolerance_);
 
            if (with_coef)
            {
-               const double nu = nu_->Eval(Trans, ip);
+               const mfem::real_t nu = nu_->Eval(Trans, ip);
                B_r *= nu;
                B_z *= nu;
            }
@@ -327,7 +332,10 @@ public:
        }
    }
 
-   double ComputeFluxEnergy(const mfem::FiniteElement& flux_elem,
+   // Returns mfem::real_t to match the base class declaration exactly; see the
+   // note on AxisymmetricDiffusionIntegrator::ComputeFluxEnergy for why a
+   // double here would silently stop overriding in a single-precision build.
+   mfem::real_t ComputeFluxEnergy(const mfem::FiniteElement& flux_elem,
        mfem::ElementTransformation& Trans,
        mfem::Vector& flux,
        mfem::Vector* d_energy = nullptr) override
@@ -335,7 +343,7 @@ public:
        const int nd = flux_elem.GetDof();
        const int space_dim = Trans.GetSpaceDim();
 
-       MFEM_ASSERT(space_dim == 2,
+       MFEM_VERIFY(space_dim == 2,
            "AxisymmetricCurlCurlIntegrator expects a 2D (r,z) mesh.");
        MFEM_ASSERT(flux.Size() == nd * space_dim,
            "Flux vector has an unexpected size.");
@@ -358,7 +366,7 @@ public:
            d_energy->SetSize(0);
        }
 
-       double energy = 0.0;
+       mfem::real_t energy = 0.0;
 
        for (int i = 0; i < ir->GetNPoints(); ++i)
        {
@@ -380,9 +388,9 @@ public:
            Trans.Transform(ip, pos);
            // No clamp needed: this term carries the measure r, never 1/r, so
            // the contribution simply vanishes on the axis.
-           const double r = pos(0);
-           const double nu = nu_->Eval(Trans, ip);
-           const double weight = ip.weight * Trans.Weight()
+           const mfem::real_t r = pos(0);
+           const mfem::real_t nu = nu_->Eval(Trans, ip);
+           const mfem::real_t weight = ip.weight * Trans.Weight()
                * Axisymmetric::Measure(r);
 
            energy += weight * nu * (point_flux * point_flux);
@@ -402,6 +410,6 @@ protected:
 
 private:
    mfem::Coefficient *nu_;
-   double axis_tolerance_;
+   mfem::real_t axis_tolerance_;
 };
 

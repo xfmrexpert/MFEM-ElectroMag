@@ -31,10 +31,11 @@ namespace axisym {
 // Relative tolerance used to decide whether a coordinate "is" on the axis.
 // Loose enough to absorb mesh-generator round-off, tight enough that a real
 // gap between the domain and the axis is never mistaken for contact.
-inline constexpr double kRelativeGeometryTolerance = 1.0e-10;
+inline constexpr mfem::real_t kRelativeGeometryTolerance =
+   static_cast<mfem::real_t>(1.0e-10);
 
 /// True when @p r is on the symmetry axis to within @p tolerance.
-inline bool IsOnAxisGeometry(double r, double tolerance)
+inline bool IsOnAxisGeometry(mfem::real_t r, mfem::real_t tolerance)
 {
    return std::abs(r) <= tolerance;
 }
@@ -56,10 +57,10 @@ enum class AxisRelation
  */
 struct AxisGeometry
 {
-   double min_r = 0.0;
-   double max_r = 0.0;
+   mfem::real_t min_r = 0.0;
+   mfem::real_t max_r = 0.0;
    /// Mesh-scale-relative tolerance for axis proximity tests.
-   double tolerance = 0.0;
+   mfem::real_t tolerance = 0.0;
    AxisRelation relation = AxisRelation::Annular;
 
    [[nodiscard]] bool TouchesAxis() const
@@ -68,7 +69,7 @@ struct AxisGeometry
    }
 
    /// True when @p r represents axis geometry at this mesh's scale.
-   [[nodiscard]] bool IsOnAxisGeometry(double r) const
+   [[nodiscard]] bool IsOnAxisGeometry(mfem::real_t r) const
    {
 	  return axisym::IsOnAxisGeometry(r, tolerance);
    }
@@ -96,10 +97,10 @@ inline AxisGeometry InspectAxisGeometry(mfem::Mesh &mesh)
 	  return info;
    }
 
-   double min_r = std::numeric_limits<double>::max();
-   double max_r = std::numeric_limits<double>::lowest();
-   double min_z = std::numeric_limits<double>::max();
-   double max_z = std::numeric_limits<double>::lowest();
+   mfem::real_t min_r = std::numeric_limits<mfem::real_t>::max();
+   mfem::real_t max_r = std::numeric_limits<mfem::real_t>::lowest();
+   mfem::real_t min_z = std::numeric_limits<mfem::real_t>::max();
+   mfem::real_t max_z = std::numeric_limits<mfem::real_t>::lowest();
 
    mfem::Vector pos(mesh.SpaceDimension());
    const mfem::FiniteElementSpace *nodal_fes = mesh.GetNodalFESpace();
@@ -131,8 +132,14 @@ inline AxisGeometry InspectAxisGeometry(mfem::Mesh &mesh)
    info.min_r = min_r;
    info.max_r = max_r;
 
-   const double scale = std::max({ std::abs(max_r), std::abs(min_r),
-								   max_z - min_z, 1.0e-300 });
+   // The final term is a floor that keeps the tolerance strictly positive for a
+   // degenerate (zero-extent) mesh. It must come from the type itself: a literal
+   // like 1e-300 is below the smallest normal float and would flush to zero in a
+   // single-precision build, silently turning the tolerance into an exact-zero
+   // comparison.
+   const mfem::real_t scale = std::max({ std::abs(max_r), std::abs(min_r),
+										max_z - min_z,
+										std::numeric_limits<mfem::real_t>::min() });
    info.tolerance = kRelativeGeometryTolerance * scale;
 
    if (min_r < -info.tolerance)

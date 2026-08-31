@@ -100,7 +100,7 @@ public:
 	}
 
 	// Driven electrodes pin their DOFs exactly as a Dirichlet condition does, so
-	// every terminal marker joins the authored Dirichlet ones. Only the VALUE
+	// every terminal marker joins the prescribed Dirichlet ones. Only the value
 	// differs in origin, and that is supplied per scenario in ImprintScenario().
 	void BuildEssentialBoundaryMarker() override {
 		PhysicsSolver::BuildEssentialBoundaryMarker();

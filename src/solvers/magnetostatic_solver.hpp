@@ -212,7 +212,7 @@ public:
 	}
 
 	// Solve + save on the CURRENT mesh/operators. Both analysis types flow through
-	// ONE imprint -> solve -> save loop over BuildSolveScenarios() (authored
+	// ONE imprint -> solve -> save loop over BuildSolveScenarios() (prescribed
 	// scenarios for Field; synthetic per-terminal unit-current drives for
 	// CouplingMatrix). AMR calls this once more on the converged mesh so the
 	// exported fields match the exported mesh.

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "mfem.hpp"
 #include "../core/constants.hpp"
 
 // -----------------------------------------------------------------------------
@@ -32,9 +33,14 @@
 namespace Axisymmetric
 {
    // Geometric measure at radius r, excluding the quadrature weight and the
-   // Jacobian determinant. 
-   inline double Measure(double r)
+   // Jacobian determinant.
+   //
+   // Typed in mfem::real_t rather than double because the result is multiplied
+   // straight into MFEM quadrature weights. MFEM is precision-configurable
+   // (see config.hpp: real_t is float under MFEM_USE_SINGLE), so hardcoding
+   // double here would silently widen every weight in a single-precision build.
+   inline mfem::real_t Measure(mfem::real_t r)
    {
-	  return Constants::TWO_PI * r;
+	  return static_cast<mfem::real_t>(Constants::TWO_PI) * r;
    }
 }

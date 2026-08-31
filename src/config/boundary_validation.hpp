@@ -86,7 +86,7 @@ public:
     BoundaryConditionValidator(mfem::Mesh& m, mfem::FiniteElementSpace& fes)
         : mesh(m), fespace(fes) {}
 
-    /// @param bcs           Authored boundary conditions with boundary markers.
+    /// @param bcs           Prescribed boundary conditions with boundary markers.
     /// @param terminals     terminal name -> boundary marker for voltage terminals.
     /// @param allow_overlap If true, warn but don't throw on detected problems.
     /// @throws std::runtime_error if problems are detected and !allow_overlap.

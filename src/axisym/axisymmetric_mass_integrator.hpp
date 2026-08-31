@@ -50,6 +50,10 @@ public:
       elmat.SetSize(nd);
       elmat = 0.0;
 
+      // pos is sized for (r,z) and the radius is read from pos(0).
+      MFEM_VERIFY(Trans.GetSpaceDim() == 2,
+         "AxisymmetricMassIntegrator requires a 2D (r,z) mesh.");
+
       mfem::Vector shape(nd);
       mfem::Vector pos(2);
 
@@ -61,12 +65,12 @@ public:
          Trans.SetIntPoint(&ip);
          Trans.Transform(ip, pos);
          
-         double r = pos(0);
+         mfem::real_t r = pos(0);
 
-         double val = Q->Eval(Trans, ip); // Conductivity sigma
+         mfem::real_t val = Q->Eval(Trans, ip); // Conductivity sigma
 
          // Weight = w * det(J) * 2*pi*r * sigma
-         double w = ip.weight * Trans.Weight() * Axisymmetric::Measure(r) * val;
+         mfem::real_t w = ip.weight * Trans.Weight() * Axisymmetric::Measure(r) * val;
 
          el.CalcShape(ip, shape);
 
@@ -74,7 +78,7 @@ public:
          {
              for (int k = 0; k <= j; k++) // Symmetry
              {
-                 double entry = w * shape(j) * shape(k);
+                 mfem::real_t entry = w * shape(j) * shape(k);
                  elmat(j, k) += entry;
                  if (j != k) elmat(k, j) += entry;
              }

@@ -7,7 +7,7 @@
 #include "axisymmetric_measure.hpp"
 
 // -----------------------------------------------------------------------------
-// 1. Stiffness Integrator: -div( eps * grad(u) )
+// Stiffness Integrator: -div( eps * grad(u) )
 // -----------------------------------------------------------------------------
 // Solves: Integral( eps * grad(u) . grad(v) * 2*pi*r * dr * dz )
 //
@@ -57,7 +57,13 @@ public:
    {
       int nd = el.GetDof();
       int dim = el.GetDim();
-      double w;
+      mfem::real_t w;
+
+      // The r coordinate is read from pos(0), so a non-2D element would index
+      // a vector sized for (r,z). MFEM_VERIFY rather than MFEM_ASSERT: this
+      // must hold in release builds too, where an assert compiles away.
+      MFEM_VERIFY(Trans.GetSpaceDim() == 2,
+         "AxisymmetricDiffusionIntegrator requires a 2D (r,z) mesh.");
 
       elmat.SetSize(nd);
       elmat = 0.0;
@@ -74,7 +80,7 @@ public:
          Trans.SetIntPoint(&ip);
          Trans.Transform(ip, pos);
 
-         double r = pos(0); // Radius is X
+         mfem::real_t r = pos(0); // Radius is X
 
          // Weight = quad_weight * det(J) * 2*pi*r * epsilon
          w = ip.weight * Trans.Weight() * Axisymmetric::Measure(r)
@@ -142,13 +148,22 @@ public:
    // Mirrors mfem::DiffusionIntegrator (scalar Q) but applies the axisymmetric
    // radial measure so the ZZ error indicator sqrt(energy) reflects the physical
    // r-z field. Anisotropic splitting (d_energy) is not supported.
-   double ComputeFluxEnergy(const mfem::FiniteElement &fluxelem,
+   //
+   // The return type MUST be mfem::real_t, not double. The base class declares
+   // `virtual real_t ComputeFluxEnergy(...)`, and real_t is float in an
+   // MFEM_USE_SINGLE build. A double here would stop overriding, and the ZZ
+   // estimator would silently fall back to the base implementation, driving AMR
+   // with a planar (non-axisymmetric) error measure and no diagnostic.
+   mfem::real_t ComputeFluxEnergy(const mfem::FiniteElement &fluxelem,
                             mfem::ElementTransformation &Trans,
                             mfem::Vector &flux,
                             mfem::Vector *d_energy = nullptr) override
    {
       const int nd = fluxelem.GetDof();
       const int spaceDim = Trans.GetSpaceDim();
+
+      MFEM_VERIFY(spaceDim == 2,
+         "AxisymmetricDiffusionIntegrator requires a 2D (r,z) mesh.");
 
       mfem::Vector shape(nd);
       mfem::Vector pointflux(spaceDim);
@@ -162,7 +177,7 @@ public:
          ir = &mfem::IntRules.Get(fluxelem.GetGeomType(), order);
       }
 
-      double energy = 0.0;
+      mfem::real_t energy = 0.0;
       if (d_energy) { *d_energy = 0.0; } // anisotropic estimation unsupported
 
       for (int i = 0; i < ir->GetNPoints(); i++)
@@ -181,12 +196,12 @@ public:
          }
 
          Trans.Transform(ip, pos);
-         const double r = pos(0); // Radius is X
+         const mfem::real_t r = pos(0); // Radius is X
 
          // Axisymmetric measure, consistent with AssembleElementMatrix.
-         const double w = Trans.Weight() * ip.weight * Axisymmetric::Measure(r);
+         const mfem::real_t w = Trans.Weight() * ip.weight * Axisymmetric::Measure(r);
 
-         double e = (pointflux * pointflux);
+         mfem::real_t e = (pointflux * pointflux);
          e *= Q->Eval(Trans, ip); // eps
          energy += w * e;
       }

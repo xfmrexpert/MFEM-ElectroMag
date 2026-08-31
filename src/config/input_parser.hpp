@@ -466,6 +466,10 @@ private:
         return base_name + "_f" + std::to_string(point + 1) + "_" + token + "Hz";
     }
 
+    // Excitation values are taken verbatim. For time-harmonic runs they are
+    // PEAK (amplitude) phasors; there is deliberately no rms/peak selector, so
+    // an RMS value prescribed here propagates unconverted. See Excitation in
+    // problem_config.hpp.
     static Scenario ParseScenarioExcitations(const json& source) {
         Scenario scenario;
         if (source.contains("excitations")) {

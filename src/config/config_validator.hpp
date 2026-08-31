@@ -404,7 +404,7 @@ private:
 
             // 'dim' is the topological dimension of the entities the ids name,
             // which is what selects the attribute namespace. Boundary/domain is
-            // derived from it, not authored (matches InputParser).
+            // derived from it, not prescribed (matches InputParser).
             bool is_boundary = false;
             if (g.contains("kind")) {
                 AddError(prefix + ".kind", "Unsupported field 'kind'; use 'dim' with the "

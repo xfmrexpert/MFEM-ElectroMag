@@ -56,7 +56,7 @@ consistently everywhere else.
 | **Boundary** | A codimension-one part (a curve in 2D) bounding the solved region. |
 | **Material** | A named set of physical properties: `sigma`, `epsilon_r`, `mu_r`. Purely a property bundle; it has no location. |
 | **Region** | The assignment of a material to a domain entity group. This is what gives a material a location. |
-| **Boundary condition** | A condition imposed on a boundary entity group: Dirichlet (prescribed value) or Neumann (prescribed flux). Authored once; fixed for the entire run. |
+Dirichlet (prescribed value) or Neumann (prescribed flux). Prescribed once; fixed for the entire run. |
 | **Terminal** | A named connection through which the model is driven or measured. Its value is *not* fixed here -- scenarios supply it. |
 | **Excitation** | One scenario's setting of one terminal. Volts for a voltage terminal, amps for a current terminal. |
 | **Scenario** | One solve: a set of excitations plus, for MQS, a frequency. |
@@ -71,7 +71,7 @@ why materials can be reused across a model without duplication.
 **Boundary condition vs. terminal.** Both can pin DOFs, so the distinction is
 not "essential vs. not". It is **who owns the value**:
 
-- a boundary condition's value is authored in the file and fixed for the run;
+- a boundary condition's value is prescribed in the file and fixed for the run;
 - a terminal's value is supplied per scenario.
 
 A grounded far-field boundary is a boundary condition. A driven electrode is a
@@ -149,7 +149,7 @@ for both a curve and a surface; MFEM preserves that split as `bdr_attributes`
 versus `attributes`. In the example above `Air` and `TopPlate` both use id `1`
 and refer to entirely different entities. Without `dim` the ids are ambiguous.
 
-Boundary versus domain is **derived** from `dim`, not authored:
+Boundary versus domain is **derived** from `dim`, not prescribed:
 
 | Relation to mesh dimension | Role |
 |---|---|
@@ -214,7 +214,7 @@ Array of boundary conditions.
   `robin_coefficient` is required for Robin entries and rejected on all others.
 
 Entries omitted entirely are homogeneous Neumann. Axis regularity on `r = 0` in
-axisymmetric magnetic runs is imposed automatically and must **not** be authored.
+axisymmetric magnetic runs is imposed automatically and must **not** be prescribed.
 
 ### 3.6 `terminals`
 
@@ -285,11 +285,11 @@ ignored by the static solvers.
 
 ### `field`
 
-Solves the authored scenarios and writes the resulting fields.
+Solves the prescribed scenarios and writes the resulting fields.
 
 ### `coupling_matrix`
 
-Ignores authored scenarios. Drives each terminal to unity in turn, all others at
+Ignores prescribed scenarios.
 zero, and assembles the terminal-by-terminal matrix:
 
 | Physics | Matrix | Unit |
@@ -441,7 +441,7 @@ One internal name moved with them: `Terminal::ExcitationType` ->
 
 `entity_groups[].dim` was briefly renamed to `kind: "boundary" | "domain"` and
 then reverted. The role is derived from the dimension by comparing it to the
-mesh dimension, so authoring it separately stored a fact the mesh already
+mesh dimension, so prescribing it separately stored a fact the mesh already
 determines and allowed the two to disagree. More importantly, `dim` names the
 mesher's own concept -- Gmsh and MFEM both key their attribute namespaces on
 entity dimension -- and so keeps its meaning across tools and in 3D, where a

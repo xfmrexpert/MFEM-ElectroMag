@@ -31,8 +31,8 @@ namespace axisym {
  * before essential elimination: shape functions need not vanish on the axis, so
  * no per-basis limit exists.
  */
-inline double AxialFluxDensity(double A_phi, double dA_dr, double r,
-							   double tolerance)
+inline mfem::real_t AxialFluxDensity(mfem::real_t A_phi, mfem::real_t dA_dr,
+									 mfem::real_t r, mfem::real_t tolerance)
 {
    return IsOnAxisGeometry(r, tolerance) ? (2.0 * dA_dr)
 										 : (dA_dr + A_phi / r);

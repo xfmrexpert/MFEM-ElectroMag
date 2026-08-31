@@ -17,7 +17,7 @@ reasoning that produced it is easy to repeat.
 |---|----------|--------|
 | 1 | Drop "closure"; the word is topologically backwards | **Done** |
 | 2 | A terminal is not a kind of boundary condition | **Done** |
-| 3 | `BoundaryConditionSet` holds only authored boundary conditions | **Done** |
+holds only prescribed boundary conditions
 | 4 | `ess_bdr` is an explicit union of several independent sources | **Done** |
 | 5 | No exterior/internal boundary distinction in the solver | **Decided - do not add** |
 | 6 | Keep "terminal"; avoid "port" | **Decided - keep** |
@@ -133,7 +133,7 @@ not at the level of *boundary condition objects*.
 
 ## 3. Why not "closure"
 
-"Closure" was used to mean "an authored boundary condition, as opposed to a
+"Closure" was used to mean "a prescribed boundary condition, as opposed to a
 terminal." It should be removed for two reasons.
 
 **It inverts the topology.** The closure of a domain is the domain *together
@@ -144,7 +144,7 @@ and boundaries.
 **It names the wrong axis.** The intended contrast was never geometric. It was
 about *who owns the value*: fixed for the whole run, versus supplied per
 scenario. But once terminals leave `BoundaryConditionSet` entirely, the contrast
-has nothing left to distinguish -- every entry is an authored boundary condition.
+has nothing left to distinguish -- every entry is a prescribed boundary condition.
 The word disappears rather than needing a replacement.
 
 There is a legitimate physics sense of "closure" (a closure relation that makes
@@ -241,13 +241,13 @@ better than what is already in use and already documented in the config schema.
 
 ### `BoundaryCondition` (config)
 
-Unchanged. Authored conditions only, one per boundary entity group.
+Unchanged. Prescribed conditions only, one per boundary entity group.
 
 ### `MarkedBoundaryCondition`
 
 A `BoundaryCondition` paired with its resolved mesh marker. It should carry no
 role tag and no terminal name, and every instance should correspond to a real
-authored condition.
+prescribed condition.
 
 ```cpp
 struct MarkedBoundaryCondition {
@@ -266,7 +266,7 @@ for `IsDirichlet()`, and a synonym implies a distinction that no longer exists.
 
 ### `BoundaryConditionSet`
 
-Holds authored boundary conditions and the folds over them. No `AddTerminal()`,
+Holds prescribed boundary conditions and the folds over them.
 no `TerminalMarkers()`, no `Closures()` -- with terminals gone, `Closures()`
 would return everything.
 
@@ -294,7 +294,7 @@ second solver needs the same lookup.
 ### Building `ess_bdr`
 
 The union is owned by a virtual hook, `PhysicsSolver::BuildEssentialBoundaryMarker()`.
-The base supplies the authored Dirichlet conditions; each formulation overrides,
+The base supplies the prescribed Dirichlet conditions; each formulation overrides,
 calls the base, and merges its own essential sources:
 
 ```cpp
@@ -346,7 +346,7 @@ without any type error. Name them apart.
 | Avoid | Use | Why |
 |-------|-----|-----|
 | closure | boundary condition | Closure means domain *plus* boundary |
-| closure BC | authored boundary condition | |
+| closure BC | prescribed boundary condition | |
 | `closure_bcs` | `boundary_conditions` | |
 | `BuildClosureBcs()` | `BuildBoundaryConditions()` | |
 | `IsDrivenClosure()` | `IsNonzeroDirichlet()` | |

@@ -6,7 +6,7 @@
 #include "mfem.hpp"
 
 // -----------------------------------------------------------------------------
-// 3. Energy Density Coefficient
+// Energy Density Coefficient
 // -----------------------------------------------------------------------------
 // Computes local energy density: w = 0.5 * eps * |E|^2
 // Useful for visualization. Note: This does NOT include 2*pi*r. 

@@ -678,6 +678,13 @@ public:
         }
 
         // Drive the active port(s) via the imaginary port block Im_Port.
+        //
+        // The prescribed excitation IS the current phasor I, and the RHS entry
+        // that produces it is I/(j*omega) in this block ordering (which equals
+        // -j*I/omega for a real in-phase current, hence the sign and 1/omega).
+        // It is used unscaled, so the PEAK-phasor convention enters the solve
+        // here and every downstream quantity -- solved port voltages, the
+        // coupling matrix, and the 1/2 in the loss density -- inherits it.
         int p = 0;
         for (const auto& [term_name, term] : config.Terminals) {
             if (term.Conductor != ConductorType::Massive) continue;   // keep p aligned
@@ -690,7 +697,7 @@ public:
     }
 
     // Solve + save on the CURRENT mesh/operators. Field analysis performs one
-    // solve per concrete scenario. Coupling analysis uses each authored scenario
+    // solve per prescribed scenario. Coupling analysis uses each prescribed scenario
     // as a frequency point and synthesizes one unit-current solve per terminal.
     void RunOnCurrentMesh() override {
         PrepareAnalysis();

@@ -3134,7 +3134,7 @@ TEST_CASE("Magnetostatic far-field truncation error converges as the boundary re
                 {{"name", "Air"}, {"properties", {{"mu_r", 1.0}}}}
             })},
             // The axis (attribute 1) is deliberately unassigned: A_phi = 0 there
-            // is imposed by the solver's axis regularity, not by an authored
+            // is imposed by the solver's axis regularity, not by a prescribed
             // condition. Only the truncation surface is Dirichlet.
             {"boundary_conditions", json::array({
                 {{"name", "FarField"}, {"type", "dirichlet"},

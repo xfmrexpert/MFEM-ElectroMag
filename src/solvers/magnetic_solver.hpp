@@ -118,7 +118,7 @@ protected:
 	}
 
 	// Axis regularity, imposition half: A_phi = 0 on r = 0. The dedicated axis
-	// boundary attribute joins the authored Dirichlet conditions in ess_bdr, so
+	// boundary attribute joins the prescribed Dirichlet conditions in ess_bdr, so
 	// the ordering (merge before BuildOperators() reads ess_bdr) is structural
 	// rather than a convention the caller has to remember.
 	void BuildEssentialBoundaryMarker() override {

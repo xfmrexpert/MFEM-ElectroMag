@@ -13,7 +13,7 @@
 // A boundary condition paired with the mesh marker it resolves to. The marker is
 // computed once (attribute values are refinement-invariant) and reused.
 //
-// Every instance corresponds to an authored entry in config.BoundaryConditions.
+// Every instance corresponds to a prescribed entry in config.BoundaryConditions.
 // Terminals are deliberately NOT represented here: a terminal is a model-level
 // connection to the outside world, and only one of its realizations (an
 // electrostatic voltage) is a boundary condition -- current terminals resolve to
@@ -42,7 +42,7 @@ inline void MergeMarker(mfem::Array<int>& target, const mfem::Array<int>& source
 	}
 }
 
-// The authored boundary conditions of one solve, and the folds over them that
+// The prescribed boundary conditions of one solve
 // the solvers and validation need. Owning the folds here keeps "which boundary
 // conditions are Dirichlet?" a single question with a single answer.
 class BoundaryConditionSet {

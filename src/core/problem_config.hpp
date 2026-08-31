@@ -13,10 +13,10 @@
 #include "constants.hpp"  // Constants::DEFAULT_SOLVER_*
 
 // What computation a run performs.
-//   Field          - solve the authored Scenarios as-is and save fields.
+//   Field          - solve the prescribed Scenarios as-is and save fields.
 //   CouplingMatrix - auto-generate unit scenarios (drive i = 1, rest = 0) from
 //                    Terminals to assemble a C (electrostatic) or L
-//                    (magnetostatic) matrix. Authored Scenarios are ignored.
+//                    (magnetostatic) matrix. Prescribed Scenarios are ignored.
 enum class AnalysisType { Field, CouplingMatrix };
 
 // The across/through quantity a terminal imposes. Room to grow: Charge, Flux.
@@ -46,7 +46,7 @@ enum class BoundaryConditionType { Dirichlet, Neumann, Robin };
 // ambiguous and the group must state which dimension it means.
 //
 // Whether a group is a boundary or a domain is DERIVED by comparing Dim to the
-// mesh dimension; it is not authored. See IsBoundary()/IsDomain() below.
+// mesh dimension; it is not prescribed. See IsBoundary()/IsDomain() below.
 struct EntityGroup {
 	int Dim = 0;                    // 1 = curve, 2 = surface, 3 = volume
 	std::vector<int> AttributeIds;  // ids within the namespace selected by Dim
@@ -74,9 +74,17 @@ struct Terminal {
 };
 
 // One scenario's setting of one terminal.
+//
+// PHASOR CONVENTION: for time-harmonic (MQS) runs, Value is a PEAK (amplitude)
+// phasor, not RMS. Nothing converts or validates this -- the number is carried
+// unscaled into the RHS, so the solved port voltages, the extracted coupling
+// matrix (R = Re(V/I)), and the 1/2 in the time-averaged loss density all
+// inherit it. Prescribing an RMS value (e.g. a nameplate current) is silently
+// accepted and under-reports loss by 2x. See MqsLossDensityCoefficient.
 struct Excitation {
 	std::string TerminalName;   // must match a Terminal::Name (validated)
-	double Value = 0.0;         // volts (Voltage terminal) | amps (Current terminal)
+	double Value = 0.0;         // volts (Voltage terminal) | amps (Current terminal);
+								// peak amplitude, not RMS (see above)
 };
 
 struct Material {
@@ -85,7 +93,7 @@ struct Material {
 	double RelPermeability = 1.0;   // mu_r     (vacuum default)
 };
 
-// An authored boundary condition. For Neumann data, Value is the prescribed
+// A prescribed boundary condition. For Neumann data, Value is the prescribed
 // outward natural flux n.material_flux; zero is the implicit natural condition.
 // Robin metadata is retained for forward compatibility but is not yet assembled.
 // Terminals and magnetic axis regularity are modeled separately.

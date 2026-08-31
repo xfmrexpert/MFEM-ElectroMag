@@ -40,7 +40,7 @@ protected:
     mfem::Array<int> ess_bdr;
     mfem::Array<int> ess_tdof_list;
 
-    // The authored boundary conditions of this solve, resolved to mesh markers.
+    // The prescribed boundary conditions of this solve
     // Terminals are NOT here; each solver realizes those itself. See
     // docs/boundary_and_terminal_model.md.
     BoundaryConditionSet boundary_conditions;
@@ -97,7 +97,7 @@ protected:
 
     // Builds ess_bdr: every boundary attribute whose DOFs this formulation pins.
     //
-    // The default is the authored Dirichlet conditions alone. Formulations with
+    // The default is the prescribed Dirichlet conditions alone. Formulations with
     // additional essential sources override this, call the base, and merge their
     // own markers in -- voltage terminals for electrostatics, axis regularity for
     // the axisymmetric magnetic solvers. Collecting the union behind one named
@@ -189,8 +189,12 @@ protected:
     }
 
     // The drive a scenario applies to a terminal, or 0.0 when the scenario does
-    // not mention it. Excitations are authored as a list rather than a map, so
+    // not mention it. Excitations are prescribed as a list rather than a map, so
     // this is the single place that resolves one against a terminal name.
+    //
+    // The value is returned unscaled. For time-harmonic solvers it is a PEAK
+    // (amplitude) phasor by convention; this function is convention-agnostic
+    // and performs no rms/peak conversion. See Excitation in problem_config.hpp.
     static double ExcitationFor(const Scenario& sc,
                                 const std::string& terminal_name) {
         double value = 0.0;
@@ -281,7 +285,7 @@ protected:
 
     // The ordered list of (name, scenario) solves for the active analysis, so
     // every solver flows both analysis types through ONE imprint/solve loop:
-    //   - Field:          the authored scenarios, as-is.
+    //   - Field:          the prescribed scenarios, as-is.
     //   - CouplingMatrix: one synthesized scenario per terminal that drives that
     //                     terminal by a unit excitation (1 V or 1 A, per physics)
     //                     while every other terminal defaults to zero. This is the
