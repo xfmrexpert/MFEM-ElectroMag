@@ -1,189 +1,190 @@
 # MFEM-ElectroMag Examples
 
-This directory contains example problems demonstrating electromagnetic field simulations using MFEM-ElectroMag.
+This directory contains example problems demonstrating electromagnetic field simulations
+using MFEM-ElectroMag. All examples use the axisymmetric (r-z) formulation with second
+order (`"order": 2`) elements.
 
 ## Examples
 
-1. **simple_capacitor/** - Parallel plate capacitor (electrostatics)
-2. **solenoid/** - Axisymmetric solenoid (magnetostatics)
-3. **eddy_current/** - Conducting cylinder in AC field (magnetoquasistatics)
+| Directory | Physics | Mesh | Notes |
+|-----------|---------|------|-------|
+| `simple_capacitor/` | Electrostatics | `capacitor_from_sl.mesh` | Parallel plate capacitor, fringing fields, capacitance |
+| `solenoid/` | Magnetostatics | `solenoid.mesh` | Axisymmetric solenoid, inductance |
+| `current_loop/` | Magnetostatics | `loop.mesh` | Single current loop with an analytical hand calculation notebook |
+| `eddy_current/` | Magnetoquasistatics | `eddy_current.mesh` | Conducting cylinder in an AC field, skin effect, losses |
 
-Each example includes:
-- `config.json` - Simulation configuration file
-- `README.md` - Detailed problem description and physics
-- `*.geo` - Gmsh geometry script for mesh generation
+Each directory contains a `config.json` and its `.geo` source geometry. The generated
+`.mesh` files are committed, so the examples run without installing Gmsh.
+`simple_capacitor/`, `solenoid/`, and `eddy_current/` also include a `README.md` with the
+detailed problem description; `current_loop/` includes `hand_calc.ipynb` instead.
 
 ## Quick Start
 
-### 1. Generate Meshes
+### 1. Build the solver
 
-First, generate the meshes for all examples:
+```bash
+cmake -S . -B build
+cmake --build build --config Release
+```
+
+On Windows the repository also ships CMake presets (`x64-debug`, `x64-release`) that
+Visual Studio picks up automatically:
+
+```pwsh
+cmake --preset x64-release
+cmake --build --preset x64-release
+```
+
+MFEM is fetched and built by CMake, so the first configure takes a while.
+
+### 2. Run an example
+
+The config path is the only required argument. Relative paths inside the config
+(mesh file, `results_path`) are resolved against the config file's directory, so the
+examples can be run from anywhere:
+
+```bash
+./build/mfem-electromag examples/simple_capacitor/config.json
+./build/mfem-electromag examples/solenoid/config.json
+./build/mfem-electromag examples/current_loop/config.json
+./build/mfem-electromag examples/eddy_current/config.json
+```
+
+Useful options:
+
+| Option | Purpose |
+|--------|---------|
+| `--results-path <dir>` | Override `simulation.results_path` (relative paths resolve against the CWD) |
+| `--verbosity <0\|1\|2>` | `0` status/timing, `1` solver output, `2` diagnostics |
+| `--machine-readable` | Emit JSON Lines progress on stdout for tooling |
+| `--version` | Print version/build information |
+| `-h`, `--help` | Show usage |
+
+### 3. Output
+
+Output is off by default and enabled per format in the config's `simulation` block:
+
+```json
+{
+  "simulation": {
+	"output_paraview": true,
+	"output_gmsh": true,
+	"results_path": "results"
+  }
+}
+```
+
+- `output_paraview` writes a ParaView collection per scenario into
+  `results_<physics>_<scenario>/`.
+- `output_gmsh` writes `<scenario>.results.msh` (Gmsh MSH 2.2 ASCII). The mesh is
+  emitted as native high-order Lagrange elements at the solution order, and the file
+  includes an `$InterpolationScheme` block so a consumer can reconstruct fields at
+  arbitrary points using the same basis MFEM used.
+- If `results_path` is not set, output is written next to the mesh file.
+
+Of the shipped examples only `simple_capacitor` enables output (`output_paraview`);
+add the flags above to the other configs if you want files written.
+
+Visualize with:
+
+```bash
+paraview examples/simple_capacitor/"results_electrostatics_Top Plate"/data.pvd
+gmsh <scenario>.results.msh
+```
+
+## Regenerating Meshes
+
+The committed `.mesh` files are sufficient to run the examples. Regenerate only if you
+change a `.geo` file.
+
+`generate_meshes.sh` (bash; requires Gmsh on `PATH`) regenerates the eddy current,
+capacitor, and solenoid meshes:
 
 ```bash
 cd examples
 ./generate_meshes.sh
 ```
 
-This will create:
-- `eddy_current/eddy_current.mesh`
-- `simple_capacitor/capacitor.mesh`
-- `solenoid/solenoid.mesh`
+It runs `gmsh -2 -format msh2` on each `.geo`, then uses MFEM's `convert-mesh` utility if
+available, otherwise simply renames the `.msh` to `.mesh` (MFEM reads Gmsh MSH2 directly).
 
-**Requirements:**
-- Gmsh must be installed: `sudo apt-get install gmsh` (Ubuntu/Debian) or `brew install gmsh` (macOS)
-- Alternatively, download from https://gmsh.info/
+Note: the script writes `simple_capacitor/capacitor.mesh`, but that example's config uses
+`capacitor_from_sl.mesh`. `current_loop/loop.mesh` is not covered by the script.
 
-### 2. Build the Solver
-
-```bash
-cd ..
-mkdir -p build && cd build
-cmake ..
-make
-```
-
-### 3. Run Examples
-
-```bash
-# From build directory
-./mfem-electromag ../examples/simple_capacitor/config.json
-./mfem-electromag ../examples/solenoid/config.json
-./mfem-electromag ../examples/eddy_current/config.json
-```
-
-Results will be written to `results_*/` directories.
-
-### 4. Visualize Results
-
-```bash
-paraview results_electrostatic/results_electrostatic.pvd
-paraview results_magnetostatic/results_magnetostatic.pvd
-paraview results_mqs/results_mqs.pvd
-```
-
-## Mesh Generation Details
-
-### Manual Mesh Generation
-
-To generate a single mesh:
+To regenerate a single mesh manually:
 
 ```bash
 cd examples/solenoid
-gmsh -2 -format msh2 solenoid.geo -o solenoid.msh
+gmsh -2 -format msh2 solenoid.geo -o solenoid.mesh
 ```
 
-The `-format msh2` flag outputs ASCII MSH2 format, which MFEM can read directly.
+Use MSH2 format; MFEM does not read all MSH4 element types.
 
-### Mesh Refinement
+### Mesh refinement
 
-Each `.geo` file includes mesh size fields for appropriate refinement:
+Each `.geo` sets mesh size fields for appropriate refinement:
 
-- **Eddy current**: Fine mesh (0.5 mm) near conductor surface to resolve skin depth
-- **Capacitor**: Refined mesh near plate edges to capture fringing fields
-- **Solenoid**: Uniform mesh in coil region, graded toward far field
+- **Eddy current**: fine mesh near the conductor surface to resolve skin depth
+- **Capacitor**: refined near plate edges to capture fringing fields
+- **Solenoid**: uniform in the coil region, graded toward the far field
 
-Modify the `lc_*` parameters in the `.geo` files to adjust mesh density.
-
-### Viewing Meshes in Gmsh
-
-To visualize the mesh before running simulations:
-
-```bash
-gmsh eddy_current/eddy_current.geo
-# In Gmsh: Tools → Statistics to see element count
-# Press 'e' to show element edges
-# Press '2' to show surface elements
-```
+Adjust the `lc_*` parameters in the `.geo` files to change mesh density: increase them for
+a fast coarse test, decrease them for higher accuracy.
 
 ## Modifying Examples
 
-### Change Geometry
+### Geometry
 
-Edit the `.geo` file parameters:
+Edit the `.geo` parameters, then regenerate the mesh:
+
 ```c
 // In eddy_current.geo
 cyl_radius = 0.05;      // Change cylinder size
 coil_r_inner = 0.06;    // Change coil position
 ```
 
-Then regenerate the mesh:
-```bash
-gmsh -2 -format msh2 eddy_current.geo -o eddy_current.msh
-```
+### Materials / physics
 
-### Change Materials/Physics
+Edit `config.json`:
 
-Edit the `config.json` file:
 ```json
 {
   "materials": [
-    {
-      "name": "Conductor",
-      "properties": {
-        "sigma": 5.8e7  // Change to copper conductivity
-      }
-    }
+	{
+	  "name": "Conductor",
+	  "properties": { "sigma": 5.8e7 }
+	}
   ]
 }
 ```
 
-### Change Mesh Resolution
-
-For higher accuracy or faster testing:
-
-**Quick test mesh** (coarse):
-```bash
-# In .geo file, increase all lc_* values by factor of 2-3
-lc_conductor_surface = 0.002;  // Was 0.0005
-```
-
-**High accuracy** (fine):
-```bash
-# Decrease all lc_* values by factor of 2
-lc_conductor_surface = 0.00025;  // Was 0.0005
-```
+Material attribute names must match the physical groups in the mesh. The solver validates
+the config up front and reports unknown or mismatched fields by JSON path.
 
 ## Troubleshooting
 
-### "gmsh: command not found"
+**`gmsh: command not found`** — install Gmsh (`sudo apt-get install gmsh`,
+`brew install gmsh`, or download from https://gmsh.info/).
 
-Install Gmsh:
-- **Ubuntu/Debian**: `sudo apt-get install gmsh`
-- **macOS**: `brew install gmsh`
-- **Windows**: Download from https://gmsh.info/
+**"Unknown element type"** — regenerate with `-format msh2`.
 
-### Mesh generation is slow
+**No output files** — set `output_paraview` and/or `output_gmsh` to `true` in the config;
+both default to `false`.
 
-- Reduce mesh refinement in `.geo` files (increase `lc_*` values)
-- The eddy current mesh is intentionally fine to resolve skin depth
+**Results look wrong** — check mesh quality in Gmsh, verify material attributes match the
+mesh physical groups, confirm the boundary conditions, and refine the mesh if the solution
+looks under-resolved.
 
-### "Unknown element type" error
+## Physics Summary
 
-Make sure Gmsh outputs MSH2 format: `gmsh -2 -format msh2 ...`
-
-MFEM may not support newer MSH4 format elements.
-
-### Simulation results look wrong
-
-1. Check mesh quality: Open in Gmsh and look for badly shaped elements
-2. Verify material attributes match between mesh and config.json
-3. Check boundary conditions are applied correctly
-4. Increase mesh resolution if solution is under-resolved
-
-## Example Physics Summary
-
-| Example | Type | Key Physics | Typical Runtime |
+| Example | Type | Key physics | Typical runtime |
 |---------|------|-------------|-----------------|
 | simple_capacitor | Electrostatics | Fringing fields, capacitance | < 1 min |
 | solenoid | Magnetostatics | Magnetic field, inductance | < 1 min |
+| current_loop | Magnetostatics | Loop field vs. analytical result | < 1 min |
 | eddy_current | Magnetoquasistatics | Skin effect, eddy losses | 2-5 min |
-
-All examples use axisymmetric formulation for efficiency.
 
 ## Further Information
 
-See individual example README files for:
-- Detailed problem descriptions
-- Analytical solutions for validation
-- Expected results and visualization tips
-- Parameter studies and variations
+See the individual example README files for detailed problem descriptions, analytical
+solutions for validation, expected results, and parameter studies.

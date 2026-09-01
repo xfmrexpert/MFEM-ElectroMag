@@ -1,7 +1,7 @@
 {
   "simulation": {
     "physics_type": "electrostatics",
-    "mesh": "capacitor_from_sl.mesh",
+    "mesh": "capacitor.mesh",
     "order": 2,
     "geometry_type": "axisymmetric",
     "solver_tolerance": 1e-12,
