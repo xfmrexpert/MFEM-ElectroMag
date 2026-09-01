@@ -387,8 +387,7 @@ protected:
 
         FieldExportSet fields = CollectExportFields();
         const SolverFieldWriter writer(mesh, config.ResultsDirectory,
-                                       config.MeshPath, fec->GetOrder(),
-                                       config.ExportRefine);
+                                       config.MeshPath, fec->GetOrder());
         if (config.OutputParaview) {
             writer.WriteParaview("results_" + std::string(ToString(config.PhysicsType))
                 + "_" + scenario_name, fields);

@@ -20,13 +20,30 @@ void PrintUsage(const char* prog) {
     std::cerr <<
         "Usage: " << prog << " <config.json> [options]\n"
         "Options:\n"
-        "  --results-path <directory> Override Gmsh results output directory\n"
-        "  --export-refine <N>        Refinement factor for export mesh (default = solve order)\n"
-        "  --export-vector-space <L2|H1>  Reserved; L2 is currently the only supported choice\n"
+        "  --results-path <directory> Override simulation.results_path. A relative\n"
+        "                             path resolves against the current directory.\n"
         "  --verbosity <0|1|2>        0=status/timing, 1=solver output, 2=diagnostics\n"
         "  --machine-readable         Emit flushed JSON Lines progress on stdout\n"
         "  --version                  Print version/build information and exit\n"
         "  -h, --help                 Show this help\n";
+}
+
+// std::stoi would accept trailing garbage ("1abc" -> 1) and reports failures as
+// a bare "invalid stoi argument" that never names the offending option. Parse
+// strictly instead so the user is told which flag was wrong and what it accepts.
+int ParseVerbosity(const std::string& text) {
+    size_t consumed = 0;
+    int value = 0;
+    try {
+        value = std::stoi(text, &consumed);
+    } catch (const std::exception&) {
+        consumed = 0;
+    }
+    if (consumed != text.size() || value < 0 || value > 2) {
+        throw std::runtime_error(
+            "--verbosity must be 0, 1, or 2 (got '" + text + "')");
+    }
+    return value;
 }
 
 } // namespace
@@ -34,13 +51,20 @@ void PrintUsage(const char* prog) {
 int main(int argc, char *argv[]) {
     // Convert MFEM internal errors (MFEM_ASSERT / MFEM_VERIFY / MFEM_ABORT)
     // into catchable mfem::ErrorException objects so a malformed mesh does
-    // not call std::abort() from deep inside the Mesh constructor.
-    // Requires MFEM built with MFEM_USE_EXCEPTIONS=ON (see top-level
-    // CMakeLists.txt).
-#ifdef MFEM_USE_EXCEPTIONS
-    mfem::set_error_action(mfem::MFEM_ERROR_THROW);
+    // not call std::abort() from deep inside the Mesh constructor. The mesh
+    // loading path below depends on this, so a build without it is rejected
+    // outright rather than silently degrading to abort-on-bad-mesh.
+#ifndef MFEM_USE_EXCEPTIONS
+#error "MFEM must be built with MFEM_USE_EXCEPTIONS=ON; see top-level CMakeLists.txt"
 #endif
+    mfem::set_error_action(mfem::MFEM_ERROR_THROW);
     StatusReporter& reporter = StatusReporter::Global();
+
+    // Pre-scan for --machine-readable before the real argument loop: the output
+    // format has to be fixed before anything can fail, otherwise an early error
+    // (bad option, missing config) would escape as plain text and break a caller
+    // parsing JSON Lines. The main loop below matches the flag again so it does
+    // not trip the unknown-option check.
     bool machine_readable_requested = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--machine-readable") {
@@ -55,8 +79,6 @@ int main(int argc, char *argv[]) {
     try {
         std::string config_file = "config.json";
         std::string cli_results_path;
-        int  cli_export_refine = 0;        // 0 = unset
-        std::string cli_vector_space;
         int cli_verbosity = 0;
         bool verbosity_explicit = false;
 
@@ -77,22 +99,8 @@ int main(int argc, char *argv[]) {
                 return 0;
             } else if (a == "--results-path") {
                 cli_results_path = need_value(a);
-            } else if (a == "--export-refine") {
-                cli_export_refine = std::stoi(need_value(a));
-                if (cli_export_refine < 1) {
-                    throw std::runtime_error("--export-refine must be >= 1");
-                }
-            } else if (a == "--export-vector-space") {
-                cli_vector_space = need_value(a);
-                if (cli_vector_space != "L2" && cli_vector_space != "H1") {
-                    throw std::runtime_error("--export-vector-space must be L2 or H1");
-                }
-                if (cli_vector_space == "H1") {
-                    reporter.Warning("--export-vector-space H1 is not yet implemented; using L2.");
-                }
             } else if (a == "--verbosity") {
-                cli_verbosity = std::stoi(need_value(a));
-                StatusReporter::VerbosityFromInt(cli_verbosity);
+                cli_verbosity = ParseVerbosity(need_value(a));
                 verbosity_explicit = true;
             } else if (a == "--machine-readable") {
                 machine_readable_requested = true;
@@ -131,18 +139,20 @@ int main(int argc, char *argv[]) {
         }
         InputParser& parser = *parser_ptr;
 
-        // Inject CLI overrides into the shared json so downstream parsing picks
-        // them up (solvers re-run InputParser internally inside Setup()).
+        // Inject the CLI override into the shared json so downstream parsing
+        // picks it up (solvers re-run InputParser internally inside Setup()).
         // const_cast is safe: parser owns the json when constructed from a path.
         json& mutable_json = const_cast<json&>(parser.config);
         if (!mutable_json.contains("simulation") || !mutable_json["simulation"].is_object()) {
             mutable_json["simulation"] = json::object();
         }
         if (!cli_results_path.empty()) {
-            mutable_json["simulation"]["results_path"] = cli_results_path;
-        }
-        if (cli_export_refine > 0) {
-            mutable_json["simulation"]["export_refine"] = cli_export_refine;
+            // InputParser::GetResultsDirectory() resolves relative paths against
+            // the config file's directory, which is right for a path written in
+            // the json but surprising for one typed on the command line. Make it
+            // absolute here so the override keeps ordinary shell semantics.
+            mutable_json["simulation"]["results_path"] =
+                std::filesystem::absolute(cli_results_path).string();
         }
 
         // Validate Configuration (schema and basic semantics before decoding)
@@ -178,12 +188,9 @@ int main(int argc, char *argv[]) {
         // Load() -> Finalize() -> CheckBdrElementOrientation(). For meshes
         // with orphan boundary elements (boundary edges whose endpoints are
         // not shared by any 2D element), CheckBdrElementOrientation indexes
-        // faces_info[-1] and triggers MFEM_ASSERT. Requires MFEM built with
-        // MFEM_USE_EXCEPTIONS=ON (enforced below) so that becomes a catchable
+        // faces_info[-1] and triggers MFEM_ASSERT. The MFEM_ERROR_THROW action
+        // set at the top of main() turns that into a catchable
         // mfem::ErrorException instead of an std::abort().
-#ifndef MFEM_USE_EXCEPTIONS
-#error "MFEM must be built with MFEM_USE_EXCEPTIONS=ON; see top-level CMakeLists.txt"
-#endif
         std::unique_ptr<mfem::Mesh> mesh_ptr;
         {
             auto operation = reporter.Start("mesh loading");

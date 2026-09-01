@@ -144,7 +144,6 @@ struct ProblemConfig {
 	bool OutputParaview = false;
 	bool OutputGmsh = false;
 	std::string ResultsDirectory;  // Optional Gmsh results directory (empty = mesh directory)
-	std::optional<int> ExportRefine;  // Export mesh refinement factor (unset = default to Order)
 	AmrSettings Amr;               // Adaptive mesh refinement controls (disabled by default)
 	std::unordered_map<std::string, EntityGroup> EntityGroups;
 	std::vector<Region> Regions;

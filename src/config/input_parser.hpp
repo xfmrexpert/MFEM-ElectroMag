@@ -94,8 +94,7 @@ private:
 
 		prob_config.OutputParaview = GetOutputParaview();
 		prob_config.OutputGmsh = GetOutputGmsh();
-        prob_config.ResultsDirectory = GetResultsDirectory();
-		prob_config.ExportRefine = GetExportRefine();
+		prob_config.ResultsDirectory = GetResultsDirectory();
 		prob_config.Amr = GetAmrSettings();
 
 		return prob_config;
@@ -263,13 +262,6 @@ private:
         if (p.empty()) return {};
         const fs::path pp(p);
         return pp.is_absolute() ? pp.string() : (fs::path(config_dir) / pp).string();
-    }
-
-    // Absent means "follow Order"; the caller decides via value_or.
-    [[nodiscard]] std::optional<int> GetExportRefine() const {
-        const auto& sim = Sim();
-        if (sim.find("export_refine") == sim.end()) return std::nullopt;
-        return std::max(1, Get(sim, "export_refine", 1));
     }
 
     // Parse the optional "simulation.amr" block. Missing keys fall back to the

@@ -44,7 +44,6 @@ Object. **Required** -- the only required section.
 | `output_paraview` | bool | `false` | -- |
 | `output_gmsh` | bool | `false` | -- |
 | `results_path` | string | mesh directory | Relative resolves against the config file's directory |
-| `export_refine` | integer | follows `order` | >= 1 |
 | `amr` | object | absent = disabled | See below |
 
 `direct` is the default linear solver because a coupling-matrix run amortizes
@@ -257,7 +256,7 @@ than one at a time.
 
 **Ranges**
 - `order` in [1, 10]; `solver_tolerance` in (0, 1); `solver_max_iter` >= 1;
-  `export_refine` >= 1; `amr.error_fraction` in (0, 1];
+  `amr.error_fraction` in (0, 1];
   `amr.max_iterations` and `amr.error_tolerance` non-negative.
 
 **Physics-specific**

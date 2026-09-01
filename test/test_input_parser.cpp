@@ -25,7 +25,6 @@ json CanonicalConfig() {
             {"solver_print_level", 2},
             {"output_paraview", true},
             {"output_gmsh", true},
-            {"export_refine", 3},
             {"amr", {
                 {"enabled", true},
                 {"max_iterations", 4},
@@ -81,7 +80,6 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
     REQUIRE(config.SolverPrintLevel == 2);
     REQUIRE(config.OutputParaview);
     REQUIRE(config.OutputGmsh);
-    REQUIRE(config.ExportRefine == 3);
     REQUIRE(config.Amr.Enabled);
     REQUIRE(config.Amr.MaxIterations == 4);
     REQUIRE(config.Amr.MaxDofs == 12345);

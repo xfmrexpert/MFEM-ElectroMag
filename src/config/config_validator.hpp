@@ -118,7 +118,6 @@ private:
             CheckFieldType(sim, "output_paraview", "simulation.output_paraview", ExpectedType::Boolean);
             CheckFieldType(sim, "output_gmsh", "simulation.output_gmsh", ExpectedType::Boolean);
             CheckFieldType(sim, "results_path", "simulation.results_path", ExpectedType::String);
-            CheckFieldType(sim, "export_refine", "simulation.export_refine", ExpectedType::Integer);
             CheckFieldType(sim, "amr", "simulation.amr", ExpectedType::Object);
 
             if (sim.contains("physics")) {
@@ -335,10 +334,6 @@ private:
             if (max_iter < 1) {
                 AddError("simulation.solver_max_iter", "Max iterations must be at least 1");
             }
-        }
-
-        if (sim.contains("export_refine") && sim["export_refine"].get<int>() < 1) {
-            AddError("simulation.export_refine", "Export refinement must be at least 1");
         }
 
         if (sim.contains("amr")) {

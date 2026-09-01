@@ -6,6 +6,17 @@
 // View names are exposed via Gmsh's StringTags[0] and form the contract with
 // downstream consumers (e.g. TfmrLib's FEMSolution loader).
 //
+// Elements are emitted as native Gmsh Lagrange elements of the solution order
+// (types 2/9/21/23... for triangles, 3/10/36/37... for quads), so Gmsh
+// interpolates the field with the matching high-order shape functions. No
+// refined/tessellated export copy of the mesh is made.
+//
+// FORMAT SEAM: everything version-specific to MSH 2.2 is confined to
+// WriteMeshFormat, WriteMeshBlock, and WriteViewHeader. The node layout
+// (HoLayout/GetHoLayout), the MFEM->Gmsh permutation, and all field sampling
+// are format-agnostic, so an MSH 4.1 writer is a replacement of those three
+// functions rather than a rewrite.
+//
 // Format reference: https://gmsh.info/doc/texinfo/gmsh.html#MSH-file-format-version-2-_0028Legacy_0029
 
 #pragma once
@@ -20,9 +31,11 @@
 #include <fstream>
 #include <functional>
 #include <ios>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "mfem.hpp"
@@ -37,11 +50,10 @@ struct View {
     Kind        kind;
     int         num_components; ///< 1 (scalar) or 3 (vector, padded in 2D).
 
-    /// NodeData: out has num_components entries; called once per mesh node.
-    std::function<void(int node_id, double* out)> node_eval;
-
-    /// ElementNodeData: called once per (element, local node) with the
-    /// integration point in reference coordinates; out has num_components.
+    /// Called once per sample point with the point in reference coordinates;
+    /// out has num_components entries. Both view kinds sample by evaluation,
+    /// so continuous (NodeData) and discontinuous (ElementNodeData) fields
+    /// share one callback shape.
     std::function<void(int elem_id,
                        const mfem::IntegrationPoint& ip,
                        mfem::ElementTransformation& T,
@@ -50,19 +62,155 @@ struct View {
 
 namespace detail {
 
-inline int GmshElementType(mfem::Geometry::Type geom) {
-    using G = mfem::Geometry;
+// Reference-space node layout of a Gmsh Lagrange element of a given order.
+//
+// Node ORDER is Gmsh's own, defined recursively: all corner nodes, then the
+// nodes interior to each edge (edges traversed in element-local order), then
+// the nodes interior to the face, which are themselves laid out as a lower
+// order element of the same shape. Coordinates are in MFEM's reference domain
+// (unit triangle / unit square) so they feed straight into
+// ElementTransformation::Transform.
+//
+// Working in reference COORDINATES rather than a permutation of MFEM DOF
+// indices keeps this independent of MFEM's internal nodal layout and of which
+// basis (Gauss-Lobatto vs equispaced) the solution happens to use: every
+// exported value is obtained by evaluating at a point.
+struct HoLayout {
+    int gmsh_type = 0;
+    std::vector<std::array<double, 2>> ref;
+};
+
+using RefPt = std::array<double, 2>;
+
+inline RefPt Lerp(const RefPt& a, const RefPt& b, double t) {
+    return { a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t };
+}
+
+// Gmsh element type codes, indexed by order. Index 0 is unused.
+inline int TriangleGmshType(int order) {
+    static const int kTypes[] = { 0, 2, 9, 21, 23, 25, 42, 43, 44, 45, 46 };
+    return (order >= 1 && order <= 10) ? kTypes[order] : 0;
+}
+
+inline int QuadGmshType(int order) {
+    static const int kTypes[] = { 0, 3, 10, 36, 37, 38, 47, 48, 49, 50, 51 };
+    return (order >= 1 && order <= 10) ? kTypes[order] : 0;
+}
+
+// Emit an order-p triangular lattice over the triangle (a, b, c) in Gmsh order.
+// p == 0 degenerates to the single centroid node, which is how the recursion
+// terminates for orders that leave exactly one interior node.
+inline void AppendTriangleNodes(int p, const RefPt& a, const RefPt& b,
+                                const RefPt& c, std::vector<RefPt>& out) {
+    if (p == 0) {
+        out.push_back({ (a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0 });
+        return;
+    }
+    out.push_back(a);
+    out.push_back(b);
+    out.push_back(c);
+
+    const double inv = 1.0 / static_cast<double>(p);
+    const RefPt* edges[3][2] = { { &a, &b }, { &b, &c }, { &c, &a } };
+    for (auto& e : edges) {
+        for (int i = 1; i < p; ++i) {
+            out.push_back(Lerp(*e[0], *e[1], i * inv));
+        }
+    }
+
+    // Interior nodes form a triangle of order p-3, inset by one lattice step.
+    if (p < 3) return;
+    const RefPt ai = { a[0] + (b[0] - a[0] + c[0] - a[0]) * inv,
+                       a[1] + (b[1] - a[1] + c[1] - a[1]) * inv };
+    const RefPt bi = { b[0] + (a[0] - b[0] + c[0] - b[0]) * inv,
+                       b[1] + (a[1] - b[1] + c[1] - b[1]) * inv };
+    const RefPt ci = { c[0] + (a[0] - c[0] + b[0] - c[0]) * inv,
+                       c[1] + (a[1] - c[1] + b[1] - c[1]) * inv };
+    AppendTriangleNodes(p - 3, ai, bi, ci, out);
+}
+
+// Emit an order-p quadrilateral lattice over (a, b, c, d) in Gmsh order.
+inline void AppendQuadNodes(int p, const RefPt& a, const RefPt& b,
+                            const RefPt& c, const RefPt& d,
+                            std::vector<RefPt>& out) {
+    if (p == 0) {
+        out.push_back({ (a[0] + b[0] + c[0] + d[0]) * 0.25,
+                        (a[1] + b[1] + c[1] + d[1]) * 0.25 });
+        return;
+    }
+    out.push_back(a);
+    out.push_back(b);
+    out.push_back(c);
+    out.push_back(d);
+
+    const double inv = 1.0 / static_cast<double>(p);
+    const RefPt* edges[4][2] = { { &a, &b }, { &b, &c }, { &c, &d }, { &d, &a } };
+    for (auto& e : edges) {
+        for (int i = 1; i < p; ++i) {
+            out.push_back(Lerp(*e[0], *e[1], i * inv));
+        }
+    }
+
+    // Interior nodes form a quad of order p-2, inset by one lattice step.
+    if (p < 2) return;
+    const RefPt ai = { a[0] + (b[0] - a[0] + d[0] - a[0]) * inv,
+                       a[1] + (b[1] - a[1] + d[1] - a[1]) * inv };
+    const RefPt bi = { b[0] + (a[0] - b[0] + c[0] - b[0]) * inv,
+                       b[1] + (a[1] - b[1] + c[1] - b[1]) * inv };
+    const RefPt ci = { c[0] + (d[0] - c[0] + b[0] - c[0]) * inv,
+                       c[1] + (d[1] - c[1] + b[1] - c[1]) * inv };
+    const RefPt di = { d[0] + (c[0] - d[0] + a[0] - d[0]) * inv,
+                       d[1] + (c[1] - d[1] + a[1] - d[1]) * inv };
+    AppendQuadNodes(p - 2, ai, bi, ci, di, out);
+}
+
+inline const char* GeometryName(mfem::Geometry::Type geom) {
     switch (geom) {
-        case G::SEGMENT:     return 1;
-        case G::TRIANGLE:    return 2;
-        case G::SQUARE:      return 3;
-        case G::TETRAHEDRON: return 4;
-        case G::CUBE:        return 5;
-        case G::PRISM:       return 6;
+        case mfem::Geometry::SEGMENT:     return "segment";
+        case mfem::Geometry::TRIANGLE:    return "triangle";
+        case mfem::Geometry::SQUARE:      return "quadrilateral";
+        case mfem::Geometry::TETRAHEDRON: return "tetrahedron";
+        case mfem::Geometry::CUBE:        return "hexahedron";
+        case mfem::Geometry::PRISM:       return "prism";
+        default:                          return "unknown";
+    }
+}
+
+// Layout for one (geometry, order) pair. Built once and cached: the recursion
+// is cheap but this is called per element.
+inline const HoLayout& GetHoLayout(mfem::Geometry::Type geom, int order) {
+    static std::map<std::pair<int, int>, HoLayout> cache;
+    const auto key = std::make_pair(static_cast<int>(geom), order);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+
+    if (order < 1 || order > 10) {
+        throw std::runtime_error(
+            "gmsh_results: unsupported export order " + std::to_string(order)
+            + " for a " + GeometryName(geom)
+            + "; Gmsh Lagrange elements are supported for orders 1-10");
+    }
+
+    HoLayout layout;
+    switch (geom) {
+        case mfem::Geometry::TRIANGLE:
+            layout.gmsh_type = TriangleGmshType(order);
+            AppendTriangleNodes(order, { 0.0, 0.0 }, { 1.0, 0.0 }, { 0.0, 1.0 },
+                                layout.ref);
+            break;
+        case mfem::Geometry::SQUARE:
+            layout.gmsh_type = QuadGmshType(order);
+            AppendQuadNodes(order, { 0.0, 0.0 }, { 1.0, 0.0 }, { 1.0, 1.0 },
+                            { 0.0, 1.0 }, layout.ref);
+            break;
         default:
             throw std::runtime_error(
-                "gmsh_results: unsupported element geometry for MSH 2.2 export");
+                std::string("gmsh_results: unsupported element geometry '")
+                + GeometryName(geom)
+                + "' for MSH export; only triangles and quadrilaterals are "
+                  "handled (the export path assumes a 2D mesh)");
     }
+    return cache.emplace(key, std::move(layout)).first->second;
 }
 
 // Hot-path numeric formatting helpers.
@@ -89,12 +237,127 @@ inline void AppendDouble(std::string& s, double v) {
     s.append(buf, r.ptr);
 }
 
-inline void WriteMeshBlock(std::ostream& out, mfem::Mesh& mesh) {
-    out << "$MeshFormat\n2.2 0 8\n$EndMeshFormat\n";
+// Per-element map from Gmsh node slot -> MFEM local DOF index.
+//
+// Derived by matching reference coordinates rather than by hardcoding MFEM's
+// nodal ordering, so it stays correct if that ordering ever changes. All
+// elements of the same geometry and order share one permutation.
+inline std::vector<int> BuildDofPermutation(const mfem::FiniteElement& fe,
+                                            const HoLayout& layout) {
+    const mfem::IntegrationRule& ir = fe.GetNodes();
+    const int n = ir.GetNPoints();
+    if (n != static_cast<int>(layout.ref.size())) {
+        throw std::runtime_error(
+            "gmsh_results: node count mismatch between MFEM element ("
+            + std::to_string(n) + ") and Gmsh layout ("
+            + std::to_string(layout.ref.size()) + ")");
+    }
 
-    const int nv   = mesh.GetNV();
-    const int ne   = mesh.GetNE();
-    const int sdim = mesh.SpaceDimension();
+    std::vector<int> perm(n, -1);
+    for (int k = 0; k < n; ++k) {
+        for (int j = 0; j < n; ++j) {
+            const mfem::IntegrationPoint& ip = ir.IntPoint(j);
+            if (std::fabs(ip.x - layout.ref[k][0]) < 1e-10 &&
+                std::fabs(ip.y - layout.ref[k][1]) < 1e-10) {
+                perm[k] = j;
+                break;
+            }
+        }
+        if (perm[k] < 0) {
+            throw std::runtime_error(
+                "gmsh_results: no MFEM node matches Gmsh node slot "
+                + std::to_string(k)
+                + "; the export space must use equispaced (ClosedUniform) nodes");
+        }
+    }
+    return perm;
+}
+
+// Node numbering and geometry for the exported high-order mesh.
+//
+// Node ids are the DOF indices of an equispaced H1 space, which are shared
+// across element boundaries, so the emitted mesh is continuous. Each node also
+// records one (element, reference point) pair so field values can be sampled
+// there later without recomputing the layout.
+struct ExportNodes {
+    int order = 1;
+    std::vector<std::array<double, 3>> coord;  // indexed by node id
+    std::vector<int>   node_elem;              // representative element
+    std::vector<RefPt> node_ref;               // reference point in that element
+    std::vector<int>   elem_type;              // Gmsh type code, per element
+    std::vector<std::vector<int>> elem_nodes;  // Gmsh-ordered node ids, per element
+};
+
+inline ExportNodes BuildExportNodes(mfem::Mesh& mesh,
+                                    mfem::FiniteElementSpace& fes,
+                                    int order) {
+    ExportNodes nodes;
+    nodes.order = order;
+
+    const int nd = fes.GetNDofs();
+    const int ne = mesh.GetNE();
+    nodes.coord.assign(nd, { 0.0, 0.0, 0.0 });
+    nodes.node_elem.assign(nd, -1);
+    nodes.node_ref.assign(nd, RefPt{ 0.0, 0.0 });
+    nodes.elem_type.assign(ne, 0);
+    nodes.elem_nodes.assign(ne, {});
+
+    std::map<int, std::vector<int>> perm_cache;  // keyed by geometry
+    mfem::Array<int> dofs;
+    mfem::Vector phys;
+
+    for (int e = 0; e < ne; ++e) {
+        const auto geom = mesh.GetElementBaseGeometry(e);
+        const HoLayout& layout = GetHoLayout(geom, order);
+        nodes.elem_type[e] = layout.gmsh_type;
+
+        auto pit = perm_cache.find(static_cast<int>(geom));
+        if (pit == perm_cache.end()) {
+            pit = perm_cache.emplace(
+                static_cast<int>(geom),
+                BuildDofPermutation(*fes.GetFE(e), layout)).first;
+        }
+        const std::vector<int>& perm = pit->second;
+
+        fes.GetElementDofs(e, dofs);
+        mfem::ElementTransformation* T = mesh.GetElementTransformation(e);
+
+        const int n = static_cast<int>(layout.ref.size());
+        nodes.elem_nodes[e].resize(n);
+        for (int k = 0; k < n; ++k) {
+            const int dof = dofs[perm[k]];
+            nodes.elem_nodes[e][k] = dof;
+
+            mfem::IntegrationPoint ip;
+            ip.Set2(layout.ref[k][0], layout.ref[k][1]);
+
+            // Transform() gives the true geometric position for curved
+            // elements (mesh.GetNodes() populated) and reduces to the expected
+            // edge midpoints/lattice for straight-sided ones, so no separate
+            // curved-vs-straight handling is needed.
+            T->SetIntPoint(&ip);
+            T->Transform(ip, phys);
+
+            nodes.coord[dof] = { phys(0),
+                                 phys.Size() > 1 ? phys(1) : 0.0,
+                                 phys.Size() > 2 ? phys(2) : 0.0 };
+            nodes.node_elem[dof] = e;
+            nodes.node_ref[dof] = layout.ref[k];
+        }
+    }
+    return nodes;
+}
+
+inline void WriteMeshFormat(std::ostream& out) {
+    out << "$MeshFormat\n2.2 0 8\n$EndMeshFormat\n";
+}
+
+inline void WriteMeshBlock(std::ostream& out, mfem::Mesh& mesh,
+                           const ExportNodes& nodes) {
+    WriteMeshFormat(out);
+
+    const int nv = static_cast<int>(nodes.coord.size());
+    const int ne = mesh.GetNE();
 
     // Stage each section into a single std::string and flush with one
     // out.write(). Avoids per-token ostream overhead and lets the OS see
@@ -106,14 +369,10 @@ inline void WriteMeshBlock(std::ostream& out, mfem::Mesh& mesh) {
     AppendInt(blk, nv);
     blk.push_back('\n');
     for (int i = 0; i < nv; ++i) {
-        const double* v = mesh.GetVertex(i);
-        const double x = v[0];
-        const double y = (sdim > 1) ? v[1] : 0.0;
-        const double z = (sdim > 2) ? v[2] : 0.0;
         AppendInt(blk, i + 1);
-        blk.push_back(' '); AppendDouble(blk, x);
-        blk.push_back(' '); AppendDouble(blk, y);
-        blk.push_back(' '); AppendDouble(blk, z);
+        blk.push_back(' '); AppendDouble(blk, nodes.coord[i][0]);
+        blk.push_back(' '); AppendDouble(blk, nodes.coord[i][1]);
+        blk.push_back(' '); AppendDouble(blk, nodes.coord[i][2]);
         blk.push_back('\n');
     }
     blk.append("$EndNodes\n");
@@ -124,22 +383,22 @@ inline void WriteMeshBlock(std::ostream& out, mfem::Mesh& mesh) {
     blk.append("$Elements\n");
     AppendInt(blk, ne);
     blk.push_back('\n');
-    mfem::Array<int> verts;
     for (int e = 0; e < ne; ++e) {
-        const auto geom = mesh.GetElementBaseGeometry(e);
-        const int  type = GmshElementType(geom);
-        const int  attr = mesh.GetAttribute(e);
-        mesh.GetElementVertices(e, verts);
-
+        const int attr = mesh.GetAttribute(e);
         AppendInt(blk, e + 1);
-        blk.push_back(' '); AppendInt(blk, type);
+        blk.push_back(' '); AppendInt(blk, nodes.elem_type[e]);
         blk.append(" 2 "); AppendInt(blk, attr);
         blk.push_back(' '); AppendInt(blk, attr);
-        for (int k = 0; k < verts.Size(); ++k) {
+        for (int id : nodes.elem_nodes[e]) {
             blk.push_back(' ');
-            AppendInt(blk, verts[k] + 1);
+            AppendInt(blk, id + 1);
         }
         blk.push_back('\n');
+
+        if (blk.size() > (1u << 20)) {
+            out.write(blk.data(), static_cast<std::streamsize>(blk.size()));
+            blk.clear();
+        }
     }
     blk.append("$EndElements\n");
     out.write(blk.data(), static_cast<std::streamsize>(blk.size()));
@@ -161,21 +420,36 @@ inline void WriteViewHeader(std::ostream& out,
     out.write(s.data(), static_cast<std::streamsize>(s.size()));
 }
 
-inline void WriteNodeData(std::ostream& out, mfem::Mesh& mesh, const View& v) {
-    const int nv = mesh.GetNV();
+inline void WriteNodeData(std::ostream& out, mfem::Mesh& mesh,
+                          const ExportNodes& nodes, const View& v) {
+    const int nv = static_cast<int>(nodes.coord.size());
     WriteViewHeader(out, "NodeData", v.name, v.num_components, nv);
 
     std::vector<double> buf(v.num_components);
     std::string blk;
     blk.reserve(static_cast<size_t>(nv) * (16 + v.num_components * 18));
     for (int i = 0; i < nv; ++i) {
-        v.node_eval(i, buf.data());
+        // Sample at the node's recorded reference point rather than reading a
+        // DOF directly: the field may live in a different space or basis than
+        // the equispaced one used for node numbering.
+        mfem::IntegrationPoint ip;
+        ip.Set2(nodes.node_ref[i][0], nodes.node_ref[i][1]);
+        mfem::ElementTransformation* T =
+            mesh.GetElementTransformation(nodes.node_elem[i]);
+        T->SetIntPoint(&ip);
+        v.elem_node_eval(nodes.node_elem[i], ip, *T, buf.data());
+
         AppendInt(blk, i + 1);
         for (int c = 0; c < v.num_components; ++c) {
             blk.push_back(' ');
             AppendDouble(blk, buf[c]);
         }
         blk.push_back('\n');
+
+        if (blk.size() > (1u << 20)) {
+            out.write(blk.data(), static_cast<std::streamsize>(blk.size()));
+            blk.clear();
+        }
     }
     blk.append("$EndNodeData\n");
     out.write(blk.data(), static_cast<std::streamsize>(blk.size()));
@@ -183,7 +457,7 @@ inline void WriteNodeData(std::ostream& out, mfem::Mesh& mesh, const View& v) {
 
 inline void WriteElementNodeData(std::ostream& out,
                                  mfem::Mesh& mesh,
-                                 mfem::FiniteElementSpace& sample_fes,
+                                 const ExportNodes& nodes,
                                  const View& v) {
     const int ne = mesh.GetNE();
     WriteViewHeader(out, "ElementNodeData", v.name, v.num_components, ne);
@@ -193,16 +467,20 @@ inline void WriteElementNodeData(std::ostream& out,
     // Rough upper bound; grows on demand if needed.
     blk.reserve(static_cast<size_t>(ne) * (16 + 4 * v.num_components * 18));
     for (int e = 0; e < ne; ++e) {
-        const mfem::FiniteElement* fe = sample_fes.GetFE(e);
-        const mfem::IntegrationRule& ir = fe->GetNodes();
+        // Values must be listed in the same node order as the element's
+        // connectivity in the mesh block, so drive the loop from the Gmsh
+        // layout rather than from an MFEM space's own nodal ordering.
+        const HoLayout& layout =
+            GetHoLayout(mesh.GetElementBaseGeometry(e), nodes.order);
         mfem::ElementTransformation* T = mesh.GetElementTransformation(e);
 
-        const int n_local = ir.GetNPoints();
+        const int n_local = static_cast<int>(layout.ref.size());
         AppendInt(blk, e + 1);
         blk.push_back(' ');
         AppendInt(blk, n_local);
         for (int k = 0; k < n_local; ++k) {
-            const mfem::IntegrationPoint& ip = ir.IntPoint(k);
+            mfem::IntegrationPoint ip;
+            ip.Set2(layout.ref[k][0], layout.ref[k][1]);
             T->SetIntPoint(&ip);
             v.elem_node_eval(e, ip, *T, buf.data());
             for (int c = 0; c < v.num_components; ++c) {
@@ -225,35 +503,42 @@ inline void WriteElementNodeData(std::ostream& out,
 
 } // namespace detail
 
-/// Convenience: NodeData view from a scalar H1 GridFunction whose underlying
-/// FE space lives on @p mesh and uses linear nodal H1 (one DOF per vertex).
+/// Convenience: NodeData view of a continuous scalar GridFunction. The field is
+/// sampled by evaluation, so it may be of any order or basis; it need not match
+/// the equispaced space used to number the export nodes.
 inline View MakeScalarNodeView(const std::string& name,
                                mfem::GridFunction& gf) {
     View v;
     v.name = name;
     v.kind = View::Kind::NodeData;
     v.num_components = 1;
-    v.node_eval = [&gf](int node_id, double* out) {
-        // For an order-1 H1 space the i-th vertex DOF equals gf[i].
-        out[0] = gf(node_id);
+    v.elem_node_eval = [&gf](int /*elem_id*/,
+                             const mfem::IntegrationPoint& ip,
+                             mfem::ElementTransformation& T,
+                             double* out) {
+        out[0] = gf.GetValue(T, ip);
     };
     return v;
 }
 
-/// Convenience: ElementNodeData view of a vector GridFunction (typically L2,
-/// vdim = SpaceDimension). Output is always padded to 3 components.
-inline View MakeVectorElementNodeView(const std::string& name,
-                                      mfem::GridFunction& vec_gf) {
+/// Convenience: ElementNodeData view of a vector Coefficient. Output is always
+/// padded to 3 components.
+///
+/// Derived fields are sampled straight from the coefficient at each export
+/// node, so there is no intermediate projection onto an L2 space and no
+/// projection error; the emitted values are the coefficient's own.
+inline View MakeVectorCoefficientView(const std::string& name,
+                                      mfem::VectorCoefficient& vec_coeff) {
     View v;
     v.name = name;
     v.kind = View::Kind::ElementNodeData;
     v.num_components = 3;
-    v.elem_node_eval = [&vec_gf](int elem_id,
-                                 const mfem::IntegrationPoint& ip,
-                                 mfem::ElementTransformation& T,
-                                 double* out) {
-        mfem::Vector val;
-        vec_gf.GetVectorValue(T, ip, val);
+    v.elem_node_eval = [&vec_coeff](int /*elem_id*/,
+                                    const mfem::IntegrationPoint& ip,
+                                    mfem::ElementTransformation& T,
+                                    double* out) {
+        mfem::Vector val(vec_coeff.GetVDim());
+        vec_coeff.Eval(val, T, ip);
         out[0] = val.Size() > 0 ? val(0) : 0.0;
         out[1] = val.Size() > 1 ? val(1) : 0.0;
         out[2] = val.Size() > 2 ? val(2) : 0.0;
@@ -261,55 +546,34 @@ inline View MakeVectorElementNodeView(const std::string& name,
     return v;
 }
 
-/// Convenience: ElementNodeData scalar view sampling a scalar GridFunction.
-/// Used for derived scalar coefficients projected onto the export mesh.
-inline View MakeScalarElementNodeView(const std::string& name,
-                                      mfem::GridFunction& scalar_gf) {
+/// Convenience: ElementNodeData scalar view sampling a scalar Coefficient.
+inline View MakeScalarCoefficientView(const std::string& name,
+                                      mfem::Coefficient& coeff) {
     View v;
     v.name = name;
     v.kind = View::Kind::ElementNodeData;
     v.num_components = 1;
-    v.elem_node_eval = [&scalar_gf](int elem_id,
-                                    const mfem::IntegrationPoint& ip,
-                                    mfem::ElementTransformation& T,
-                                    double* out) {
-        out[0] = scalar_gf.GetValue(T, ip);
+    v.elem_node_eval = [&coeff](int /*elem_id*/,
+                                const mfem::IntegrationPoint& ip,
+                                mfem::ElementTransformation& T,
+                                double* out) {
+        out[0] = coeff.Eval(T, ip);
     };
     return v;
 }
 
-/// Convenience: ElementNodeData scalar view containing |vec_gf|.
-inline View MakeMagnitudeElementNodeView(const std::string& name,
-                                         mfem::GridFunction& vec_gf) {
-    View v;
-    v.name = name;
-    v.kind = View::Kind::ElementNodeData;
-    v.num_components = 1;
-    v.elem_node_eval = [&vec_gf](int elem_id,
-                                 const mfem::IntegrationPoint& ip,
-                                 mfem::ElementTransformation& T,
-                                 double* out) {
-        mfem::Vector val;
-        vec_gf.GetVectorValue(T, ip, val);
-        double s = 0.0;
-        for (int i = 0; i < val.Size(); ++i) s += val(i) * val(i);
-        out[0] = std::sqrt(s);
-    };
-    return v;
-}
-
-/// Writes the mesh and all views to @p path in MSH 2.2 ASCII.
+/// Writes the mesh and all views to @p path in MSH 2.2 ASCII, using native
+/// Gmsh Lagrange elements of order @p order.
 ///
-/// @param path          Destination file (will be overwritten).
-/// @param mesh          Mesh to embed (typically a refined export copy).
-/// @param sample_fes    FE space on @p mesh whose per-element nodal
-///                      IntegrationRule defines the local-node layout used by
-///                      every ElementNodeData view. Pass the L2 vector space
-///                      backing the "E" view.
-/// @param views         Views to emit, in order.
+/// @param path   Destination file (will be overwritten).
+/// @param mesh   Mesh to embed. Exported at its own resolution; no refined
+///               copy is made.
+/// @param order  Lagrange order of the emitted elements and of the node layout
+///               every view is sampled on. Typically the solution order.
+/// @param views  Views to emit, in order.
 inline void WriteGmshResults(const std::string& path,
                              mfem::Mesh& mesh,
-                             mfem::FiniteElementSpace& sample_fes,
+                             int order,
                              const std::vector<View>& views) {
     // std::ofstream / fopen will not create missing parent directories on
     // Windows or POSIX; opening "./foo/bar.msh" silently fails with ENOENT
@@ -350,15 +614,22 @@ inline void WriteGmshResults(const std::string& path,
     // (locale-independent, ~5-10x faster than operator<<). No stream-side
     // setprecision / scientific needed.
 
-    detail::WriteMeshBlock(out, mesh);
+    // Equispaced nodes so the DOF positions coincide with Gmsh's Lagrange
+    // node lattice; the resulting DOF indices double as shared node ids.
+    mfem::H1_FECollection fec(order, mesh.Dimension(),
+                              mfem::BasisType::ClosedUniform);
+    mfem::FiniteElementSpace fes(&mesh, &fec);
+    const detail::ExportNodes nodes = detail::BuildExportNodes(mesh, fes, order);
+
+    detail::WriteMeshBlock(out, mesh, nodes);
 
     for (const auto& v : views) {
         switch (v.kind) {
             case View::Kind::NodeData:
-                detail::WriteNodeData(out, mesh, v);
+                detail::WriteNodeData(out, mesh, nodes, v);
                 break;
             case View::Kind::ElementNodeData:
-                detail::WriteElementNodeData(out, mesh, sample_fes, v);
+                detail::WriteElementNodeData(out, mesh, nodes, v);
                 break;
         }
     }

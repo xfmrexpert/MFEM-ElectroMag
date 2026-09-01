@@ -572,7 +572,6 @@ TEST_CASE("ConfigValidator checks entity group references and kinds", "[config_v
 TEST_CASE("ConfigValidator rejects invalid ranges and enum values", "[config_validator]") {
 	json config = ValidConfig();
 	config["simulation"]["order"] = 0;
-	config["simulation"]["export_refine"] = 0;
 	config["simulation"]["amr"] = {
 		{"max_iterations", -1},
 		{"error_fraction", 1.5},
@@ -585,7 +584,6 @@ TEST_CASE("ConfigValidator rejects invalid ranges and enum values", "[config_val
 	ConfigValidator validator;
 	REQUIRE_FALSE(validator.Validate(config));
 	REQUIRE(HasError(validator, "simulation.order"));
-	REQUIRE(HasError(validator, "simulation.export_refine"));
 	REQUIRE(HasError(validator, "simulation.amr.max_iterations"));
 	REQUIRE(HasError(validator, "simulation.amr.error_fraction"));
 	REQUIRE(HasError(validator, "simulation.amr.error_tolerance"));

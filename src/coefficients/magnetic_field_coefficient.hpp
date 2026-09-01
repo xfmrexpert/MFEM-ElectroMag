@@ -5,7 +5,6 @@
 
 #include "mfem.hpp"
 #include "../axisym/axisymmetric_field_relations.hpp"
-#include "refined_mesh_eval.hpp"
 
 /**
  * @brief Computes B = Curl(A) in 2D Axisymmetry
@@ -35,18 +34,11 @@ public:
       T.Transform(ip, pos);
       const double r = pos(0);
 
-      // Results export samples on a refined copy of the solution mesh; A must
-      // be read through its own (coarse) element. Physical position above is
-      // taken from T so it stays exact on the refined mesh.
-      mfem::IntegrationPoint A_ip;
-      mfem::ElementTransformation& A_T =
-         refined_eval::Resolve(*A, T, ip, A_ip);
-
       // Get Value (A) and Gradient (dA/dr, dA/dz)
-      const double A_val = A->GetValue(A_T, A_ip);
+      const double A_val = A->GetValue(T, ip);
 
       mfem::Vector grad_A(2);
-      A->GetGradient(A_T, grad_A);
+      A->GetGradient(T, grad_A);
 
       B.SetSize(2);
       B(0) = -grad_A(1);
@@ -68,12 +60,8 @@ public:
    {
       T.SetIntPoint(&ip);
 
-      mfem::IntegrationPoint A_ip;
-      mfem::ElementTransformation& A_T =
-         refined_eval::Resolve(*A, T, ip, A_ip);
-
       mfem::Vector grad_A(2);
-      A->GetGradient(A_T, grad_A);
+      A->GetGradient(T, grad_A);
 
       B.SetSize(2);
       B(0) = grad_A(1);

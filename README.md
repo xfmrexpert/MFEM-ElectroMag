@@ -139,6 +139,21 @@ After building, the executable `mfem-electromag` will be in the `build` director
 OMP_NUM_THREADS=4 ./mfem-electromag config.json
 ```
 
+### Command-Line Options
+
+| Option | Description |
+| --- | --- |
+| `<config.json>` | Path to the configuration file (default: `config.json`) |
+| `--results-path <directory>` | Override `simulation.results_path`. A relative path resolves against the current working directory, not the config file directory. |
+| `--verbosity <0\|1\|2>` | `0` = status/timing only, `1` = solver output, `2` = diagnostics |
+| `--machine-readable` | Emit flushed JSON Lines progress on stdout. Implies `--verbosity 1` unless `--verbosity` is given explicitly. |
+| `--version` | Print version/build information and exit |
+| `-h`, `--help` | Show help and exit |
+
+All other settings are configured in the JSON input file rather than on the
+command line. Gmsh results are written as native high-order Lagrange elements
+matching `simulation.order`, so no export refinement knob is needed.
+
 ### Running Tests
 
 ```bash
