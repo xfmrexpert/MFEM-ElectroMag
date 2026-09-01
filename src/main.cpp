@@ -4,7 +4,9 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include "mfem.hpp"
 #include "build_info.hpp"
 #include "config/input_parser.hpp"
 #include "solvers/physics_solver.hpp"
@@ -115,7 +117,7 @@ int main(int argc, char *argv[]) {
         // reporter so --machine-readable still emits well-formed JSON Lines.
         reporter.Status(build_info::Describe());
 
-        // 1. Shared Infrastructure
+        // Shared Infrastructure
         std::error_code config_ec;
         auto config_abs = std::filesystem::weakly_canonical(config_file, config_ec);
         reporter.Diagnostic("Config file: "
@@ -143,7 +145,7 @@ int main(int argc, char *argv[]) {
             mutable_json["simulation"]["export_refine"] = cli_export_refine;
         }
 
-        // 2. Validate Configuration (schema and basic semantics before decoding)
+        // Validate Configuration (schema and basic semantics before decoding)
         ConfigValidator validator;
         {
             auto operation = reporter.Start("configuration validation");
@@ -152,12 +154,21 @@ int main(int argc, char *argv[]) {
 
         ProblemConfig config = parser.GetProblemConfig();
 
-        // 3. Load Mesh
+        // Load Mesh
         std::error_code mesh_ec;
         auto mesh_abs = std::filesystem::weakly_canonical(config.MeshPath, mesh_ec);
         reporter.Diagnostic("Mesh file: "
             + (mesh_ec ? std::filesystem::absolute(config.MeshPath).string()
                        : mesh_abs.string()));
+
+        // MFEM reports a missing/unreadable file through the same error path
+        // as a malformed one, so check it up front to keep the two failures
+        // distinguishable for the user.
+        std::error_code exists_ec;
+        if (!std::filesystem::is_regular_file(config.MeshPath, exists_ec)) {
+            throw std::runtime_error(
+                "Mesh file not found or not readable: '" + config.MeshPath + "'");
+        }
 
         // Load without auto-fix so we can diagnose bad meshes uniformly in
         // Debug and Release (MFEM_ASSERT is a no-op in Release, which would
@@ -167,10 +178,12 @@ int main(int argc, char *argv[]) {
         // Load() -> Finalize() -> CheckBdrElementOrientation(). For meshes
         // with orphan boundary elements (boundary edges whose endpoints are
         // not shared by any 2D element), CheckBdrElementOrientation indexes
-        // faces_info[-1] and triggers MFEM_ASSERT. With MFEM_USE_EXCEPTIONS
-        // that becomes a catchable mfem::ErrorException; without it, it
-        // would std::abort(). We catch it here to produce an actionable
-        // diagnostic instead of crashing.
+        // faces_info[-1] and triggers MFEM_ASSERT. Requires MFEM built with
+        // MFEM_USE_EXCEPTIONS=ON (enforced below) so that becomes a catchable
+        // mfem::ErrorException instead of an std::abort().
+#ifndef MFEM_USE_EXCEPTIONS
+#error "MFEM must be built with MFEM_USE_EXCEPTIONS=ON; see top-level CMakeLists.txt"
+#endif
         std::unique_ptr<mfem::Mesh> mesh_ptr;
         {
             auto operation = reporter.Start("mesh loading");
@@ -179,22 +192,18 @@ int main(int argc, char *argv[]) {
                     config.MeshPath, /*generate_edges=*/1, /*refine=*/0,
                     /*fix_orientation=*/false);
             }
-#ifdef MFEM_USE_EXCEPTIONS
             catch (const mfem::ErrorException& e) {
                 throw std::runtime_error(
-                    "Invalid mesh '" + config.MeshPath + "': MFEM rejected it "
-                    "during load. This usually means orphan boundary elements "
-                    "(boundary edges whose endpoints are not shared by any 2D "
-                    "element) or mis-oriented elements. Regenerate the mesh "
-                    "with counter-clockwise 2D element winding and boundary "
-                    "lines whose nodes lie on element edges.\nMFEM detail: "
-                    + std::string(e.what()));
+                    "MFEM could not load mesh '" + config.MeshPath + "'. Check "
+                    "that the file format is supported and that 2D elements use "
+                    "counter-clockwise winding with boundary lines whose nodes "
+                    "lie on element edges.\nMFEM detail: " + std::string(e.what()));
             }
-#endif
-            mfem::Mesh& mesh = *mesh_ptr;
 
-            int bad_el  = mesh.CheckElementOrientation(false);
-            int bad_bdr = mesh.CheckBdrElementOrientation(false);
+            // Orientation is reported (not repaired) so a bad mesh fails loudly
+            // at its source rather than being silently patched every run.
+            const int bad_el  = mesh_ptr->CheckElementOrientation(/*fix_it=*/false);
+            const int bad_bdr = mesh_ptr->CheckBdrElementOrientation(/*fix_it=*/false);
             if (bad_el != 0 || bad_bdr != 0) {
                 throw std::runtime_error(
                     "Invalid mesh '" + config.MeshPath + "': "
@@ -204,26 +213,24 @@ int main(int argc, char *argv[]) {
                     "Regenerate the mesh with counter-clockwise 2D element "
                     "winding and boundary lines whose nodes lie on element edges.");
             }
-
-            mesh.Finalize(/*refine=*/true, /*fix_orientation=*/true);
         }
 
         mfem::Mesh& mesh = *mesh_ptr;
 
-        // 4. Validate Configuration (with mesh for attribute checking)
+        // Validate Configuration (with mesh for attribute checking)
         {
             auto operation = reporter.Start("configuration validation");
             validator.ValidateOrThrow(parser.config, &mesh);
         }
 
-        // 5. Factory Logic - Create Solver
+        // Factory Logic - Create Solver
         std::unique_ptr<PhysicsSolver> solver;
         {
             auto operation = reporter.Start("solver creation");
             solver = SolverFactory::Instance().Create(mesh, config);
         }
 
-        // 6. Execution
+        // Execution
         {
             auto operation = reporter.Start("solver setup");
             solver->Setup();
