@@ -121,6 +121,13 @@ target_compile_definitions(nlohmann_json
 add_executable(mfem-electromag src/main.cpp)
 target_link_libraries(mfem-electromag PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json)
 
+# main.cpp instantiates every solver and writer through heavily templated MFEM
+# and nlohmann/json code, which exceeds the default COFF section limit (65279)
+# and fails with C1128. /bigobj raises it; it has no runtime cost.
+if(MSVC)
+    target_compile_options(mfem-electromag PRIVATE /bigobj)
+endif()
+
 # Project headers are included by bare name ("physics_solver.hpp"), so that
 # neither src/ nor test/ depends on the relative path between them.
 target_include_directories(mfem-electromag PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -187,6 +194,7 @@ if(BUILD_TESTING)
         test/test_axisymmetric_axis.cpp
         test/test_axisymmetric_quadrature.cpp
         test/test_config_validator.cpp
+        test/test_gmsh_interpolation.cpp
         test/test_input_parser.cpp
         test/test_mqs_port_operator.cpp
         test/test_solvers.cpp
@@ -195,6 +203,12 @@ if(BUILD_TESTING)
 
     target_link_libraries(mfem_tests PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json Catch2::Catch2WithMain)
     target_include_directories(mfem_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+    # Same COFF section limit as mfem-electromag: the solver test translation
+    # units instantiate the full solver/writer stack.
+    if(MSVC)
+        target_compile_options(mfem_tests PRIVATE /bigobj)
+    endif()
 
     # Register tests with CTest
     list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)

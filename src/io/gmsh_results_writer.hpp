@@ -11,6 +11,21 @@
 // interpolates the field with the matching high-order shape functions. No
 // refined/tessellated export copy of the mesh is made.
 //
+// An $InterpolationScheme block carries the shape functions themselves (a
+// monomial exponent matrix plus Lagrange coefficients) and every view names it
+// via StringTags[1]. A consumer can therefore evaluate any field at an
+// arbitrary point without hardcoding Gmsh node ordering or Lagrange formulas,
+// and without changes when the solution order changes.
+//
+// FIELD REPRESENTATION POLICY: fields are exported exactly as the FE solution
+// represents them. Continuous primaries (V, A) go out as $NodeData; derived
+// quantities that are genuinely discontinuous across elements (E = -grad V,
+// B = curl A, and anything built from them) go out as $ElementNodeData with
+// per-element values. Inter-element jumps are real results of the
+// discretization and are passed through unsmoothed; how to treat them (average,
+// recover, or respect) is the consumer's decision, since it depends on the
+// post-processing being done.
+//
 // FORMAT SEAM: everything version-specific to MSH 2.2 is confined to
 // WriteMeshFormat, WriteMeshBlock, and WriteViewHeader. The node layout
 // (HoLayout/GetHoLayout), the MFEM->Gmsh permutation, and all field sampling
@@ -21,6 +36,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
@@ -273,6 +289,113 @@ inline std::vector<int> BuildDofPermutation(const mfem::FiniteElement& fe,
     return perm;
 }
 
+// Monomial exponents and Lagrange coefficients defining an element's shape
+// functions, in the form Gmsh's $InterpolationScheme block expects.
+//
+// Gmsh's model is: given exponent matrix E (n_terms x n_vars) and coefficient
+// matrix C (n_nodes x n_terms), shape function i is
+//
+//     phi_i(u, v) = sum_j C[i][j] * u^E[j][0] * v^E[j][1]
+//
+// and a field is reconstructed as sum_i phi_i(u, v) * value_i, where value_i
+// are the nodal values listed for that element (in the same node order as the
+// mesh block's connectivity).
+//
+// Shipping this in the file is what makes the consumer independent of Gmsh's
+// node ordering AND of the element order: a reader evaluates the monomials and
+// does a matrix-vector product without knowing anything about Lagrange bases.
+// This matters most for DISCONTINUOUS ($ElementNodeData) fields such as E and
+// B, where nodal values alone cannot be interpolated -- the consumer must
+// evaluate the element-local basis to get a value anywhere but a node.
+struct InterpScheme {
+    std::vector<std::array<int, 2>>  exponents;  // per monomial term
+    std::vector<std::vector<double>> coeffs;     // [node][term]
+};
+
+// Monomial exponents spanning the polynomial space of an order-p element.
+// Triangles use the total-degree space (u^a v^b, a + b <= p); quads use the
+// tensor-product space (a <= p, b <= p). These match the node lattices built
+// by AppendTriangleNodes / AppendQuadNodes, so the Vandermonde system below
+// is square and non-singular.
+inline std::vector<std::array<int, 2>> MonomialExponents(
+    mfem::Geometry::Type geom, int order) {
+    std::vector<std::array<int, 2>> e;
+    if (geom == mfem::Geometry::TRIANGLE) {
+        for (int d = 0; d <= order; ++d) {
+            for (int i = 0; i <= d; ++i) { e.push_back({ d - i, i }); }
+        }
+    } else {  // SQUARE
+        for (int a = 0; a <= order; ++a) {
+            for (int b = 0; b <= order; ++b) { e.push_back({ a, b }); }
+        }
+    }
+    return e;
+}
+
+// Build the Lagrange coefficient matrix by inverting the Vandermonde system.
+//
+// Requiring phi_i(node_k) = delta_ik gives V * C^T = I, where
+// V[k][j] = monomial_j(node_k). So C^T = V^-1, i.e. C = (V^-1)^T. Solved with
+// Gauss-Jordan and partial pivoting; the equispaced lattices used here are
+// well enough conditioned at the supported orders (<= 10).
+inline InterpScheme BuildInterpScheme(mfem::Geometry::Type geom, int order) {
+    InterpScheme scheme;
+    scheme.exponents = MonomialExponents(geom, order);
+    const HoLayout& layout = GetHoLayout(geom, order);
+
+    const int n = static_cast<int>(layout.ref.size());
+    const int m = static_cast<int>(scheme.exponents.size());
+    if (n != m) {
+        throw std::runtime_error(
+            "gmsh_results: interpolation basis size (" + std::to_string(m)
+            + ") does not match node count (" + std::to_string(n)
+            + ") for a " + GeometryName(geom) + " of order "
+            + std::to_string(order));
+    }
+
+    // Augmented [V | I]; Gauss-Jordan leaves V^-1 in the right half.
+    std::vector<std::vector<double>> a(n, std::vector<double>(2 * n, 0.0));
+    for (int k = 0; k < n; ++k) {
+        const double u = layout.ref[k][0];
+        const double v = layout.ref[k][1];
+        for (int j = 0; j < n; ++j) {
+            a[k][j] = std::pow(u, scheme.exponents[j][0]) *
+                      std::pow(v, scheme.exponents[j][1]);
+        }
+        a[k][n + k] = 1.0;
+    }
+
+    for (int col = 0; col < n; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < n; ++r) {
+            if (std::fabs(a[r][col]) > std::fabs(a[piv][col])) { piv = r; }
+        }
+        if (std::fabs(a[piv][col]) < 1e-12) {
+            throw std::runtime_error(
+                "gmsh_results: singular Vandermonde matrix building the "
+                "interpolation scheme for a " + std::string(GeometryName(geom))
+                + " of order " + std::to_string(order));
+        }
+        std::swap(a[col], a[piv]);
+
+        const double inv_p = 1.0 / a[col][col];
+        for (int j = 0; j < 2 * n; ++j) { a[col][j] *= inv_p; }
+        for (int r = 0; r < n; ++r) {
+            if (r == col) { continue; }
+            const double f = a[r][col];
+            if (f == 0.0) { continue; }
+            for (int j = 0; j < 2 * n; ++j) { a[r][j] -= f * a[col][j]; }
+        }
+    }
+
+    // C = (V^-1)^T: row i holds the monomial coefficients of phi_i.
+    scheme.coeffs.assign(n, std::vector<double>(n, 0.0));
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) { scheme.coeffs[i][j] = a[j][n + i]; }
+    }
+    return scheme;
+}
+
 // Node numbering and geometry for the exported high-order mesh.
 //
 // Node ids are the DOF indices of an equispaced H1 space, which are shared
@@ -404,15 +527,79 @@ inline void WriteMeshBlock(std::ostream& out, mfem::Mesh& mesh,
     out.write(blk.data(), static_cast<std::streamsize>(blk.size()));
 }
 
+// Emit one $InterpolationScheme block describing the shape functions for every
+// element type present in the mesh.
+//
+// Gmsh associates the scheme with views by name; WriteViewHeader writes the
+// same name as the view's StringTags[1], which is how a reader (and Gmsh
+// itself) links a view's nodal values to the basis that interpolates them.
+//
+// Each element topology gets two matrices per Gmsh's format: the coefficient
+// matrix then the exponent matrix.
+inline void WriteInterpolationScheme(std::ostream& out,
+                                     const std::string& scheme_name,
+                                     mfem::Mesh& mesh,
+                                     int order) {
+    // Collect the distinct geometries actually used, preserving a stable order.
+    std::vector<mfem::Geometry::Type> geoms;
+    for (int e = 0; e < mesh.GetNE(); ++e) {
+        const auto g = mesh.GetElementBaseGeometry(e);
+        if (std::find(geoms.begin(), geoms.end(), g) == geoms.end()) {
+            geoms.push_back(g);
+        }
+    }
+    if (geoms.empty()) { return; }
+
+    std::string s;
+    s.append("$InterpolationScheme\n");
+    s.append("\"" + scheme_name + "\"\n");
+    AppendInt(s, static_cast<long long>(geoms.size()));
+    s.push_back('\n');
+
+    for (const auto g : geoms) {
+        const HoLayout&    layout = GetHoLayout(g, order);
+        const InterpScheme scheme = BuildInterpScheme(g, order);
+        const int n = static_cast<int>(scheme.coeffs.size());
+        const int m = static_cast<int>(scheme.exponents.size());
+
+        AppendInt(s, layout.gmsh_type);
+        s.append("\n2\n");  // two matrices follow: coefficients, then exponents
+
+        AppendInt(s, n); s.push_back(' '); AppendInt(s, m); s.push_back('\n');
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < m; ++j) {
+                if (j) { s.push_back(' '); }
+                AppendDouble(s, scheme.coeffs[i][j]);
+            }
+            s.push_back('\n');
+        }
+
+        AppendInt(s, m); s.append(" 2\n");
+        for (int j = 0; j < m; ++j) {
+            AppendInt(s, scheme.exponents[j][0]);
+            s.push_back(' ');
+            AppendInt(s, scheme.exponents[j][1]);
+            s.push_back('\n');
+        }
+    }
+
+    s.append("$EndInterpolationScheme\n");
+    out.write(s.data(), static_cast<std::streamsize>(s.size()));
+}
+
 inline void WriteViewHeader(std::ostream& out,
                             const char*   tag,
                             const std::string& name,
+                            const std::string& scheme_name,
                             int num_components,
                             int num_entities) {
     std::string s;
-    s.reserve(64 + name.size());
+    s.reserve(96 + name.size() + scheme_name.size());
     s.push_back('$'); s.append(tag); s.push_back('\n');
-    s.append("1\n\""); s.append(name); s.append("\"\n");
+    // StringTags: [0] view name, [1] interpolation scheme name. The second tag
+    // is what binds this view to the $InterpolationScheme block above.
+    s.append("2\n\""); s.append(name); s.append("\"\n");
+    s.append("\""); s.append(scheme_name); s.append("\"\n");
     s.append("1\n0.0\n");
     s.append("3\n0\n");
     AppendInt(s, num_components); s.push_back('\n');
@@ -421,9 +608,10 @@ inline void WriteViewHeader(std::ostream& out,
 }
 
 inline void WriteNodeData(std::ostream& out, mfem::Mesh& mesh,
-                          const ExportNodes& nodes, const View& v) {
+                          const ExportNodes& nodes, const View& v,
+                          const std::string& scheme_name) {
     const int nv = static_cast<int>(nodes.coord.size());
-    WriteViewHeader(out, "NodeData", v.name, v.num_components, nv);
+    WriteViewHeader(out, "NodeData", v.name, scheme_name, v.num_components, nv);
 
     std::vector<double> buf(v.num_components);
     std::string blk;
@@ -458,9 +646,11 @@ inline void WriteNodeData(std::ostream& out, mfem::Mesh& mesh,
 inline void WriteElementNodeData(std::ostream& out,
                                  mfem::Mesh& mesh,
                                  const ExportNodes& nodes,
-                                 const View& v) {
+                                 const View& v,
+                                 const std::string& scheme_name) {
     const int ne = mesh.GetNE();
-    WriteViewHeader(out, "ElementNodeData", v.name, v.num_components, ne);
+    WriteViewHeader(out, "ElementNodeData", v.name, scheme_name,
+                    v.num_components, ne);
 
     std::vector<double> buf(v.num_components);
     std::string blk;
@@ -623,13 +813,18 @@ inline void WriteGmshResults(const std::string& path,
 
     detail::WriteMeshBlock(out, mesh, nodes);
 
+    // One scheme shared by every view: all views are sampled on the same node
+    // layout at the same order, so they interpolate with the same basis.
+    const std::string scheme_name = "MFEM_Lagrange_P" + std::to_string(order);
+    detail::WriteInterpolationScheme(out, scheme_name, mesh, order);
+
     for (const auto& v : views) {
         switch (v.kind) {
             case View::Kind::NodeData:
-                detail::WriteNodeData(out, mesh, nodes, v);
+                detail::WriteNodeData(out, mesh, nodes, v, scheme_name);
                 break;
             case View::Kind::ElementNodeData:
-                detail::WriteElementNodeData(out, mesh, nodes, v);
+                detail::WriteElementNodeData(out, mesh, nodes, v, scheme_name);
                 break;
         }
     }
