@@ -1,16 +1,16 @@
 {
   "simulation": {
-    "physics_type": "electrostatics",
-    "mesh": "C:/Users/tcraymond/source/repos/electrostat/electrostat_UI/bin/Debug/net10.0/Window_Cut__no_adjacent_phase_/geom.msh",
+    "physics_type": "magnetoquasistatics",
+    "mesh": "../examples/eddy_current/eddy_current.mesh",
     "order": 2,
     "geometry_type": "axisymmetric",
-    "solver_tolerance": 1e-12,
-    "solver_max_iter": 2000,
-    "solver_print_level": 1,
+    "solver_tolerance": 1E-10,
+    "solver_max_iter": 3000,
+    "solver_print_level": 0,
     "output_gmsh": true,
     "amr": {
       "enabled": true,
-      "max_iterations": 5,
+      "max_iterations": 3,
       "max_dofs": 2000000,
       "error_fraction": 0.7,
       "error_tolerance": 0,
@@ -18,356 +18,110 @@
     }
   },
   "entity_groups": [
-  {
-    "name": "Oil",
-    "dim": 2,
-    "attribute_ids": [1]
-  },
-  {
-    "name": "Core",
-    "dim": 1,
-    "attribute_ids": [2]
-  },
-  {
-    "name": "TopYoke",
-    "dim": 1,
-    "attribute_ids": [3]
-  },
-  {
-    "name": "Tank",
-    "dim": 1,
-    "attribute_ids": [4]
-  },
-  {
-    "name": "PB_inner",
-    "dim": 2,
-    "attribute_ids": [9]
-  },
-  {
-    "name": "PB_between_RV_LV",
-    "dim": 2,
-    "attribute_ids": [10]
-  },
-  {
-    "name": "PB_between_LV_HV_1",
-    "dim": 2,
-    "attribute_ids": [11]
-  },
-  {
-    "name": "PB_between_LV_HV_2",
-    "dim": 2,
-    "attribute_ids": [12]
-  },
-  {
-    "name": "PB_between_LV_HV_3",
-    "dim": 2,
-    "attribute_ids": [13]
-  },
-  {
-    "name": "PB_outer",
-    "dim": 2,
-    "attribute_ids": [14]
-  },
-  {
-    "name": "PB_RV_taper_ring",
-    "dim": 2,
-    "attribute_ids": [15]
-  },
-  {
-    "name": "PB_HV_washer_top",
-    "dim": 2,
-    "attribute_ids": [16]
-  },
-  {
-    "name": "PB_press_ring",
-    "dim": 2,
-    "attribute_ids": [17]
-  },
-  {
-    "name": "PB_HV_SR_spacer",
-    "dim": 2,
-    "attribute_ids": [18]
-  },
-  {
-    "name": "AR_HV_lower",
-    "dim": 2,
-    "attribute_ids": [19]
-  },
-  {
-    "name": "AR_HV_upper",
-    "dim": 2,
-    "attribute_ids": [20]
-  },
-  {
-    "name": "AR_HV_corner",
-    "dim": 2,
-    "attribute_ids": [21]
-  },
-  {
-    "name": "AR_LV_corner",
-    "dim": 2,
-    "attribute_ids": [22]
-  },
-  {
-    "name": "SR_TOP_HV_inner_Paper",
-    "dim": 2,
-    "attribute_ids": [24]
-  },
-  {
-    "name": "SR_TOP_HV_outer_Paper",
-    "dim": 2,
-    "attribute_ids": [26]
-  },
-  {
-    "name": "HV",
-    "dim": 1,
-    "attribute_ids": [6]
-  },
-  {
-    "name": "LV",
-    "dim": 1,
-    "attribute_ids": [7]
-  },
-  {
-    "name": "RV",
-    "dim": 1,
-    "attribute_ids": [8]
-  },
-  {
-    "name": "SR_TOP_HV_inner_Metal",
-    "dim": 1,
-    "attribute_ids": [23]
-  },
-  {
-    "name": "SR_TOP_HV_outer_Metal",
-    "dim": 1,
-    "attribute_ids": [25]
-  }
+    {
+      "name": "Air",
+      "dim": 2,
+      "attribute_ids": [
+        1
+      ]
+    },
+    {
+      "name": "AluminumConductor",
+      "dim": 2,
+      "attribute_ids": [
+        2
+      ]
+    },
+    {
+      "name": "Coil",
+      "dim": 2,
+      "attribute_ids": [
+        3
+      ]
+    },
+    {
+      "name": "FarField",
+      "dim": 1,
+      "attribute_ids": [
+        1
+      ]
+    },
+    {
+      "name": "Axis",
+      "dim": 1,
+      "attribute_ids": [
+        2
+      ]
+    }
   ],
   "materials": [
-  {
-    "name": "Oil",
-    "properties": {
-      "epsilon_r": 	2.2
+    {
+      "name": "Air",
+      "properties": {
+        "mu_r": 1.0,
+        "sigma": 0.0
+      }
+    },
+    {
+      "name": "AluminumConductor",
+      "properties": {
+        "mu_r": 1.0,
+        "sigma": 35000000.0
+      }
+    },
+    {
+      "name": "Coil",
+      "properties": {
+        "mu_r": 1.0,
+        "sigma": 0.0
+      }
     }
-  },
-  {
-    "name": "Paper",
-    "properties": {
-      "epsilon_r": 	4.4
-    }
-  },
-  {
-    "name": "Pressboard",
-    "properties": {
-      "epsilon_r": 	4.4
-    }
-  }
   ],
   "regions": [
-  {
-    "name": "Oil",
-    "entity_group": "Oil",
-    "material": "Oil"
-  },
-  {
-    "name": "PB_inner",
-    "entity_group": "PB_inner",
-    "material": "Pressboard"
-  },
-  {
-    "name": "PB_between_RV_LV",
-    "entity_group": "PB_between_RV_LV",
-    "material": "Pressboard"
-  },
-  {
-    "name": "PB_between_LV_HV_1",
-    "entity_group": "PB_between_LV_HV_1",
-    "material": "Pressboard"
-  },
-  {
-    "name": "PB_between_LV_HV_2",
-    "entity_group": "PB_between_LV_HV_2",
-    "material": "Pressboard"
-  },
-  {
-    "name": "PB_between_LV_HV_3",
-    "entity_group": "PB_between_LV_HV_3",
-    "material": "Pressboard"
-  },
-  {
-    "name": "PB_outer",
-    "entity_group": "PB_outer",
-    "material": "Pressboard"
-  },
-  {
-    "name": "PB_RV_taper_ring",
-    "entity_group": "PB_RV_taper_ring",
-    "material": "Pressboard"
-  },
-  {
-    "name": "PB_HV_washer_top",
-    "entity_group": "PB_HV_washer_top",
-    "material": "Pressboard"
-  },
-  {
-    "name": "PB_press_ring",
-    "entity_group": "PB_press_ring",
-    "material": "Pressboard"
-  },
-  {
-    "name": "PB_HV_SR_spacer",
-    "entity_group": "PB_HV_SR_spacer",
-    "material": "Pressboard"
-  },
-  {
-    "name": "AR_HV_lower",
-    "entity_group": "AR_HV_lower",
-    "material": "Pressboard"
-  },
-  {
-    "name": "AR_HV_upper",
-    "entity_group": "AR_HV_upper",
-    "material": "Pressboard"
-  },
-  {
-    "name": "AR_HV_corner",
-    "entity_group": "AR_HV_corner",
-    "material": "Pressboard"
-  },
-  {
-    "name": "AR_LV_corner",
-    "entity_group": "AR_LV_corner",
-    "material": "Pressboard"
-  },
-  {
-    "name": "SR_TOP_HV_inner_Paper",
-    "entity_group": "SR_TOP_HV_inner_Paper",
-    "material": "Paper"
-  },
-  {
-    "name": "SR_TOP_HV_outer_Paper",
-    "entity_group": "SR_TOP_HV_outer_Paper",
-    "material": "Paper"
-  }
-  ],
-  "boundaries": [
-  {
-    "name": "Core",
-    "entity_group": "Core",
-    "type": "Dirichlet",
-    "value": 0
-  },
-  {
-    "name": "TopYoke",
-    "entity_group": "TopYoke",
-    "type": "Dirichlet",
-    "value": 0
-  },
-  {
-    "name": "Tank",
-    "entity_group": "Tank",
-    "type": "Dirichlet",
-    "value": 0
-  }
+    {
+      "entity_group": "Air",
+      "material": "Air"
+    },
+    {
+      "entity_group": "AluminumConductor",
+      "material": "AluminumConductor"
+    },
+    {
+      "entity_group": "Coil",
+      "material": "Coil"
+    }
   ],
   "terminals": [
-  {
-    "name": "HV",
-    "entity_group": "HV"
-  },
-  {
-    "name": "LV",
-    "entity_group": "LV"
-  },
-  {
-    "name": "RV",
-    "entity_group": "RV"
-  },
-  {
-    "name": "SR_TOP_HV_inner_Metal",
-    "entity_group": "SR_TOP_HV_inner_Metal"
-  },
-  {
-    "name": "SR_TOP_HV_outer_Metal",
-    "entity_group": "SR_TOP_HV_outer_Metal"
-  }
+    {
+      "name": "ExcitationCoil",
+      "quantity": "current",
+      "conductor_type": "stranded",
+      "entity_group": "Coil"
+    }
+  ],
+  "boundary_conditions": [
+    {
+      "name": "FarField",
+      "entity_group": "FarField",
+      "type": "dirichlet",
+      "value": 0.0
+    }
   ],
   "scenarios": [
-  {
-    "name": "Switching Impulse",
-    "excitations": [
     {
-      "terminal": "HV",
-      "value": 255555.55555555556
-    },
-    {
-      "terminal": "LV",
-      "value": 0
-    },
-    {
-      "terminal": "RV",
-      "value": 0
-    },
-    {
-      "terminal": "SR_TOP_HV_inner_Metal",
-      "value": 255555.55555555556
-    },
-    {
-      "terminal": "SR_TOP_HV_outer_Metal",
-      "value": 255555.55555555556
+      "name": "FrequencySweep",
+      "frequency": {
+        "scale": "log",
+        "start": 10.0,
+        "stop": 1000.0,
+        "points": 3
+      },
+      "excitations": [
+        {
+          "terminal": "ExcitationCoil",
+          "value": 240.0
+        }
+      ]
     }
-    ]
-  },
-  {
-    "name": "HV impulse",
-    "excitations": [
-    {
-      "terminal": "HV",
-      "value": 239130.4347826087
-    },
-    {
-      "terminal": "LV",
-      "value": 0
-    },
-    {
-      "terminal": "RV",
-      "value": 0
-    },
-    {
-      "terminal": "SR_TOP_HV_inner_Metal",
-      "value": 239130.4347826087
-    },
-    {
-      "terminal": "SR_TOP_HV_outer_Metal",
-      "value": 239130.4347826087
-    }
-    ]
-  },
-  {
-    "name": "LV impulse",
-    "excitations": [
-    {
-      "terminal": "HV",
-      "value": 0
-    },
-    {
-      "terminal": "LV",
-      "value": 47826.08695652174
-    },
-    {
-      "terminal": "RV",
-      "value": 0
-    },
-    {
-      "terminal": "SR_TOP_HV_inner_Metal",
-      "value": 0
-    },
-    {
-      "terminal": "SR_TOP_HV_outer_Metal",
-      "value": 0
-    }
-    ]
-  }
   ]
 }

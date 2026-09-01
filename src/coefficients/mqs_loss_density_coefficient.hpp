@@ -13,6 +13,7 @@
 
 #include "mfem.hpp"
 #include "../core/constants.hpp"
+#include "refined_mesh_eval.hpp"
 
 /**
  * @brief Time-averaged Joule loss density \f$P = \frac{1}{2}\sigma|E|^2\f$
@@ -150,8 +151,16 @@ public:
 		double e_im = 0.0;
 		DriveField(T, ip, e_re, e_im);
 
-		e_re += omega_ * a_im_.GetValue(T, ip);
-		e_im -= omega_ * a_re_.GetValue(T, ip);
+		// Results export samples on a refined copy of the solution mesh, whose
+		// element ids do not index a_re_/a_im_. Map back to the parent element
+		// before reading them. The attribute and radius used by DriveField come
+		// from T, which is exact on either mesh.
+		mfem::IntegrationPoint a_ip;
+		mfem::ElementTransformation& a_T =
+			refined_eval::Resolve(a_re_, T, ip, a_ip);
+
+		e_re += omega_ * a_im_.GetValue(a_T, a_ip);
+		e_im -= omega_ * a_re_.GetValue(a_T, a_ip);
 
 		return 0.5 * sigma * (e_re * e_re + e_im * e_im);
 	}
