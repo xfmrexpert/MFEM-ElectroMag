@@ -120,11 +120,10 @@ public:
 		return *sp;
 	}
 
-	// Estimate per-element error on the CURRENT mesh, folding every scenario /
-	// coupling column into a single indicator via the element-wise maximum
-	//     eta_k = max over solves s of eta_k(s),
-	// so one shared mesh is refined for all scenarios (spec: identical
-	// $Nodes/$Elements across every <scenario>.results.msh).
+	// Estimate per-element error on the CURRENT mesh. The scenario-wide fold (a
+	// running RMS over every scenario / coupling column) lives in the base class
+	// AccumulateScenarioError(), so one shared mesh is refined for all scenarios
+	// (spec: identical $Nodes/$Elements across every <scenario>.results.msh).
 	//
 	// Uses the serial recovery-based ZienkiewiczZhuEstimator (the L2 variant is
 	// MPI-only). A dedicated integrator instance (separate from a's) and an H1
@@ -133,6 +132,12 @@ public:
 	// per-region reluctivity discontinuities are respected. The recovered field
 	// is grad(A) (planar) or B (axisymmetric); ComputeFluxEnergy applies
 	// reluctivity once to form the physical norm.
+	//
+	// The raw indicator is then normalized by the total magnetic field energy
+	// Et = 0.5 * A^T K A, making it a dimensionless RELATIVE error. The ZZ
+	// indicator has units of sqrt(energy) and so scales with the driving current;
+	// without this the base-class fold would be dominated by whichever scenario
+	// is driven hardest rather than by mesh quality.
 	//
 	// @param errors  Output: per-element error indicator (sized to NE).
 	void EstimateCurrentSolutionError(mfem::Vector& errors) override {
@@ -143,6 +148,11 @@ public:
 		estimator.SetWithCoeff(false);    // field = grad(A) or B; energy applies nu
 		estimator.SetFluxAveraging(1);    // do not average across attribute interfaces
 		errors = estimator.GetLocalErrors();
+
+		// A zero/near-zero solution carries no energy and no meaningful relative
+		// error; leave the indicator unscaled rather than dividing by ~0.
+		const double energy = amr::FieldEnergy(*fespace, MakeStiffnessIntegrator(), *A);
+		if (energy > 0.0) { errors /= std::sqrt(energy); }
 	}
 
 	// Peak flux density |B| over the current solution *A, sampled at element

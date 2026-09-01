@@ -194,11 +194,19 @@ Field analyses write one result per expanded point. For MQS
 `coupling_matrix` analyses, each scenario defines a frequency point and the
 solver writes a separate frequency-labeled resistance/inductance CSV pair.
 
-For the complete input file schema, required and optional fields, validation
-rules, and definitions of every term, see `docs/input_file_format.md`. For
-detailed mathematical formulation, see `docs/math_formulation.md`. For the
-vocabulary and modeling rules governing boundaries, boundary conditions, and
-terminals, see `docs/boundary_and_terminal_model.md`.
+### Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [`docs/input_file_format.md`](docs/input_file_format.md) | Guide to the configuration model, its vocabulary, and a worked example |
+| [`docs/config_reference.md`](docs/config_reference.md) | Normative reference: every key, type, default, and validation rule |
+| [`docs/faq.md`](docs/faq.md) | Conventions and sharp edges, including the peak-vs-RMS excitation rule |
+| [`docs/boundary_and_terminal_model.md`](docs/boundary_and_terminal_model.md) | Boundary, boundary-condition, and terminal modeling rules |
+| [`docs/math_formulation.md`](docs/math_formulation.md) | Mathematical formulation of each physics type |
+
+> **Note:** excitation values in time-harmonic runs are **peak (amplitude)
+> phasors**, not RMS. This is not enforced by the solver; see the
+> [FAQ](docs/faq.md#are-excitations-peak-or-rms).
 
 ## Output
 

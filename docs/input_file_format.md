@@ -1,12 +1,18 @@
 # Input File Format
 
-The solver reads one JSON configuration file. This document defines every
-section, every term, and the rules a valid file must satisfy.
+The solver reads one JSON configuration file. This document explains the model
+the file describes, defines every term, and shows a worked example.
 
-Companion document: [boundary_and_terminal_model.md](boundary_and_terminal_model.md)
-covers the boundary/terminal/coupling vocabulary in depth and records why those
-terms were chosen. This document is the schema reference; that one is the
-rationale.
+Companion documents:
+
+- [config_reference.md](config_reference.md) -- the normative key-by-key
+  reference: every key, type, default, accepted value, and validation rule.
+  Consult it when you need to know *what is legal*.
+- [boundary_and_terminal_model.md](boundary_and_terminal_model.md) -- the
+  boundary/terminal/coupling vocabulary in depth, and why those terms were
+  chosen.
+
+This document is the guide; the reference is the schema.
 
 ---
 
@@ -56,7 +62,7 @@ consistently everywhere else.
 | **Boundary** | A codimension-one part (a curve in 2D) bounding the solved region. |
 | **Material** | A named set of physical properties: `sigma`, `epsilon_r`, `mu_r`. Purely a property bundle; it has no location. |
 | **Region** | The assignment of a material to a domain entity group. This is what gives a material a location. |
-Dirichlet (prescribed value) or Neumann (prescribed flux). Prescribed once; fixed for the entire run. |
+| **Boundary condition** | A constraint applied on a boundary entity group: either Dirichlet (prescribed value) or Neumann (prescribed flux). Prescribed once; fixed for the entire run. |
 | **Terminal** | A named connection through which the model is driven or measured. Its value is *not* fixed here -- scenarios supply it. |
 | **Excitation** | One scenario's setting of one terminal. Volts for a voltage terminal, amps for a current terminal. |
 | **Scenario** | One solve: a set of excitations plus, for MQS, a frequency. |
@@ -84,26 +90,15 @@ whole run; the excitation is a *value at that site* in one scenario.
 
 ## 3. Sections
 
+This section explains what each part of the file is *for*. For the complete
+key/type/default tables, see [config_reference.md](config_reference.md).
+
 ### 3.1 `simulation` (required)
 
-Run-level settings. The only required section.
-
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `physics_type` | string | **required** | `electrostatics`, `magnetostatics`, `magnetoquasistatics` |
-| `mesh` | string | **required** | Mesh path; relative paths resolve against the config file's directory |
-| `geometry_type` | string | `planar` | `planar` or `axisymmetric` |
-| `analysis_type` | string | `field` | `field` or `coupling_matrix` |
-| `order` | integer | `1` | FE polynomial order, 1-10 |
-| `linear_solver` | string | `direct` | `direct` or `iterative` |
-| `solver_tolerance` | number | see constants | Relative residual tolerance, in (0, 1) |
-| `solver_max_iter` | integer | see constants | Iterative solver cap, >= 1 |
-| `solver_print_level` | integer | see constants | Solver verbosity |
-| `output_paraview` | bool | `false` | Write ParaView `.pvd`/`.vtu` |
-| `output_gmsh` | bool | `false` | Write Gmsh `.msh` results |
-| `results_path` | string | mesh directory | Output directory |
-| `export_refine` | integer | follows `order` | Export subdivision factor, >= 1 |
-| `amr` | object | absent = disabled | See below |
+Run-level settings: which physics to solve, which mesh to read, what geometry
+the mesh represents, whether to extract a coupling matrix, and how to solve and
+export. Only `physics_type` and `mesh` are required; everything else has a
+default. Full listing: [`simulation`](config_reference.md#simulation).
 
 `direct` is the default solver because a coupling-matrix run amortizes one
 factorization over every terminal's right-hand side, and its accuracy does not
@@ -111,27 +106,17 @@ depend on a residual tolerance.
 
 #### `simulation.amr`
 
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `enabled` | bool | `false` | Master switch |
-| `max_iterations` | integer | `5` | Refine/re-solve passes |
-| `max_dofs` | integer | `2000000` | Stop past this DOF count (<= 0 disables) |
-| `error_fraction` | number | `0.7` | Bulk (Dorfler) marking fraction, in (0, 1] |
-| `error_tolerance` | number | `0.0` | Absolute stop threshold (<= 0 ignores) |
-| `conforming` | bool | `true` | Require conforming output |
-
-When AMR is absent or disabled the solver performs a single solve.
+Optional adaptive mesh refinement block. When AMR is absent or disabled the
+solver performs a single solve; when enabled it repeats a refine/re-solve cycle
+until an iteration, DOF, or error limit is hit. Full listing:
+[`simulation.amr`](config_reference.md#simulationamr).
 
 ### 3.2 `entity_groups`
 
 Array of named attribute-id sets. The only section that mentions raw mesh
-numbers.
-
-| Key | Type | Required | Meaning |
-|-----|------|----------|---------|
-| `name` | string | yes | Unique group name |
-| `dim` | integer | yes | Entity dimension: `1` = curve, `2` = surface, `3` = volume |
-| `attribute_ids` | array of int | yes | Positive mesh attribute ids |
+numbers. Each group binds a `name` to a list of `attribute_ids` of one entity
+dimension `dim`. Full listing:
+[`entity_groups`](config_reference.md#entity_groups).
 
 ```json
 "entity_groups": [
@@ -164,27 +149,18 @@ reference a domain group.
 
 ### 3.3 `materials`
 
-Array of named property bundles. A material has no location.
+Array of named property bundles. A material has no location -- it is *what
+something is made of*, and `regions` decides where it lives. Properties are
+`sigma`, `epsilon_r`, and `mu_r`; omitted ones default to vacuum. Full listing:
+[`materials`](config_reference.md#materials).
 
-| Key | Type | Required | Meaning |
-|-----|------|----------|---------|
-| `name` | string | yes | Unique material name |
-| `properties.sigma` | number | no (0.0) | Conductivity [S/m] |
-| `properties.epsilon_r` | number | no (1.0) | Relative permittivity |
-| `properties.mu_r` | number | no (1.0) | Relative permeability |
-
-Defaults are vacuum. Only the properties the physics needs are read:
+Only the properties the physics needs are read:
 electrostatics uses `epsilon_r`, magnetostatics `mu_r`, MQS `mu_r` and `sigma`.
 
 ### 3.4 `regions`
 
-Array binding materials to domain entity groups.
-
-| Key | Type | Required | Meaning |
-|-----|------|----------|---------|
-| `entity_group` | string | yes | A `domain` group |
-| `material` | string | yes | A defined material name |
-| `current_constraint` | string | no (`none`) | `none` or `open` |
+Array binding materials to domain entity groups. This is what gives a material
+a location. Full listing: [`regions`](config_reference.md#regions).
 
 **Every domain attribute in the mesh must be claimed by exactly one region.**
 Unclaimed attributes and doubly-claimed attributes are both errors. This is
@@ -196,15 +172,9 @@ induced-current-only body.
 
 ### 3.5 `boundary_conditions`
 
-Array of boundary conditions.
-
-| Key | Type | Required | Meaning |
-|-----|------|----------|---------|
-| `entity_group` | string | yes | A `boundary` group |
-| `type` | string | yes | `dirichlet`, `neumann`, or `robin` |
-| `value` | number | yes | Prescribed value or flux |
-| `name` | string | no | Documentation only |
-| `robin_coefficient` | number | Robin only | Reserved |
+Array of boundary conditions, each applying a `dirichlet`, `neumann`, or
+`robin` constraint with a fixed `value` to a boundary entity group. Full
+listing: [`boundary_conditions`](config_reference.md#boundary_conditions).
 
 - **dirichlet** prescribes the solution: potential `V` (electrostatics) or
   `A_phi` (magnetics).
@@ -218,14 +188,9 @@ axisymmetric magnetic runs is imposed automatically and must **not** be prescrib
 
 ### 3.6 `terminals`
 
-Array of named drive/measurement sites.
-
-| Key | Type | Required | Meaning |
-|-----|------|----------|---------|
-| `name` | string | yes | Unique terminal name |
-| `quantity` | string | yes | `voltage` or `current` |
-| `entity_group` | string | yes | Group; role depends on quantity |
-| `conductor_type` | string | no (`massive`) | `massive` or `stranded` |
+Array of named drive/measurement sites. A terminal has a `name`, a `quantity`
+(`voltage` or `current`), and an `entity_group`. Full listing:
+[`terminals`](config_reference.md#terminals).
 
 `quantity` decides which role of group is required, and how the terminal is
 realized:
@@ -245,27 +210,23 @@ the true current distribution including skin and proximity effects.
 ### 3.7 `scenarios`
 
 Array of solves. Ignored when `analysis_type` is `coupling_matrix`, which
-synthesizes its own unit-drive scenarios.
-
-| Key | Type | Required | Meaning |
-|-----|------|----------|---------|
-| `name` | string | yes | Scenario name; labels output |
-| `excitations` | array | no | Per-terminal values |
-| `frequency` | number/array/object | MQS only | See below |
-
-Each excitation:
-
-| Key | Type | Meaning |
-|-----|------|---------|
-| `terminal` | string | A defined terminal name |
-| `value` | number | Volts or amps, per that terminal's type |
+synthesizes its own unit-drive scenarios. Each scenario has a `name`, an
+optional list of `excitations` (a `terminal` and a `value`), and for MQS a
+`frequency`. Full listing: [`scenarios`](config_reference.md#scenarios).
 
 **A terminal omitted from `excitations` defaults to zero** of its quantity:
 grounded for voltage, open for current. Omission is meaningful, not an error.
 
+**Excitation values are peak (amplitude) phasors** in time-harmonic runs, not
+rms. There is no selector and no conversion; see
+[faq.md](faq.md#are-excitations-peak-or-rms).
+
 #### Frequency (MQS only)
 
-Three forms, all expanding to one solve per point:
+Frequency is a property of the scenario, not of the run, so a single file can
+sweep. It takes three forms -- a single number, an explicit list, or a sweep
+object with `scale`, `start`, `stop`, and `points` -- all expanding to one solve
+per point:
 
 ```json
 "frequency": 60.0                                              // single
@@ -274,10 +235,9 @@ Three forms, all expanding to one solve per point:
 			   "stop": 1000.0, "points": 5 }                   // sweep
 ```
 
-`scale` is `log` or `linear`. `points` includes both endpoints; `points: 1`
-solves only at `start`. Swept scenarios are named
-`<name>_f<n>_<frequency>Hz`. Frequency is required and positive for MQS and
-ignored by the static solvers.
+Swept scenarios are named `<name>_f<n>_<frequency>Hz`. Frequency is required and
+positive for MQS and ignored by the static solvers. Full listing:
+[`frequency`](config_reference.md#frequency-mqs-only).
 
 ---
 
@@ -289,8 +249,8 @@ Solves the prescribed scenarios and writes the resulting fields.
 
 ### `coupling_matrix`
 
-Ignores prescribed scenarios.
-zero, and assembles the terminal-by-terminal matrix:
+Ignores prescribed scenarios. Drives each terminal in turn to unit value with all
+others held at zero, and assembles the terminal-by-terminal matrix:
 
 | Physics | Matrix | Unit |
 |---------|--------|------|
@@ -305,44 +265,29 @@ supplies a frequency point and a separate labeled R/L pair is written per point.
 
 ## 5. Validation rules
 
-Checked before solving, and reported together rather than one at a time.
+Every configuration is checked before solving, and all failures are reported
+together rather than one at a time. The checks fall into five families:
 
-**Structural**
-- Root is an object; `simulation` is present.
-- Every section has the expected JSON type.
-- Superseded names are rejected with the replacement named:
-  `physics` -> `physics_type`, `geometry` -> `geometry_type`,
-  `results_file` -> `results_path`, `boundaries` -> `boundary_conditions`,
-  entity group `kind` -> `dim`, terminal `excitation_type`/`excitation` ->
-  `quantity`. A capitalized boundary condition type is reported with its
-  lowercase spelling rather than a generic rejection.
+- **Structural** -- correct JSON types, `simulation` present, superseded names
+  rejected with their replacement named.
+- **Names and references** -- unique group names, and every reference to a
+  group, material, or terminal resolves to something defined.
+- **Roles** -- every referenced group has the role its use requires: boundary
+  conditions need boundary groups, regions need domain groups.
+- **Coverage and conflicts** -- every mesh domain attribute claimed exactly
+  once, and no DOF pinned by two competing sources.
+- **Ranges** -- numeric bounds on solver and AMR settings.
 
-**Names and references**
-- Entity group names are unique.
-- Every `entity_group` reference resolves to a defined group.
-- Every group's `dim` is the mesh dimension (domain) or one below it
-  (boundary); anything else is rejected, naming both acceptable values.
-- Every referenced group has the role its use requires.
-- Every `material` reference resolves to a defined material.
-- Every `terminal` reference in an excitation resolves to a defined terminal.
+The complete enumerated rule list, including the exact numeric ranges and the
+superseded-name table, is in
+[config_reference.md](config_reference.md#validation-rules).
 
-**Coverage and conflicts**
-- Every mesh domain attribute is claimed by exactly one region.
-- Attribute ids are positive integers.
-- No DOF is pinned to two different values by two boundary conditions.
-- No boundary entity carries two boundary conditions.
-- No DOF belongs to two terminals, or to a terminal and a Dirichlet boundary
-  condition at once. Because terminal values vary per scenario, any shared DOF
-  is guaranteed to conflict in some scenario.
-
-**Ranges**
-- `order` in [1, 10]; `solver_tolerance` in (0, 1); `solver_max_iter` >= 1;
-  `export_refine` >= 1; `amr.error_fraction` in (0, 1];
-  `amr.max_iterations` and `amr.error_tolerance` non-negative.
-
-**Physics-specific**
-- MQS requires a positive frequency on every scenario.
-- Robin boundary conditions are rejected as unimplemented.
+The strictness around coverage is deliberate. An unclaimed domain attribute
+would silently receive vacuum properties and produce a plausible but wrong
+answer, so it is an error rather than a warning. Likewise, a DOF shared between
+a terminal and a Dirichlet condition is rejected outright: because terminal
+values vary per scenario, such a DOF is guaranteed to conflict in some scenario
+even if it happens to agree in the one you tested.
 
 ---
 

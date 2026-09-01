@@ -1202,19 +1202,45 @@ mfem::Vector AxisymmetricCurlCurlErrors(
     return estimator.GetLocalErrors();
 }
 
+// Normalize a copy of @p v by its l2 norm, so two indicator vectors can be
+// compared for SHAPE (the relative distribution of error across elements)
+// independently of any uniform scale factor.
+mfem::Vector NormalizedErrors(const mfem::Vector& v) {
+    mfem::Vector out(v);
+    const double norm = out.Norml2();
+    if (norm > 0.0) { out /= norm; }
+    return out;
+}
+
+// Compare error indicators up to a uniform positive scale.
+//
+// The solvers divide their raw ZZ indicator by sqrt(field energy) to produce a
+// dimensionless relative error (see EstimateCurrentSolutionError), so solver
+// output is a scalar multiple of the raw estimator output these tests build by
+// hand. That scale factor is deliberate and not what these cases are checking:
+// they verify WHICH elements carry the error and in what proportion, i.e. the
+// property that actually drives Dorfler marking. Comparing normalized vectors
+// keeps the assertions on that invariant.
 void RequireErrorsEqual(const mfem::Vector& actual,
                         const mfem::Vector& expected) {
     REQUIRE(actual.Size() == expected.Size());
-    for (int i = 0; i < actual.Size(); ++i) {
-        REQUIRE(actual(i) == Catch::Approx(expected(i)).epsilon(1e-12));
+    const mfem::Vector a = NormalizedErrors(actual);
+    const mfem::Vector e = NormalizedErrors(expected);
+    for (int i = 0; i < a.Size(); ++i) {
+        REQUIRE(a(i) == Catch::Approx(e(i)).epsilon(1e-12));
     }
 }
 
 bool ErrorsDiffer(const mfem::Vector& first, const mfem::Vector& second) {
     if (first.Size() != second.Size()) return true;
-    for (int i = 0; i < first.Size(); ++i) {
-        const double scale = std::max(std::abs(first(i)), std::abs(second(i)));
-        if (std::abs(first(i) - second(i)) > 1e-8 * scale) return true;
+    // Shape comparison, to match RequireErrorsEqual: a pure rescaling must not
+    // register as a difference, otherwise the negative assertions in these tests
+    // would pass for the trivial reason that the solver normalizes.
+    const mfem::Vector a = NormalizedErrors(first);
+    const mfem::Vector b = NormalizedErrors(second);
+    for (int i = 0; i < a.Size(); ++i) {
+        const double scale = std::max(std::abs(a(i)), std::abs(b(i)));
+        if (std::abs(a(i) - b(i)) > 1e-8 * scale) return true;
     }
     return false;
 }

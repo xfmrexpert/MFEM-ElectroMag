@@ -795,19 +795,25 @@ public:
         factored_omega = omega;
     }
 
-    // Estimate per-element error on the CURRENT mesh, folding every scenario /
-    // coupling column into a single indicator via the element-wise maximum
-    //     eta_k = max over solves s of eta_k(s),
-    // so one shared mesh is refined for all scenarios (spec: identical
-    // $Nodes/$Elements across every <scenario>.results.msh).
+    // Estimate per-element error on the CURRENT mesh. The scenario-wide fold (a
+    // running RMS over every scenario / frequency point) lives in the base class
+    // AccumulateScenarioError(), so one shared mesh is refined for all scenarios
+    // (spec: identical $Nodes/$Elements across every <scenario>.results.msh).
     //
     // Uses the serial recovery-based ZienkiewiczZhuEstimator (the L2 variant is
     // MPI-only). A dedicated integrator instance (separate from a's) and an H1
     // vector flux space are constructed here per call; SetFluxAveraging(1) keeps
     // the recovered flux from smoothing across material-attribute interfaces so
     // per-region reluctivity discontinuities are respected. The real and
-    // imaginary indicators are combined as a complex magnitude before the base
-    // class folds them across scenarios.
+    // imaginary indicators are combined as a complex magnitude.
+    //
+    // That magnitude is then normalized by the total field energy of the phasor,
+    // Et = 0.5*(Re^T K Re) + 0.5*(Im^T K Im), making it a dimensionless RELATIVE
+    // error. This matters more here than in the static solvers: an MQS run
+    // sweeps frequency, and the field energy of a fixed excitation varies by
+    // orders of magnitude across a decade sweep as eddy currents screen the
+    // conductor. Folding raw indicators would let the highest-energy frequency
+    // point set the mesh for the whole sweep.
     //
     // @param errors  Output: per-element error indicator (sized to NE).
     void EstimateCurrentSolutionError(mfem::Vector& errors) override {
@@ -828,6 +834,15 @@ public:
         for (int k = 0; k < errors.Size(); ++k) {
             errors(k) = std::hypot(errs_re(k), errs_im(k));
         }
+
+        // Energy of the phasor is the sum of the real and imaginary parts'
+        // energies (the cross term vanishes in the time average). A zero/near-
+        // zero solution carries no energy and no meaningful relative error;
+        // leave the indicator unscaled rather than dividing by ~0.
+        const double energy =
+            amr::FieldEnergy(*fespace, MakeStiffnessIntegrator(), A->real()) +
+            amr::FieldEnergy(*fespace, MakeStiffnessIntegrator(), A->imag());
+        if (energy > 0.0) { errors /= std::sqrt(energy); }
     }
 
     // Peak flux density |B| over the current solution *A, sampled at element

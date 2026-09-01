@@ -184,11 +184,10 @@ public:
 		return new mfem::DiffusionIntegrator(*epsilon_coeff);
 	}
 
-	// Estimate per-element error on the CURRENT mesh, folding every scenario /
-	// coupling column into a single indicator via the element-wise maximum
-	//     eta_k = max over solves s of eta_k(s),
-	// so one shared mesh is refined for all scenarios (spec: identical
-	// $Nodes/$Elements across every <scenario>.results.msh).
+	// Estimate per-element error on the CURRENT mesh. The scenario-wide fold (a
+	// running RMS over every scenario / coupling column) lives in the base class
+	// AccumulateScenarioError(), so one shared mesh is refined for all scenarios
+	// (spec: identical $Nodes/$Elements across every <scenario>.results.msh).
 	//
 	// Uses the serial recovery-based ZienkiewiczZhuEstimator (the L2 variant is
 	// MPI-only). A dedicated integrator instance (separate from a's) and an H1
@@ -196,6 +195,14 @@ public:
 	// the recovered flux from smoothing across material-attribute interfaces so
 	// per-region permittivity discontinuities are respected. The recovered field
 	// is grad(V); ComputeFluxEnergy applies eps once to form the physical norm.
+	//
+	// The raw indicator is then normalized by the total electrostatic field
+	// energy Et = 0.5 * x^T K0 x, making it a dimensionless RELATIVE error. The
+	// ZZ indicator has units of sqrt(energy) and so scales with the applied
+	// voltage; without this the base-class fold would be dominated by whichever
+	// scenario is driven hardest rather than by mesh quality. That is the normal
+	// case for a capacitance extraction, where each terminal contributes its own
+	// unit-excitation scenario.
 	//
 	// @param errors  Output: per-element error indicator (sized to NE).
 	void EstimateCurrentSolutionError(mfem::Vector& errors) override {
@@ -206,6 +213,11 @@ public:
 		estimator.SetWithCoeff(false);    // field = grad(V); energy applies eps
 		estimator.SetFluxAveraging(1);    // do not average across attribute interfaces
 		errors = estimator.GetLocalErrors();
+
+		// A zero/near-zero solution carries no energy and no meaningful relative
+		// error; leave the indicator unscaled rather than dividing by ~0.
+		const double energy = amr::FieldEnergy(*fespace, MakeStiffnessIntegrator(), *x);
+		if (energy > 0.0) { errors /= std::sqrt(energy); }
 	}
 
 	// Peak field magnitude |E| = |grad(V)| over the current solution *x, sampled

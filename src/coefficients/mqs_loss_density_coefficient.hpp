@@ -30,7 +30,8 @@
  * RHS into the solved potentials and port voltages. It is documented but NOT
  * enforced: no code validates or converts it. An RMS excitation -- the natural
  * reading of a nameplate current -- is silently accepted and halves every
- * number this coefficient produces.
+ * number this coefficient produces. See docs/faq.md, "Are excitations peak or
+ * RMS?", for the user-facing statement of this hazard.
  *
  * Splitting \f$E\f$ into real and imaginary parts with
  * \f$A = A_{re} + jA_{im}\f$, so that

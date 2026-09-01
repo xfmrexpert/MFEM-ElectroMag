@@ -46,11 +46,15 @@ protected:
     BoundaryConditionSet boundary_conditions;
 private:
     std::vector<amr::AmrIterationInfo> amr_history;
-    // Non-null only while an AMR pass is in flight: the element-wise maximum of
-    // the per-scenario error indicators accumulated by the current scenario loop.
-    // Owned by RunAdaptive(); derived solvers reach it only through
-    // AccumulateScenarioError().
+	// Non-null only while an AMR pass is in flight: the running root-mean-square
+	// of the per-scenario error indicators accumulated by the current scenario
+	// loop. Owned by RunAdaptive(); derived solvers reach it only through
+	// AccumulateScenarioError().
 	mfem::Vector* amr_errors = nullptr;
+
+	// Number of scenario indicators folded into *amr_errors so far. Reset per
+	// AMR iteration alongside amr_errors; drives the running-average update.
+	int amr_error_samples = 0;
 
     // ---- Public API ---------------------------------------------------------
 public:
@@ -311,11 +315,28 @@ protected:
         return out;
     }
 
-    // Fold the just-solved scenario's local error
-    // element-wise maximum, so one shared mesh is refined for all scenarios.
+    // Fold the just-solved scenario's local error indicator into the running
+    // combination, so one shared mesh is refined for all scenarios.
     // Solvers call this from RunOnCurrentMesh() right after each solve; outside an
     // AMR pass it is a no-op, which is what lets a single scenario loop serve both
     // the production solve and the error estimate (no duplicate solves).
+    //
+    // The fold is a running ROOT-MEAN-SQUARE over the scenarios seen so far:
+    //     e_k = sqrt( (1/N) * sum_s eta_k(s)^2 ).
+    // Updated incrementally from the previous average and the sample count, so
+    // no per-scenario history is retained:
+    //     e_k <- sqrt( (e_k^2 * n + eta_k^2) / (n + 1) ).
+    //
+    // RMS rather than the element-wise maximum: the max lets a single outlier
+    // scenario dictate the refinement pattern, so elements are spent resolving a
+    // feature only one excitation cares about. Averaging instead accounts for
+    // error that is moderately important to MANY solves. This matters most for
+    // coupling-matrix runs, where one scenario is synthesized per terminal and
+    // every column is equally part of the answer.
+    //
+    // Each scenario's indicator is normalized by that scenario's field energy
+    // (see EstimateCurrentSolutionError implementations) so the samples entering
+    // this average are dimensionless relative errors and therefore comparable.
     void AccumulateScenarioError() {
         if (!amr_errors) return;
 
@@ -324,9 +345,15 @@ protected:
         EstimateCurrentSolutionError(current);
         MFEM_VERIFY(current.Size() == ne,
             "AMR estimator returned the wrong number of element errors.");
+
+        const double n = static_cast<double>(amr_error_samples);
         for (int element = 0; element < ne; ++element) {
-            (*amr_errors)(element) = std::max((*amr_errors)(element), current(element));
+            const double prev = (*amr_errors)(element);
+            const double eta = current(element);
+            (*amr_errors)(element) =
+                std::sqrt((prev * prev * n + eta * eta) / (n + 1.0));
         }
+        ++amr_error_samples;
     }
 
     // Integral of 1 over the given domain attributes, i.e. the measure of that
@@ -517,6 +544,7 @@ private:
             mfem::Vector errors(mesh.GetNE());
             errors = 0.0;
             amr_errors = &errors;
+            amr_error_samples = 0;
             RunOnCurrentMesh();
             amr_errors = nullptr;
 
