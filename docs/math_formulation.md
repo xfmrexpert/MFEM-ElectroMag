@@ -11,6 +11,12 @@ We use cylindrical coordinates `(r, z, φ)` where:
 
 For axisymmetric problems, all field quantities are independent of `φ` (`∂/∂φ = 0`).
 
+`r` and `z` are **metres**. The formulation is SI throughout: material
+properties are per-metre (`ε₀` in F/m, `μ₀` in H/m) and the measure below uses
+`r` as a physical length, so the unit of the mesh is part of the formulation
+rather than a presentation choice. See
+[Units](config_reference.md#units).
+
 ## Integration Measure and Output Units
 
 The two geometry modes differ only in the measure applied during assembly, and

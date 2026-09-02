@@ -1,6 +1,7 @@
 # Frequently Asked Questions
 
 - [Are excitations peak or RMS?](#are-excitations-peak-or-rms)
+- [What units does the mesh use?](#what-units-does-the-mesh-use)
 - [Does the peak/RMS choice affect the capacitance, inductance, or resistance matrices?](#does-the-peakrms-choice-affect-the-capacitance-inductance-or-resistance-matrices)
 - [Why is my axisymmetric loss off by a factor of 2*pi*r?](#why-is-my-axisymmetric-loss-off-by-a-factor-of-2pir)
 - [Why does the solver reject `simulation.frequency`?](#why-does-the-solver-reject-simulationfrequency)
@@ -41,6 +42,31 @@ The value is carried unscaled from `excitations[].value` through the
 right-hand side into the solved potentials and port voltages, so the convention
 you choose propagates to every downstream quantity. This matches the convention
 used by common commercial AC/DC and eddy-current tools.
+
+## What units does the mesh use?
+
+**Metres.** The whole project is SI and there is no length-scale key in the
+schema.
+
+This matters because the constants the mesh is multiplied against are
+per-metre -- `EPSILON_0` in F/m and `MU_0` in H/m -- and the axisymmetric
+volume measure `dV = 2*pi*r dr dz` treats `r` as a physical length. A model
+authored in millimetres therefore does not produce a rescaled answer that can
+be corrected afterwards; it mixes a millimetre geometry with per-metre material
+properties and corrupts every absolute quantity.
+
+> The convention is **documented but not enforced.** No code inspects the mesh
+> extent, so a millimetre mesh solves cleanly and reports plausible, quietly
+> wrong energies, capacitances, inductances, and losses.
+
+A millimetre mesh cannot be detected reliably, because a bounding box of a few
+hundred units is equally consistent with a small model in metres and a large
+one in millimetres. Convert when the mesh is generated.
+
+One nuance: axis *classification* is scale-free. `axisym::kRelativeGeometryTolerance`
+is relative to the mesh bounding box, so "is this domain touching r = 0" is
+decided correctly in any unit. That is a geometric convenience only and does not
+relax the metres requirement the physics imposes.
 
 ## Does the peak/RMS choice affect the capacitance, inductance, or resistance matrices?
 

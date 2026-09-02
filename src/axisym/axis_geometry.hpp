@@ -23,8 +23,14 @@
  *   - The radial extent is inspected ONCE, at solver setup, rather than clamping
  *     r at every quadrature point. Clamping silently deforms the geometry and
  *     hides genuinely invalid input.
- *   - Tolerances are relative to the mesh bounding box, so the same model works
- *     whether it is expressed in nanometres or kilometres.
+ *   - Tolerances are relative to the mesh bounding box, so axis classification
+ *     is scale-free and does not itself impose a length unit.
+ *
+ * Note that this scale-freedom is GEOMETRIC ONLY. The physics is strictly SI
+ * and requires mesh coordinates in metres (see core/constants.hpp): the radial
+ * coordinate feeds the 2*pi*r measure as a physical length. A mesh in other
+ * units will still classify correctly here and then produce silently wrong
+ * absolute quantities downstream.
  */
 namespace axisym {
 

@@ -4,15 +4,18 @@ This example demonstrates time-harmonic eddy current analysis for a conducting c
 
 ## Problem Description
 
-**Geometry:**
+**Geometry:** (all dimensions in metres -- the solver is SI and assumes a mesh
+in metres; see [Units](../../docs/config_reference.md#units))
 - Conducting cylinder: radius R = 0.05 m, length L = 0.1 m
 - Surrounding coil: creates time-varying magnetic field
 - Axisymmetric configuration
 
 **Physics:**
-- Frequency sweep: f = 10 Hz to 1 kHz (five logarithmically spaced points)
-- The 60 Hz calculations below provide a power-frequency reference
-- Angular frequency: ω = 2πf = 377 rad/s
+- Two scenarios: `PowerFrequency` at f = 60 Hz, and `FrequencySweep` from
+  10 Hz to 1 kHz (five logarithmically spaced points)
+- The 60 Hz analytical calculations below correspond directly to the
+  `PowerFrequency` scenario
+- Angular frequency at 60 Hz: ω = 2πf = 377 rad/s
 - Conductor: Aluminum (σ = 3.5 × 10⁷ S/m, μᵣ = 1.0)
 - Coil: stranded winding driven with a total current of 240 A, which over the
   0.0024 m² coil cross-section gives J_source = 1 × 10⁵ A/m²
@@ -66,15 +69,44 @@ P/A = ½ R_s |H_surface|²
 
 ```bash
 # From project root
-mkdir -p build && cd build
-cmake ..
-make
+cmake -S . -B build
+cmake --build build --config Release
 
 # Run simulation
-./mfem-electromag ../examples/eddy_current/config.json
-
-# Results will be in results_mqs/
+./build/mfem-electromag examples/eddy_current/config.json
 ```
+
+This config does **not** enable any output; `output_paraview` and `output_gmsh`
+both default to `false`. To write result files, add them to the `simulation`
+block:
+
+```json
+{
+  "simulation": {
+    "output_paraview": true,
+    "output_gmsh": true
+  }
+}
+```
+
+This config defines two scenarios. `PowerFrequency` uses a scalar frequency, so
+it is written under that name verbatim. `FrequencySweep` expands to one solve
+*per frequency point*, each written separately under
+`<scenario>_f<n>_<frequency>Hz`, with `.` replaced by `p`:
+
+| Scenario | Frequency | Output name |
+|----------|-----------|-------------|
+| `PowerFrequency` | 60 Hz | `PowerFrequency` |
+| `FrequencySweep` | 10 Hz | `FrequencySweep_f1_10Hz` |
+| `FrequencySweep` | 31.6 Hz | `FrequencySweep_f2_31p6227766017Hz` |
+| `FrequencySweep` | 100 Hz | `FrequencySweep_f3_100Hz` |
+| `FrequencySweep` | 316 Hz | `FrequencySweep_f4_316p227766017Hz` |
+| `FrequencySweep` | 1000 Hz | `FrequencySweep_f5_1000Hz` |
+
+ParaView collections are prefixed with the physics type
+(`results_magnetoquasistatics_PowerFrequency/`); Gmsh files use the scenario
+name directly (`PowerFrequency.results.msh`). Output is written next to the mesh
+unless `results_path` is set.
 
 ## Expected Results
 
@@ -88,8 +120,8 @@ The simulation produces complex-valued fields:
 ## Visualization
 
 ```bash
-# Open in ParaView
-paraview results_mqs/results_mqs.pvd
+# Open the 60 Hz scenario in ParaView
+paraview results_magnetoquasistatics_PowerFrequency/data.pvd
 ```
 
 **Key visualizations:**
@@ -126,6 +158,10 @@ To animate the time-harmonic solution:
 
 ## Validation
 
+The analytical figures above are for 60 Hz, so validate against the
+`PowerFrequency` scenario rather than a sweep point (the sweep brackets 60 Hz
+between its 31.6 Hz and 100 Hz points but does not land on it).
+
 ### 1. Skin Depth Check
 Plot |B| vs depth into conductor:
 
@@ -136,7 +172,10 @@ Plot |B| vs depth into conductor:
 At depth x = δ, field should drop to ~37% (1/e) of surface value.
 
 ### 2. Power Loss
-Compare computed losses to analytical for simple geometry.
+Compare computed losses to analytical for simple geometry. The solver reports
+per-region time-averaged Joule loss at the end of each scenario; for
+`PowerFrequency` the conductor loss is ~1.03e-01 W with the shipped mesh and
+the peak-phasor excitation convention.
 
 ### 3. Phase Relationship
 Inside conductor:
@@ -146,7 +185,14 @@ Inside conductor:
 ## Frequency Sweep
 
 Each MQS scenario requires either a positive scalar frequency or an inclusive
-linear/logarithmic range. The example uses:
+linear/logarithmic range. This example uses both forms. A scalar solves a
+single point and keeps the scenario name unchanged:
+
+```json
+"frequency": 60.0
+```
+
+A range expands to one solve per point:
 
 ```json
 "frequency": {

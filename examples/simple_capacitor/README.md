@@ -4,7 +4,8 @@ This example demonstrates electrostatic field calculation for a simple parallel 
 
 ## Problem Description
 
-**Geometry:**
+**Geometry:** (all dimensions in metres -- the solver is SI and assumes a mesh
+in metres; see [Units](../../docs/config_reference.md#units))
 - Two circular plates of radius R = 0.1 m
 - Separation distance d = 0.01 m (1 cm)
 - Axisymmetric about central axis
@@ -53,15 +54,16 @@ U = ½ C V² = ½ × 69.5e-12 × 1000² = 34.75 μJ
 
 ```bash
 # From project root
-mkdir -p build && cd build
-cmake ..
-make
+cmake -S . -B build
+cmake --build build --config Release
 
 # Run simulation
-./mfem-electromag ../examples/simple_capacitor/config.json
-
-# Results will be in results_electrostatic/
+./build/mfem-electromag examples/simple_capacitor/config.json
 ```
+
+This config sets `"output_paraview": true`, so results are written to
+`results_electrostatics_<scenario>/` next to the mesh (both output formats
+default to `false`; set `"output_gmsh": true` for a `.results.msh` file).
 
 ## Expected Results
 
@@ -74,7 +76,7 @@ The simulation should produce:
 
 ```bash
 # Open in ParaView
-paraview results_electrostatic/results_electrostatic.pvd
+paraview "results_electrostatics_Top Plate/data.pvd"
 ```
 
 **Suggested visualizations:**

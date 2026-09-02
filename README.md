@@ -175,7 +175,14 @@ make docs
 
 ## Configuration
 
-Problems are configured using JSON files. See the `test/` directory for examples of:
+Problems are configured using JSON files. All input is **SI**, and mesh
+coordinates must be in **metres** -- material properties are per-metre and the
+axisymmetric measure uses the radial coordinate as a physical length, so a mesh
+in millimetres solves cleanly and returns silently wrong absolute quantities.
+There is no unit or scale key in the schema; see
+[Units](docs/config_reference.md#units).
+
+See the `test/` directory for examples of:
 - `electrostatic_test.json`: Electrostatic problem setup
 - `magnetostatic_test.json`: Magnetostatic problem setup
 - `mqs_test.json`: Magnetoquasistatic problem setup
@@ -218,10 +225,14 @@ solver writes a separate frequency-labeled resistance/inductance CSV pair.
 | [`docs/faq.md`](docs/faq.md) | Conventions and sharp edges, including the peak-vs-RMS excitation rule |
 | [`docs/boundary_and_terminal_model.md`](docs/boundary_and_terminal_model.md) | Boundary, boundary-condition, and terminal modeling rules |
 | [`docs/math_formulation.md`](docs/math_formulation.md) | Mathematical formulation of each physics type |
+| [`docs/open_boundary.md`](docs/open_boundary.md) | Far-field truncation error, the measured convergence study, and options for true open boundaries |
 
 > **Note:** excitation values in time-harmonic runs are **peak (amplitude)
 > phasors**, not RMS. This is not enforced by the solver; see the
 > [FAQ](docs/faq.md#are-excitations-peak-or-rms).
+
+> **Note:** mesh coordinates must be in **metres**. This is likewise not
+> enforced; see the [FAQ](docs/faq.md#what-units-does-the-mesh-use).
 
 ## Output
 

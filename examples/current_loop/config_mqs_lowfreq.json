@@ -1,0 +1,62 @@
+{
+  "simulation": {
+    "physics_type": "magnetoquasistatics",
+    "mesh": "loop.mesh",
+    "order": 2,
+    "geometry_type": "axisymmetric",
+    "solver_tolerance": 1e-12,
+    "solver_max_iter": 2000,
+    "solver_print_level": 0
+  },
+  "entity_groups": [
+    { "name": "Vacuum", "dim": 2, "attribute_ids": [1] },
+    { "name": "Loop", "dim": 2, "attribute_ids": [2] },
+    { "name": "Outer", "dim": 1, "attribute_ids": [1] },
+    { "name": "Axis", "dim": 1, "attribute_ids": [2] }
+  ],
+  "regions": [
+    {
+      "entity_group": "Vacuum",
+      "material": "Vacuum"
+    },
+    {
+      "entity_group": "Loop",
+      "material": "Copper"
+    }
+  ],
+  "materials": [
+    {
+      "name": "Vacuum",
+      "properties": { "mu_r": 1.0, "sigma": 0.0 }
+    },
+    {
+      "name": "Copper",
+      "properties": { "mu_r": 1.0, "sigma": 5.8e7 }
+    }
+  ],
+  "terminals": [
+    {
+      "name": "LoopCurrent",
+      "quantity": "current",
+      "conductor_type": "massive",
+      "entity_group": "Loop"
+    }
+  ],
+  "boundary_conditions": [
+    {
+      "name": "Outer",
+      "entity_group": "Outer",
+      "type": "dirichlet",
+      "value": 0.0
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "quasi_static",
+      "frequency": 0.1,
+      "excitations": [
+        { "terminal": "LoopCurrent", "value": 1.0 }
+      ]
+    }
+  ]
+}

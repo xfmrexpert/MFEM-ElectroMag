@@ -4,7 +4,8 @@ This example calculates the magnetostatic field of a current-carrying solenoid c
 
 ## Problem Description
 
-**Geometry:**
+**Geometry:** (all dimensions in metres -- the solver is SI and assumes a mesh
+in metres; see [Units](../../docs/config_reference.md#units))
 - Solenoid: inner radius r_in = 0.05 m, outer radius r_out = 0.08 m
 - Length: L = 0.2 m
 - Number of turns: N = 1000
@@ -53,15 +54,29 @@ J = 1000 × 1 / 0.006 = 1.67 × 10⁵ A/m²
 
 ```bash
 # From project root
-mkdir -p build && cd build
-cmake ..
-make
+cmake -S . -B build
+cmake --build build --config Release
 
 # Run simulation
-./mfem-electromag ../examples/solenoid/config.json
-
-# Results will be in results_magnetostatic/
+./build/mfem-electromag examples/solenoid/config.json
 ```
+
+This config does **not** enable any output; `output_paraview` and `output_gmsh`
+both default to `false`. To write result files, add them to the `simulation`
+block:
+
+```json
+{
+  "simulation": {
+    "output_paraview": true,
+    "output_gmsh": true
+  }
+}
+```
+
+The single scenario is named `energized`, so ParaView output lands in
+`results_magnetostatics_energized/` and Gmsh output in `energized.results.msh`,
+both written next to the mesh unless `results_path` is set.
 
 ## Expected Results
 
@@ -75,7 +90,7 @@ The simulation should produce:
 
 ```bash
 # Open in ParaView
-paraview results_magnetostatic/results_magnetostatic.pvd
+paraview results_magnetostatics_energized/data.pvd
 ```
 
 **Suggested visualizations:**

@@ -70,6 +70,13 @@
   ],
   "scenarios": [
     {
+      "name": "PowerFrequency",
+      "frequency": 60.0,
+      "excitations": [
+        { "terminal": "ExcitationCoil", "value": 240.0 }
+      ]
+    },
+    {
       "name": "FrequencySweep",
       "frequency": {
         "scale": "log",

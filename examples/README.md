@@ -4,19 +4,30 @@ This directory contains example problems demonstrating electromagnetic field sim
 using MFEM-ElectroMag. All examples use the axisymmetric (r-z) formulation with second
 order (`"order": 2`) elements.
 
+**Units: SI, with mesh coordinates in metres.** Every `.geo` here is written in metres,
+and every config value is SI (`sigma` in S/m, `frequency` in Hz, excitations in V or A).
+The solver has no unit or scale key, and nothing validates the mesh extent, so a geometry
+authored in millimetres will solve cleanly and report absolute quantities that are wrong
+by powers of 1000. See [Units](../docs/config_reference.md#units).
+
 ## Examples
 
 | Directory | Physics | Mesh | Notes |
 |-----------|---------|------|-------|
 | `simple_capacitor/` | Electrostatics | `capacitor_from_sl.mesh` | Parallel plate capacitor, fringing fields, capacitance |
 | `solenoid/` | Magnetostatics | `solenoid.mesh` | Axisymmetric solenoid, inductance |
-| `current_loop/` | Magnetostatics | `loop.mesh` | Single current loop with an analytical hand calculation notebook |
+| `current_loop/` | Magnetostatics + MQS | `loop.mesh` | Single current loop with an analytical hand calculation notebook, plus a low-frequency MQS cross-check |
 | `eddy_current/` | Magnetoquasistatics | `eddy_current.mesh` | Conducting cylinder in an AC field, skin effect, losses |
 
 Each directory contains a `config.json` and its `.geo` source geometry. The generated
 `.mesh` files are committed, so the examples run without installing Gmsh.
 `simple_capacitor/`, `solenoid/`, and `eddy_current/` also include a `README.md` with the
 detailed problem description; `current_loop/` includes `hand_calc.ipynb` instead.
+
+`current_loop/` additionally ships `config_mqs_lowfreq.json`, which solves the same mesh
+with the magnetoquasistatic solver at 0.1 Hz. Because `physics_type` is a per-file
+setting, the cross-check has to be a separate config rather than an extra scenario. See
+[Cross-checking magnetostatics against MQS](#cross-checking-magnetostatics-against-mqs).
 
 ## Quick Start
 
@@ -91,6 +102,97 @@ Visualize with:
 paraview examples/simple_capacitor/"results_electrostatics_Top Plate"/data.pvd
 gmsh <scenario>.results.msh
 ```
+
+## Cross-checking magnetostatics against MQS
+
+As the frequency goes to zero the magnetoquasistatic curl-curl system loses its
+`j*omega*sigma` term and reduces to the magnetostatic one, so the two solvers should
+agree on the same mesh. `current_loop/` exercises this:
+
+```bash
+./build/mfem-electromag examples/current_loop/config.json              # magnetostatic
+./build/mfem-electromag examples/current_loop/config_mqs_lowfreq.json  # MQS at 0.1 Hz
+```
+
+The two configs are identical apart from `physics_type`, the added `frequency`, and the
+conductivity the MQS run needs. Enable `output_gmsh` on both and compare the
+magnetostatic `A` against the MQS `A_Real` node-for-node. With the shipped mesh:
+
+| Quantity | Result |
+|----------|--------|
+| `max abs(A)` (magnetostatic) | 1.007e-06 |
+| `max abs(A - A_Real)` | 5.9e-10 (5.9e-04 relative) |
+| `max abs(A_Imag)` | 4.0e-13 (4.0e-07 relative) |
+
+The real parts agree to ~0.06% and the quadrature component is seven orders of magnitude
+below the field, which is the expected low-frequency limit.
+
+> **Make the check meaningful.** The loop must be a *conducting massive* terminal
+> (`"sigma": 5.8e7`, `"conductor_type": "massive"`). With `sigma: 0` everywhere the MQS
+> system has no imaginary part at all, so it reproduces the magnetostatic answer to
+> round-off at **any** frequency — the comparison passes perfectly while testing nothing.
+> Verify the run reports `massive port assembly (1 ports)` and a nonzero Joule loss.
+
+## Validating inductance against the hand calculation
+
+The cross-check above only proves the two solvers agree with *each other*. To pin the
+absolute scale, `current_loop/hand_calc.ipynb` derives a closed-form self-inductance and
+the solver is compared against it.
+
+The notebook's `A_phi(r, z)` is a *filamentary* loop expression, so it diverges as
+`r -> a` and cannot yield a self-inductance on its own — that is why the sampling cell
+uses `r = 0.0999` rather than `0.1`. For a conductor of finite cross-section the
+singularity is removed by substituting the geometric mean distance of the section. For a
+square of side `w`, `r_eq = 0.2235 * (w + h)`, which already carries the internal
+inductance, so Grover's thin-ring formula applies in its `-2` form:
+
+```
+L = mu_0 * a * (ln(8a / r_eq) - 2)
+```
+
+For the shipped geometry (`a = 0.1 m`, `w = 0.002 m`) this gives `r_eq = 8.94e-4 m` and
+`L = 6.028e-07 H`. Neither example config computes an inductance by default — both run
+`analysis_type: "field"`. To get the matrix, set `"analysis_type": "coupling_matrix"`,
+which writes `inductance_matrix.csv` (magnetostatics) or
+`inductance_matrix_<scenario>_<freq>Hz.csv` (MQS):
+
+| Solve | L [H] | Error vs. analytic |
+|-------|-------|--------------------|
+| Analytic (GMD ring) | 6.0277e-07 | — |
+| Magnetostatic | 6.0236e-07 | -0.07% |
+| MQS @ 0.1 Hz | 6.0236e-07 | -0.07% |
+
+The residual is **almost entirely far-field truncation**, not discretization and not the
+GMD approximation. Imposing `A_phi = 0` at a finite radius removes field energy that
+physically extends past the boundary, which biases the inductance low. Sweeping the
+domain size shows a clean `1/D` decay:
+
+| Domain `D` | `D/a` | Error |
+|---|---|---|
+| 0.5 m | 5 | -0.49% |
+| 1.0 m | 10 | -0.20% |
+| 4.0 m | 40 | -0.06% |
+| 16.0 m | 160 | -0.03% |
+
+Richardson-extrapolating to `D -> infinity` gives `6.0265e-07 H`, within -0.013% of the
+closed form — so the solver reproduces Grover's formula to about a part in 10^4 once the
+boundary is moved out. The test meshes therefore use `D/a = 40` and assert 0.5%. See
+[Open-Boundary Truncation](../docs/open_boundary.md) for the full study and the options
+for doing better than Dirichlet-at-a-distance.
+
+This comparison is enforced as a regression in `test/test_solvers.cpp` by
+`Magnetostatic loop inductance matches the analytic ring value` and
+`Magnetoquasistatic loop inductance matches the analytic ring value at low frequency`.
+Both are kept because they exercise genuinely different assembly paths: the magnetostatic
+case is a real stiffness solve with a prescribed current density, while the MQS case is a
+complex block system with a massive-port constraint. A scale error in only one of them —
+a missing `2*pi` from the axisymmetric measure, say — passes the existing reciprocity
+tests, which constrain only symmetry and sign.
+
+
+Raising the frequency is a useful control: at 1 kHz the same comparison gives
+`max abs(A_Imag)` of 4.0e-09 (4.0e-03 relative), four orders of magnitude larger,
+confirming the term being neglected is genuinely frequency-dependent.
 
 ## Regenerating Meshes
 
