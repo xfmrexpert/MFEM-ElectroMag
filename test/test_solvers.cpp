@@ -1130,16 +1130,60 @@ std::vector<double> GeometricPoints(double from, double to, int cells, double gr
     return points;
 }
 
-// Build a 2D axisymmetric (r, z) mesh for a single current loop. Domain
-// attribute 2 is the conductor, 1 is the surrounding air. Boundary attributes:
-// 1 = axis (r=0), 2 = outer (r=kLoopDomain), 3 = top/bottom.
-void CreateCurrentLoopMesh(const std::string& filename,
-                           int loop_cells = 4, int air_cells = 23,
-                           double growth = 1.35) {
-    const double r_lo = kLoopRadius - 0.5 * kLoopSide;
-    const double r_hi = kLoopRadius + 0.5 * kLoopSide;
-    const double z_lo = -0.5 * kLoopSide;
-    const double z_hi = 0.5 * kLoopSide;
+// SCOPE: this is a test fixture, not a mesh generator. It exists only to give
+// the analytic current-loop tests a mesh with known attributes and no external
+// tool dependency. It is a structured tensor grid over a rectangle -- it cannot
+// represent curved boundaries, non-rectangular regions, or anything with more
+// than two materials, and it is not a step toward in-tree meshing. Real
+// geometry is meshed externally (see examples/generate_meshes.sh); see
+// docs/mesh_formats.md for the generator evaluation. Do not extend this to
+// cover new geometry: add a mesh file instead.
+//
+// The (r, z) tensor grid underlying the current-loop mesh, plus the
+// element/boundary topology derived from it. Shared by the MFEM-format and
+// Netgen-format writers below so that both emit the SAME geometry, elements
+// and attributes; only the serialization differs. That is what makes the
+// cross-format inductance comparison meaningful.
+struct CurrentLoopGrid {
+    std::vector<double> rs, zs;
+    double r_lo, r_hi, z_lo, z_hi;
+
+    int nr() const { return static_cast<int>(rs.size()) - 1; }
+    int nz() const { return static_cast<int>(zs.size()) - 1; }
+    int nvr() const { return nr() + 1; }
+    int vid(int i, int j) const { return j * nvr() + i; }
+
+    // Domain attribute 2 is the conductor, 1 the surrounding air.
+    int ElementAttribute(int i, int j) const {
+        const double rc = 0.5 * (rs[i] + rs[i + 1]);
+        const double zc = 0.5 * (zs[j] + zs[j + 1]);
+        const bool in_loop = rc > r_lo && rc < r_hi && zc > z_lo && zc < z_hi;
+        return in_loop ? 2 : 1;
+    }
+
+    // Boundary attributes: 1 = axis (r=0), 2 = outer (r=kLoopDomain),
+    // 3 = top/bottom. Returned as {attr, va, vb} with 0-based vertex ids.
+    std::vector<std::array<int, 3>> BoundaryElements() const {
+        std::vector<std::array<int, 3>> bdr;
+        for (int j = 0; j < nz(); ++j) {
+            bdr.push_back({ 1, vid(0, j),      vid(0, j + 1) });
+            bdr.push_back({ 2, vid(nr(), j),   vid(nr(), j + 1) });
+        }
+        for (int i = 0; i < nr(); ++i) {
+            bdr.push_back({ 3, vid(i, 0),      vid(i + 1, 0) });
+            bdr.push_back({ 3, vid(i, nz()),   vid(i + 1, nz()) });
+        }
+        return bdr;
+    }
+};
+
+CurrentLoopGrid BuildCurrentLoopGrid(int loop_cells = 4, int air_cells = 23,
+                                     double growth = 1.35) {
+    CurrentLoopGrid g;
+    g.r_lo = kLoopRadius - 0.5 * kLoopSide;
+    g.r_hi = kLoopRadius + 0.5 * kLoopSide;
+    g.z_lo = -0.5 * kLoopSide;
+    g.z_hi = 0.5 * kLoopSide;
 
     auto build_axis = [&](double lo, double hi, double far_lo, double far_hi) {
         std::vector<double> inner = GeometricPoints(lo, far_lo, air_cells, growth);
@@ -1153,13 +1197,21 @@ void CreateCurrentLoopMesh(const std::string& filename,
         return coords;
     };
 
-    const std::vector<double> rs = build_axis(r_lo, r_hi, 0.0, kLoopDomain);
-    const std::vector<double> zs = build_axis(z_lo, z_hi, -kLoopDomain, kLoopDomain);
+    g.rs = build_axis(g.r_lo, g.r_hi, 0.0, kLoopDomain);
+    g.zs = build_axis(g.z_lo, g.z_hi, -kLoopDomain, kLoopDomain);
+    return g;
+}
 
-    const int nr = static_cast<int>(rs.size()) - 1;
-    const int nz = static_cast<int>(zs.size()) - 1;
-    const int nvr = nr + 1;
-    auto vid = [nvr](int i, int j) { return j * nvr + i; };
+// Build a 2D axisymmetric (r, z) mesh for a single current loop. Domain
+// attribute 2 is the conductor, 1 is the surrounding air. Boundary attributes:
+// 1 = axis (r=0), 2 = outer (r=kLoopDomain), 3 = top/bottom.
+void CreateCurrentLoopMesh(const std::string& filename,
+                           int loop_cells = 4, int air_cells = 23,
+                           double growth = 1.35) {
+    const CurrentLoopGrid g =
+        BuildCurrentLoopGrid(loop_cells, air_cells, growth);
+    const int nr = g.nr();
+    const int nz = g.nz();
 
     std::ofstream m(filename);
     m << "MFEM mesh v1.0\n\n";
@@ -1167,42 +1219,90 @@ void CreateCurrentLoopMesh(const std::string& filename,
 
     m << "elements\n" << (2 * nr * nz) << "\n";
     for (int j = 0; j < nz; ++j) {
-        const double zc = 0.5 * (zs[j] + zs[j + 1]);
         for (int i = 0; i < nr; ++i) {
-            const double rc = 0.5 * (rs[i] + rs[i + 1]);
-            const bool in_loop = rc > r_lo && rc < r_hi && zc > z_lo && zc < z_hi;
-            const int attribute = in_loop ? 2 : 1;
-            const int v00 = vid(i, j);
-            const int v10 = vid(i + 1, j);
-            const int v11 = vid(i + 1, j + 1);
-            const int v01 = vid(i, j + 1);
+            const int attribute = g.ElementAttribute(i, j);
+            const int v00 = g.vid(i, j);
+            const int v10 = g.vid(i + 1, j);
+            const int v11 = g.vid(i + 1, j + 1);
+            const int v01 = g.vid(i, j + 1);
             m << attribute << " 2 " << v00 << " " << v10 << " " << v11 << "\n";
             m << attribute << " 2 " << v00 << " " << v11 << " " << v01 << "\n";
         }
     }
     m << "\n";
 
-    std::vector<std::array<int, 3>> bdr; // {attr, va, vb}
-    for (int j = 0; j < nz; ++j) {
-        bdr.push_back({ 1, vid(0, j),  vid(0, j + 1) });
-        bdr.push_back({ 2, vid(nr, j), vid(nr, j + 1) });
-    }
-    for (int i = 0; i < nr; ++i) {
-        bdr.push_back({ 3, vid(i, 0),  vid(i + 1, 0) });
-        bdr.push_back({ 3, vid(i, nz), vid(i + 1, nz) });
-    }
-
+    const std::vector<std::array<int, 3>> bdr = g.BoundaryElements();
     m << "boundary\n" << bdr.size() << "\n";
     for (const auto& b : bdr) {
         m << b[0] << " 1 " << b[1] << " " << b[2] << "\n";
     }
     m << "\n";
 
-    m << "vertices\n" << (nvr * (nz + 1)) << "\n2\n";
+    m << "vertices\n" << (g.nvr() * (nz + 1)) << "\n2\n";
     m << std::setprecision(17);
     for (int j = 0; j <= nz; ++j) {
-        for (int i = 0; i < nvr; ++i) {
-            m << rs[i] << " " << zs[j] << "\n";
+        for (int i = 0; i < g.nvr(); ++i) {
+            m << g.rs[i] << " " << g.zs[j] << "\n";
+        }
+    }
+    m.close();
+}
+
+// The same current-loop geometry written in Netgen's 2D "areamesh2" format,
+// which MFEM dispatches to ReadNetgen2DMesh().
+//
+// This exists to exercise a mesh format that carries NO named groups at all.
+// MFEM only populates attribute_sets for the MFEM v1.3+, Gmsh and Cubit
+// readers; the Netgen readers produce bare integer attributes and nothing else.
+// A configuration that resolved group names through mesh-provided names would
+// therefore silently fail here, so pairing this writer with the analytic
+// inductance assertion is a direct test that name -> attribute binding comes
+// from the config alone.
+//
+// Format (all indices 1-based, no header fields beyond the type line):
+//   areamesh2
+//   <n_bdr>            then n_bdr lines of: attr v1 v2
+//   <n_elem>           then n_elem lines of: attr nverts v1 ... vn
+//   <n_vert>           then n_vert lines of: r z
+void CreateCurrentLoopNetgenMesh(const std::string& filename,
+                                 int loop_cells = 4, int air_cells = 23,
+                                 double growth = 1.35) {
+    const CurrentLoopGrid g =
+        BuildCurrentLoopGrid(loop_cells, air_cells, growth);
+    const int nr = g.nr();
+    const int nz = g.nz();
+
+    std::ofstream m(filename);
+    m << "areamesh2\n\n";
+
+    // Boundary elements come FIRST in this format, unlike the MFEM format.
+    const std::vector<std::array<int, 3>> bdr = g.BoundaryElements();
+    m << bdr.size() << "\n";
+    for (const auto& b : bdr) {
+        m << b[0] << " " << (b[1] + 1) << " " << (b[2] + 1) << "\n";
+    }
+    m << "\n";
+
+    // Triangles, split exactly as the MFEM writer does.
+    m << (2 * nr * nz) << "\n";
+    for (int j = 0; j < nz; ++j) {
+        for (int i = 0; i < nr; ++i) {
+            const int attribute = g.ElementAttribute(i, j);
+            const int v00 = g.vid(i, j) + 1;
+            const int v10 = g.vid(i + 1, j) + 1;
+            const int v11 = g.vid(i + 1, j + 1) + 1;
+            const int v01 = g.vid(i, j + 1) + 1;
+            m << attribute << " 3 " << v00 << " " << v10 << " " << v11 << "\n";
+            m << attribute << " 3 " << v00 << " " << v11 << " " << v01 << "\n";
+        }
+    }
+    m << "\n";
+
+    m << (g.nvr() * (nz + 1)) << "\n";
+    m << std::setprecision(17);
+    for (int j = 0; j <= nz; ++j) {
+        for (int i = 0; i < g.nvr(); ++i) {
+            m << g.rs[i] << " " << g.zs[j] << "\n";
         }
     }
     m.close();
@@ -1874,6 +1974,56 @@ TEST_CASE("Magnetoquasistatic loop inductance matches the analytic ring value at
 
     fs::remove(matrix_file);
     fs::remove(resistance_file);
+    fs::remove(mesh_file);
+}
+
+
+// Feasibility probe for swapping mesh generators (see docs/mesh_formats.md).
+//
+// Identical geometry to the magnetostatic test above, but read from a Netgen
+// areamesh2 file instead of an MFEM one. Netgen carries no named groups
+// whatsoever, so this passes only if group name -> attribute binding is
+// resolved entirely from the configuration. The config below is byte-identical
+// to the MFEM-mesh case apart from the mesh path: notably, attribute_ids did
+// NOT have to change, because both writers assign the same attributes.
+//
+// Guarding this with the analytic value rather than a golden number means a
+// format misread (swapped element/boundary blocks, off-by-one vertex indexing)
+// shows up as a wrong inductance rather than as a plausible-looking solve.
+TEST_CASE("Magnetostatic loop inductance is mesh-format independent (Netgen)",
+          "[solvers][analytic][magnetostatic][coupling][axisymmetric][netgen]") {
+    const std::string mesh_file = "test_current_loop_netgen.mesh";
+    const std::string matrix_file = "inductance_matrix.csv";
+    CreateCurrentLoopNetgenMesh(mesh_file);
+
+    json config = MakeCurrentLoopConfig("magnetostatics", mesh_file, 0.0);
+    config["terminals"] = json::array({
+        {{"name", "LoopCurrent"}, {"quantity", "current"},
+         {"entity_group", "LoopDomain"}}
+    });
+
+    mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+
+    // The Netgen reader must have produced the attributes the config names,
+    // and must NOT have produced any named sets. If MFEM ever starts naming
+    // Netgen groups, this is the line that will say so.
+    REQUIRE(mesh.Dimension() == 2);
+    REQUIRE(mesh.attributes.Max() == 2);
+    REQUIRE(mesh.bdr_attributes.Max() == 3);
+    REQUIRE(mesh.attribute_sets.GetAttributeSetNames().empty());
+    REQUIRE(mesh.bdr_attribute_sets.GetAttributeSetNames().empty());
+
+    MagnetostaticSolver solver(mesh, DecodeConfig(config));
+    solver.Setup();
+    solver.Run();
+    solver.SaveAnalysis();
+
+    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    REQUIRE(matrix.labels == std::vector<std::string>{"LoopCurrent"});
+    REQUIRE(matrix.values[0][0] ==
+        Catch::Approx(AnalyticLoopInductance()).epsilon(0.005));
+
+    fs::remove(matrix_file);
     fs::remove(mesh_file);
 }
 

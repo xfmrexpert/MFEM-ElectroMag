@@ -58,12 +58,7 @@ private:
 
     // ---- Public API ---------------------------------------------------------
 public:
-    PhysicsSolver(mfem::Mesh& m, const ProblemConfig& c) : mesh(m), config(c) {
-        // Named groups become mesh attribute sets up front, before any Setup()
-        // asks for a marker. Attribute values are refinement-invariant, so this
-        // registration survives every AMR pass without being redone.
-        RegisterEntityGroups();
-    }
+    PhysicsSolver(mfem::Mesh& m, const ProblemConfig& c) : mesh(m), config(c) {}
 
     // Virtual destructor is essential for unique_ptr polymorphism
     virtual ~PhysicsSolver() = default;
@@ -146,12 +141,41 @@ protected:
         return mfem::AttributeSets::AttrToMarker(max_attr, ids);
     }
 
-    // Marker (1/0 over bdr attributes) for a named entity group. Resolved through
-    // the mesh's bdr_attribute_sets, populated once by RegisterEntityGroups().
+    // Marker (1/0 over bdr attributes) for a named entity group.
+    //
+    // Resolved from the group's own AttributeIds, which the configuration
+    // supplies and validation has already checked. The mesh's
+    // bdr_attribute_sets are deliberately NOT consulted: only three of MFEM's
+    // readers populate them (MFEM v1.3+, Gmsh $PhysicalNames, and Cubit), so
+    // depending on them would make an otherwise portable configuration resolve
+    // correctly for some mesh formats and silently not at all for others --
+    // Netgen and VTK carry no names whatsoever. The config is the single
+    // source of truth for name -> attribute binding.
+    //
+    // Ids the mesh does not carry are dropped rather than rejected: a boundary
+    // group naming an attribute absent from this mesh contributes no DOFs,
+    // which is the same outcome as omitting it. (Domain groups take the
+    // opposite line -- see DomainMarkerFromAttrs.)
     mfem::Array<int> MarkerFromGroup(const std::string& group_name) const {
-        MFEM_VERIFY(config.EntityGroups.count(group_name) > 0,
+        const auto entry = config.EntityGroups.find(group_name);
+        MFEM_VERIFY(entry != config.EntityGroups.end(),
             "Unknown entity group '" + group_name + "'.");
-        return BoundaryMarker(group_name);
+        MFEM_VERIFY(entry->second.IsBoundary(mesh.Dimension()),
+            "Entity group '" + group_name + "' declares dim " +
+            std::to_string(entry->second.Dim) + ", but is used here as a "
+            "boundary, which for this " + std::to_string(mesh.Dimension()) +
+            "D mesh requires dim " + std::to_string(mesh.Dimension() - 1) + ".");
+
+        const int max_bdr_attr = mesh.bdr_attributes.Size() > 0
+            ? mesh.bdr_attributes.Max() : 0;
+        mfem::Array<int> marker(max_bdr_attr);
+        marker = 0;
+        for (int a : entry->second.AttributeIds) {
+            if (a > 0 && a <= max_bdr_attr && mesh.bdr_attributes.Find(a) >= 0) {
+                marker[a - 1] = 1;
+            }
+        }
+        return marker;
     }
 
     // Region/material that claims a given domain attribute, or nullptr if none
@@ -436,68 +460,6 @@ protected:
 
     // ---- Base-class internals -----------------------------------------------
 private:
-
-    // Publish the configuration's named entity groups into the mesh's own
-    // AttributeSets containers, so a group name resolves to a marker through
-    // MFEM rather than through bespoke marker-building code here. Called once
-    // from the constructor; attribute values are refinement-invariant, so no
-    // derived solver ever needs to repeat it.
-    //
-    // Each group is registered into exactly ONE container, chosen by the entity
-    // dimension it declares. Registering into both would defeat the purpose of
-    // that declaration: Gmsh numbers physical groups independently per
-    // dimension, so a model may legitimately use the same id for a curve and a
-    // surface, and a group registered into both namespaces would silently
-    // resolve to whichever unrelated entity happens to share its number.
-    void RegisterEntityGroups() {
-        const int mesh_dim = mesh.Dimension();
-        for (const auto& [name, group] : config.EntityGroups) {
-            MFEM_VERIFY(group.IsDomain(mesh_dim) || group.IsBoundary(mesh_dim),
-                "Entity group '" + name + "' declares dim " +
-                std::to_string(group.Dim) + ", which is neither the mesh "
-                "dimension (" + std::to_string(mesh_dim) + ", a domain) nor one "
-                "below it (" + std::to_string(mesh_dim - 1) + ", a boundary).");
-            if (group.IsBoundary(mesh_dim)) {
-                RegisterGroup(mesh.bdr_attribute_sets, mesh.bdr_attributes,
-                              name, group.AttributeIds);
-            }
-            else {
-                RegisterGroup(mesh.attribute_sets, mesh.attributes,
-                              name, group.AttributeIds);
-            }
-        }
-    }
-
-    // Register only the ids that exist in @p mesh_attrs under @p name. An
-    // AttributeSet holding an id the container does not know about would trip
-    // AttrToMarker's max-attribute assertion at query time, and an empty set
-    // cannot be queried at all (Array::Max() on an empty array), so an
-    // all-foreign group is simply left unregistered; BoundaryMarker() then
-    // returns an all-zero marker, matching the previous behaviour.
-    static void RegisterGroup(mfem::AttributeSets& sets,
-                              const mfem::Array<int>& mesh_attrs,
-                              const std::string& name,
-                              const std::vector<int>& attrs) {
-        mfem::Array<int> present;
-        present.Reserve(static_cast<int>(attrs.size()));
-        for (int a : attrs) {
-            if (a > 0 && mesh_attrs.Find(a) >= 0) present.Append(a);
-        }
-        if (present.Size() == 0) return;
-        sets.SetAttributeSet(name, present);
-    }
-
-    // Unchecked marker lookup behind MarkerFromGroup(): returns an all-zero
-    // marker when the group names no boundary attribute of this mesh. Solvers
-    // go through MarkerFromGroup(), which also rejects unknown group names.
-    mfem::Array<int> BoundaryMarker(const std::string& name) const {
-        if (!mesh.bdr_attribute_sets.AttributeSetExists(name)) {
-            mfem::Array<int> none(mesh.bdr_attributes.Max());
-            none = 0;
-            return none;
-        }
-        return mesh.bdr_attribute_sets.GetAttributeSetMarker(name);
-    }
 
     // Per-domain-attribute values behind MaterialCoefficient(), indexed as
     // PWConstCoefficient expects (attribute a -> element a-1). Attributes that
