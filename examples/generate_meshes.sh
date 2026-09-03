@@ -85,6 +85,11 @@ generate_mesh \
     "solenoid/solenoid.mesh" \
     "Axisymmetric Solenoid"
 
+generate_mesh \
+    "two_loops/case.geo" \
+    "two_loops/case.mesh" \
+    "Two Loops (Coupled Inductors)"
+
 echo ""
 echo "==================================="
 echo "All meshes generated successfully!"
@@ -95,3 +100,4 @@ echo "  cd ../build"
 echo "  ./mfem-electromag ../examples/eddy_current/config.json"
 echo "  ./mfem-electromag ../examples/simple_capacitor/config.json"
 echo "  ./mfem-electromag ../examples/solenoid/config.json"
+echo "  ./mfem-electromag ../examples/two_loops/config.json"

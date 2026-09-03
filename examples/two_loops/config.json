@@ -1,0 +1,146 @@
+{
+  "simulation": {
+    "physics_type": "magnetoquasistatics",
+    "analysis_type": "coupling_matrix",
+    "geometry_type": "axisymmetric",
+    "mesh": "case.msh",
+    "order": 2,
+    "solver_tolerance": 1E-12,
+    "solver_max_iter": 2000,
+    "solver_print_level": 1,
+    "output_gmsh": true
+  },
+  "entity_groups": [
+    {
+      "name": "InteriorDomain",
+      "dim": 2,
+      "attribute_ids": [
+        13
+      ]
+    },
+    {
+      "name": "Axis",
+      "dim": 1,
+      "attribute_ids": [
+        1
+      ]
+    },
+    {
+      "name": "Dirichlet",
+      "dim": 1,
+      "attribute_ids": [
+        2,
+        4,
+        3
+      ]
+    },
+    {
+      "name": "Wdg0Turn0Std0Ins",
+      "dim": 2,
+      "attribute_ids": [
+        7
+      ]
+    },
+    {
+      "name": "Wdg0Turn0Std0Cond",
+      "dim": 2,
+      "attribute_ids": [
+        8
+      ]
+    },
+    {
+      "name": "Wdg1Turn0Std0Ins",
+      "dim": 2,
+      "attribute_ids": [
+        11
+      ]
+    },
+    {
+      "name": "Wdg1Turn0Std0Cond",
+      "dim": 2,
+      "attribute_ids": [
+        12
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "Oil",
+      "properties": {
+        "mu_r": 1
+      }
+    },
+    {
+      "name": "Paper",
+      "properties": {
+        "mu_r": 1
+      }
+    },
+    {
+      "name": "Copper",
+      "properties": {
+        "mu_r": 1,
+        "sigma": 59600000
+      }
+    }
+  ],
+  "regions": [
+    {
+      "name": "InteriorDomain",
+      "entity_group": "InteriorDomain",
+      "material": "Oil"
+    },
+    {
+      "name": "Wdg0Turn0Std0Ins",
+      "entity_group": "Wdg0Turn0Std0Ins",
+      "material": "Paper"
+    },
+    {
+      "name": "Wdg0Turn0Std0Cond",
+      "entity_group": "Wdg0Turn0Std0Cond",
+      "material": "Copper"
+    },
+    {
+      "name": "Wdg1Turn0Std0Ins",
+      "entity_group": "Wdg1Turn0Std0Ins",
+      "material": "Paper"
+    },
+    {
+      "name": "Wdg1Turn0Std0Cond",
+      "entity_group": "Wdg1Turn0Std0Cond",
+      "material": "Copper"
+    }
+  ],
+  "boundary_conditions": [
+    {
+      "name": "Axis",
+      "entity_group": "Axis",
+      "type": "dirichlet",
+      "value": 0
+    },
+    {
+      "name": "Dirichlet",
+      "entity_group": "Dirichlet",
+      "type": "dirichlet",
+      "value": 0
+    }
+  ],
+  "terminals": [
+    {
+      "name": "Wdg0Turn0Std0Cond",
+      "quantity": "current",
+      "entity_group": "Wdg0Turn0Std0Cond"
+    },
+    {
+      "name": "Wdg1Turn0Std0Cond",
+      "quantity": "current",
+      "entity_group": "Wdg1Turn0Std0Cond"
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "LMatrix",
+      "frequency": 60
+    }
+  ]
+}
