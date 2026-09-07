@@ -882,6 +882,19 @@ double RelativeComplexL2Error(
     return std::sqrt(error_squared / exact_squared);
 }
 
+// Observed order of accuracy between two errors on meshes differing by a
+// uniform refinement factor. For e ~ C h^p and h halving, this returns p.
+//
+// This is strictly stronger than asserting the errors merely shrink: a solver
+// that silently drops from O(h^2) to O(h) still reduces error under refinement
+// and would pass a monotonicity check, but shows up immediately here.
+double ObservedOrder(double coarse_error, double fine_error,
+                     double refinement_ratio = 2.0) {
+    REQUIRE(coarse_error > 0.0);
+    REQUIRE(fine_error > 0.0);
+    return std::log(coarse_error / fine_error) / std::log(refinement_ratio);
+}
+
 struct CsvMatrix {
     std::vector<std::string> labels;
     std::vector<std::vector<double>> values;
@@ -1862,6 +1875,69 @@ TEST_CASE("Axisymmetric capacitance matches the analytic coaxial value",
     fs::remove(mesh_file);
 }
 
+// The single-mesh check above pins the coaxial capacitance to 1% on one
+// particular discretization. That cannot distinguish "correct and converging"
+// from "wrong but inside the tolerance at nr = 64". This sweep refines the
+// radial direction and measures the order of accuracy instead.
+TEST_CASE("Axisymmetric coaxial capacitance converges at the expected order",
+          "[solvers][analytic][electrostatic][coupling][axisymmetric][convergence]") {
+    constexpr double r_inner = 0.01;
+    constexpr double r_outer = 0.03;
+    constexpr double height = 0.05;
+    const double analytic_capacitance = Constants::TWO_PI * Constants::EPSILON_0 *
+        height / std::log(r_outer / r_inner);
+
+    std::vector<double> errors;
+    for (const int nr : {8, 16, 32}) {
+        const std::string mesh_file =
+            "test_coax_convergence_" + std::to_string(nr) + ".mesh";
+        const std::string matrix_file = "capacitance_matrix.csv";
+        CreateCoaxMesh(mesh_file, r_inner, r_outer, height, nr, 1);
+
+        json config = MakeCoaxAmrConfig(mesh_file, 1);
+        config["simulation"]["amr"]["enabled"] = false;
+        config["simulation"]["analysis_type"] = "coupling_matrix";
+
+        mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
+        ElectrostaticSolver solver(mesh, DecodeConfig(config));
+        solver.Setup();
+        solver.Run();
+        solver.SaveAnalysis();
+
+        const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+        errors.push_back(std::abs(matrix.values[0][0] - analytic_capacitance) /
+                         analytic_capacitance);
+
+        fs::remove(matrix_file);
+        fs::remove(mesh_file);
+    }
+
+    REQUIRE(errors[1] < errors[0]);
+    REQUIRE(errors[2] < errors[1]);
+
+    const double first_order = ObservedOrder(errors[0], errors[1]);
+    const double second_order = ObservedOrder(errors[1], errors[2]);
+
+    // Capacitance is an energy-derived quantity, so for order-1 elements its
+    // error converges at O(h^2) even though the field gradient itself is only
+    // O(h). Measured: 1.991 and 1.998, from relative errors 2.03e-3, 5.11e-4,
+    // 1.28e-4 -- close enough to the asymptotic rate to bound tightly.
+    //
+    // The lower bound is the real assertion: it fails if the axisymmetric
+    // 2*pi*r measure or the energy extraction degrades to first order. The
+    // upper bound catches a pre-asymptotic coarse mesh flattering the study.
+    REQUIRE(first_order > 1.8);
+    REQUIRE(first_order < 2.2);
+    REQUIRE(second_order > 1.8);
+    REQUIRE(second_order < 2.2);
+
+    // The CSV carries 6 significant digits, so relative errors approaching
+    // 1e-6 are quantization rather than discretization. The finest mesh sits
+    // at 1.28e-4, two decades clear; assert that margin so a future refinement
+    // level cannot silently start measuring CSV rounding instead of the solve.
+    REQUIRE(errors.back() > 1.0e-5);
+}
+
 // The inductance matrix must be built from each MEASURED terminal's winding
 // functional, not from the driving scenario's source. Reusing the drive makes
 // every row of a column identical, which the asymmetry checks below reject.
@@ -2332,8 +2408,24 @@ TEST_CASE("Magnetoquasistatic skin-effect solution converges under mesh refineme
 
     REQUIRE(errors[1] < errors[0]);
     REQUIRE(errors[2] < errors[1]);
-    REQUIRE(errors[0] / errors[1] > 2.5);
-    REQUIRE(errors[1] / errors[2] > 2.5);
+
+    // Order-1 elements in the L2 norm converge at O(h^2), so the observed
+    // order should sit near 2. Measured: 1.95 and 1.86 (the second is slightly
+    // low because the 60 Hz skin depth is still only marginally resolved on
+    // the coarse meshes, not because the rate is degrading).
+    //
+    // Bounding the rate on both sides is the point. The previous form asserted
+    // only errors[i]/errors[i+1] > 2.5, i.e. order > 1.32, which a solver that
+    // silently fell to first order would still pass. The upper bound catches
+    // the opposite failure: a rate well above 2 usually means the coarse mesh
+    // is in a pre-asymptotic regime and the study is not measuring what it
+    // claims to.
+    const double first_order = ObservedOrder(errors[0], errors[1]);
+    const double second_order = ObservedOrder(errors[1], errors[2]);
+    REQUIRE(first_order > 1.7);
+    REQUIRE(first_order < 2.4);
+    REQUIRE(second_order > 1.7);
+    REQUIRE(second_order < 2.4);
 }
 
 TEST_CASE("MQS coupling supports mixed massive and stranded conductors",

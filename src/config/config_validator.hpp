@@ -117,6 +117,7 @@ private:
             CheckFieldType(sim, "solver_print_level", "simulation.solver_print_level", ExpectedType::Integer);
             CheckFieldType(sim, "output_paraview", "simulation.output_paraview", ExpectedType::Boolean);
             CheckFieldType(sim, "output_gmsh", "simulation.output_gmsh", ExpectedType::Boolean);
+            CheckFieldType(sim, "gmsh_format", "simulation.gmsh_format", ExpectedType::String);
             CheckFieldType(sim, "results_path", "simulation.results_path", ExpectedType::String);
             CheckFieldType(sim, "amr", "simulation.amr", ExpectedType::Object);
 
@@ -311,6 +312,13 @@ private:
             std::string a = sim["analysis_type"];
             if (a != "field" && a != "coupling_matrix") {
                 AddError("simulation.analysis_type", "Invalid analysis_type '" + a + "'. Must be 'field' or 'coupling_matrix'");
+            }
+        }
+
+        if (sim.contains("gmsh_format") && sim["gmsh_format"].is_string()) {
+            std::string f = sim["gmsh_format"];
+            if (f != "2.2" && f != "4.1") {
+                AddError("simulation.gmsh_format", "Invalid gmsh_format '" + f + "'. Must be '2.2' or '4.1'");
             }
         }
 

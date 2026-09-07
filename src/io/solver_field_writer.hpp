@@ -28,14 +28,19 @@ public:
 	// @p solution_order is the order of the H1 space the primary fields live in;
 	// it drives both the ParaView Lagrange cell order and the order of the
 	// native Gmsh Lagrange elements emitted by WriteGmsh.
+	// @p gmsh_version selects the MSH format of the results file; it defaults to
+	// 2.2, which is what the downstream C# consumer reads.
 	SolverFieldWriter(mfem::Mesh& mesh,
 					  std::string results_directory,
 					  std::string mesh_path,
-					  int solution_order)
+					  int solution_order,
+					  gmsh_results::MshVersion gmsh_version =
+						  gmsh_results::MshVersion::V2_2)
 		: mesh(mesh),
 		  results_directory(std::move(results_directory)),
 		  mesh_path(std::move(mesh_path)),
-		  solution_order(solution_order) {}
+		  solution_order(solution_order),
+		  gmsh_version(gmsh_version) {}
 
 	// ParaView serializer. Primary scalars are registered at native (high) order
 	// so ParaView's Lagrange cells render them faithfully; derived coefficients
@@ -131,7 +136,8 @@ public:
 			}
 		}
 
-		gmsh_results::WriteGmshResults(out_path.string(), mesh, order, views);
+		gmsh_results::WriteGmshResults(out_path.string(), mesh, order, views,
+									   gmsh_version);
 		Reporter().Diagnostic("Wrote " + out_path.string());
 	}
 
@@ -140,6 +146,7 @@ private:
 	std::string results_directory;
 	std::string mesh_path;
 	int solution_order;
+	gmsh_results::MshVersion gmsh_version;
 
 	StatusReporter& Reporter() const {
 		return StatusReporter::Global();

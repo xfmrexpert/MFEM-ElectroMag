@@ -255,3 +255,72 @@ TEST_CASE("Axisymmetric boundary load includes radial measure",
    REQUIRE(load.Sum()
            == Catch::Approx(Constants::TWO_PI * 6.0).epsilon(1.0e-12));
 }
+
+TEST_CASE("Curl-curl quadrature stays on positive-weight simplex rules",
+          "[axisymmetric][quadrature][curlcurl]")
+{
+   // A triangle hugging the axis: r_min/width = 1e-3 drives RadialExtraOrder
+   // far past the tabulated positive-weight range, so this is the geometry
+   // that exercises the clamp in GetRule.
+   mfem::Mesh mesh(2, 3, 1, 0, 2);
+   mesh.AddVertex(1.0e-3, 0.0);
+   mesh.AddVertex(1.0, 0.0);
+   mesh.AddVertex(1.0e-3, 1.0);
+   mesh.AddTriangle(0, 1, 2, 1);
+   mesh.FinalizeTriMesh(1, 0, true);
+
+   mfem::H1_FECollection collection(2, mesh.Dimension());
+   mfem::FiniteElementSpace space(&mesh, &collection);
+   const mfem::FiniteElement &element = *space.GetFE(0);
+   mfem::ElementTransformation &transformation =
+      *mesh.GetElementTransformation(0);
+
+   // Without the clamp this element would request an order in the
+   // Grundmann-Moller fallback range, where weights alternate in sign.
+   const mfem::IntegrationRule &rule =
+      AxisymmetricCurlCurlIntegrator::GetRule(element, element, transformation);
+   // Measured with the clamp disabled: order 125, minimum weight -1.5e17,
+   // and the element matrix loses positive definiteness.
+   REQUIRE(rule.GetOrder()
+           <= AxisymmetricCurlCurlIntegrator::kMaxPositiveWeightSimplexOrder);
+
+   double min_weight = rule.IntPoint(0).weight;
+   for (int i = 1; i < rule.GetNPoints(); ++i)
+   {
+      min_weight = std::min(min_weight, (double)rule.IntPoint(i).weight);
+   }
+   REQUIRE(min_weight > 0.0);
+
+   // The point of the clamp: the assembled operator stays positive definite.
+   // Tested by attempting a Cholesky factorization, which succeeds exactly
+   // when the matrix is positive definite. MFEM here is built without LAPACK,
+   // so this is also the check that does not need an eigensolver.
+   mfem::ConstantCoefficient reluctivity(1.0);
+   AxisymmetricCurlCurlIntegrator integrator(reluctivity, 0.0);
+   mfem::DenseMatrix matrix;
+   integrator.AssembleElementMatrix(element, transformation, matrix);
+
+   const int n = matrix.Height();
+   mfem::DenseMatrix factor(n);
+   factor = 0.0;
+   bool positive_definite = true;
+   for (int j = 0; j < n && positive_definite; ++j)
+   {
+      for (int i = j; i < n; ++i)
+      {
+         // Symmetrized entry: assembly is symmetric only up to round-off.
+         double sum = 0.5 * (matrix(i, j) + matrix(j, i));
+         for (int k = 0; k < j; ++k) { sum -= factor(i, k) * factor(j, k); }
+         if (i == j)
+         {
+            if (!(sum > 0.0)) { positive_definite = false; break; }
+            factor(j, j) = std::sqrt(sum);
+         }
+         else
+         {
+            factor(i, j) = sum / factor(j, j);
+         }
+      }
+   }
+   REQUIRE(positive_definite);
+}

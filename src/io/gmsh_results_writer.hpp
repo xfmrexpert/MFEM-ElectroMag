@@ -1,10 +1,11 @@
 // Copyright (c) 2026 T. C. Raymond
 // SPDX-License-Identifier: MIT
 //
-// Writes results in Gmsh MSH 2.2 ASCII format. The single output file contains
-// one mesh block followed by zero or more $NodeData / $ElementNodeData views.
-// View names are exposed via Gmsh's StringTags[0] and form the contract with
-// downstream consumers (e.g. TfmrLib's FEMSolution loader).
+// Writes results in Gmsh MSH ASCII format, version 2.2 (default) or 4.1. The
+// single output file contains one mesh block followed by zero or more
+// $NodeData / $ElementNodeData views. View names are exposed via Gmsh's
+// StringTags[0] and form the contract with downstream consumers (e.g.
+// TfmrLib's FEMSolution loader).
 //
 // Elements are emitted as native Gmsh Lagrange elements of the solution order
 // (types 2/9/21/23... for triangles, 3/10/36/37... for quads), so Gmsh
@@ -26,13 +27,23 @@
 // recover, or respect) is the consumer's decision, since it depends on the
 // post-processing being done.
 //
-// FORMAT SEAM: everything version-specific to MSH 2.2 is confined to
-// WriteMeshFormat, WriteMeshBlock, and WriteViewHeader. The node layout
-// (HoLayout/GetHoLayout), the MFEM->Gmsh permutation, and all field sampling
-// are format-agnostic, so an MSH 4.1 writer is a replacement of those three
-// functions rather than a rewrite.
+// FORMAT SEAM: only the MESH sections differ between MSH 2.2 and 4.1, and all
+// of that is confined to WriteMeshFormat, WriteMeshBlock22, and
+// WriteMeshBlock41 behind the WriteMeshBlock dispatcher. Gmsh's
+// post-processing sections are not versioned along with the mesh format, so
+// $InterpolationScheme, $NodeData, and $ElementNodeData are emitted
+// byte-identically for both versions. The node layout (HoLayout/GetHoLayout),
+// the MFEM->Gmsh permutation, and all field sampling are likewise
+// format-agnostic.
 //
-// Format reference: https://gmsh.info/doc/texinfo/gmsh.html#MSH-file-format-version-2-_0028Legacy_0029
+// The one semantic difference worth knowing: 2.2 stores each element's
+// attribute on the element line, whereas 4.1 stores it once per model entity
+// in $Entities and groups elements under those entities. Both paths therefore
+// round-trip the same MFEM attributes.
+//
+// Format references:
+//   2.2: https://gmsh.info/doc/texinfo/gmsh.html#MSH-file-format-version-2-_0028Legacy_0029
+//   4.1: https://gmsh.info/doc/texinfo/gmsh.html#MSH-file-format
 
 #pragma once
 
@@ -57,6 +68,22 @@
 #include "mfem.hpp"
 
 namespace gmsh_results {
+
+/// MSH file format version of the emitted mesh sections.
+///
+/// V2_2 is the default and the format the existing downstream C# consumer
+/// (TfmrLib's FEMSolution loader) understands. V4_1 is opt-in.
+enum class MshVersion { V2_2, V4_1 };
+
+/// Parse a format string ("2.2" / "4.1") as used in the simulation config.
+/// Throws std::runtime_error on an unrecognized value.
+inline MshVersion ParseMshVersion(const std::string& text) {
+    if (text == "2.2") { return MshVersion::V2_2; }
+    if (text == "4.1") { return MshVersion::V4_1; }
+    throw std::runtime_error(
+        "gmsh_results: unsupported MSH format '" + text
+        + "'; expected \"2.2\" or \"4.1\"");
+}
 
 /// Description of one Gmsh view to emit alongside the mesh block.
 struct View {
@@ -471,14 +498,15 @@ inline ExportNodes BuildExportNodes(mfem::Mesh& mesh,
     return nodes;
 }
 
-inline void WriteMeshFormat(std::ostream& out) {
-    out << "$MeshFormat\n2.2 0 8\n$EndMeshFormat\n";
+inline void WriteMeshFormat(std::ostream& out, MshVersion version) {
+    // Fields are: version, file-type (0 = ASCII), data-size (sizeof(double)).
+    out << (version == MshVersion::V4_1
+                ? "$MeshFormat\n4.1 0 8\n$EndMeshFormat\n"
+                : "$MeshFormat\n2.2 0 8\n$EndMeshFormat\n");
 }
 
-inline void WriteMeshBlock(std::ostream& out, mfem::Mesh& mesh,
-                           const ExportNodes& nodes) {
-    WriteMeshFormat(out);
-
+inline void WriteMeshBlock22(std::ostream& out, mfem::Mesh& mesh,
+                             const ExportNodes& nodes) {
     const int nv = static_cast<int>(nodes.coord.size());
     const int ne = mesh.GetNE();
 
@@ -525,6 +553,153 @@ inline void WriteMeshBlock(std::ostream& out, mfem::Mesh& mesh,
     }
     blk.append("$EndElements\n");
     out.write(blk.data(), static_cast<std::streamsize>(blk.size()));
+}
+
+// MSH 4.1 mesh sections.
+//
+// The structural difference from 2.2 is where an element's attribute lives.
+// In 2.2 every element line carries its own tags ("2 <attr> <attr>"). In 4.1
+// elements carry no tags at all; they are grouped into blocks keyed by the
+// model entity they are classified on, and a separate $Entities section maps
+// each entity to its physical tags. To preserve exactly the attribute
+// semantics the 2.2 path exposes, we synthesize one surface entity per
+// distinct element attribute, with entityTag == physicalTag == attribute.
+//
+// Node tags remain the global 1..nv numbering used by the 2.2 path, so the
+// $NodeData / $ElementNodeData sections that follow are byte-identical between
+// the two formats.
+inline void WriteMeshBlock41(std::ostream& out, mfem::Mesh& mesh,
+                             const ExportNodes& nodes) {
+    const int nv = static_cast<int>(nodes.coord.size());
+    const int ne = mesh.GetNE();
+
+    // Group elements by (attribute, gmsh element type). A single attribute may
+    // legitimately contain both triangles and quads, and MSH 4.1 requires one
+    // block per element type, so the pair is the block key. std::map keeps the
+    // emission order deterministic.
+    std::map<std::pair<int, int>, std::vector<int>> blocks;
+    for (int e = 0; e < ne; ++e) {
+        blocks[{ mesh.GetAttribute(e), nodes.elem_type[e] }].push_back(e);
+    }
+
+    // Distinct attributes become the surface entities.
+    std::vector<int> attrs;
+    for (const auto& kv : blocks) {
+        if (std::find(attrs.begin(), attrs.end(), kv.first.first) == attrs.end()) {
+            attrs.push_back(kv.first.first);
+        }
+    }
+    std::sort(attrs.begin(), attrs.end());
+
+    std::string s;
+
+    // $Entities: numPoints numCurves numSurfaces numVolumes, then one line per
+    // surface: tag, bounding box, physical tags, bounding curves (none, since
+    // we do not synthesize a curve topology).
+    s.append("$Entities\n0 0 ");
+    AppendInt(s, static_cast<long long>(attrs.size()));
+    s.append(" 0\n");
+    for (int attr : attrs) {
+        // Bounding box over the export nodes of every element with this
+        // attribute. Gmsh tolerates a loose box; it is used for display only.
+        double lo[3] = { 1e300, 1e300, 1e300 };
+        double hi[3] = { -1e300, -1e300, -1e300 };
+        for (const auto& kv : blocks) {
+            if (kv.first.first != attr) { continue; }
+            for (int e : kv.second) {
+                for (int id : nodes.elem_nodes[e]) {
+                    for (int c = 0; c < 3; ++c) {
+                        lo[c] = std::min(lo[c], nodes.coord[id][c]);
+                        hi[c] = std::max(hi[c], nodes.coord[id][c]);
+                    }
+                }
+            }
+        }
+        AppendInt(s, attr);
+        for (int c = 0; c < 3; ++c) { s.push_back(' '); AppendDouble(s, lo[c]); }
+        for (int c = 0; c < 3; ++c) { s.push_back(' '); AppendDouble(s, hi[c]); }
+        s.append(" 1 ");        // one physical tag...
+        AppendInt(s, attr);     // ...which is the attribute itself
+        s.append(" 0\n");       // zero bounding curves
+    }
+    s.append("$EndEntities\n");
+    out.write(s.data(), static_cast<std::streamsize>(s.size()));
+
+    // $Nodes: numEntityBlocks numNodes minNodeTag maxNodeTag, then per block
+    // entityDim entityTag parametric numNodesInBlock, all tags, then all
+    // coordinates. Export nodes are shared across attributes, and MSH 4.1
+    // requires each node tag to appear exactly once, so all nodes go in a
+    // single block classified on the first surface entity.
+    s.clear();
+    s.reserve(static_cast<size_t>(nv) * 48 + 128);
+    if (attrs.empty() || nv == 0) {
+        s.append("$Nodes\n0 0 0 0\n$EndNodes\n");
+    } else {
+        s.append("$Nodes\n1 ");
+        AppendInt(s, nv); s.append(" 1 "); AppendInt(s, nv); s.push_back('\n');
+        s.append("2 ");             // entityDim = 2 (surface)
+        AppendInt(s, attrs.front()); // entityTag
+        s.append(" 0 ");            // parametric = 0
+        AppendInt(s, nv); s.push_back('\n');
+        for (int i = 0; i < nv; ++i) {
+            AppendInt(s, i + 1);
+            s.push_back('\n');
+        }
+        for (int i = 0; i < nv; ++i) {
+            AppendDouble(s, nodes.coord[i][0]);
+            s.push_back(' '); AppendDouble(s, nodes.coord[i][1]);
+            s.push_back(' '); AppendDouble(s, nodes.coord[i][2]);
+            s.push_back('\n');
+        }
+        s.append("$EndNodes\n");
+    }
+    out.write(s.data(), static_cast<std::streamsize>(s.size()));
+
+    // $Elements: numEntityBlocks numElements minElementTag maxElementTag, then
+    // per block entityDim entityTag elementType numElementsInBlock followed by
+    // "elementTag nodeTag..." lines. Element tags keep the global 1..ne
+    // numbering so they still line up with $ElementNodeData below.
+    s.clear();
+    s.reserve(static_cast<size_t>(ne) * 32 + 128);
+    s.append("$Elements\n");
+    AppendInt(s, static_cast<long long>(blocks.size()));
+    s.push_back(' '); AppendInt(s, ne);
+    s.append(ne > 0 ? " 1 " : " 0 ");
+    AppendInt(s, ne);
+    s.push_back('\n');
+    for (const auto& kv : blocks) {
+        s.append("2 ");                          // entityDim = 2 (surface)
+        AppendInt(s, kv.first.first);            // entityTag = attribute
+        s.push_back(' '); AppendInt(s, kv.first.second);  // elementType
+        s.push_back(' ');
+        AppendInt(s, static_cast<long long>(kv.second.size()));
+        s.push_back('\n');
+        for (int e : kv.second) {
+            AppendInt(s, e + 1);
+            for (int id : nodes.elem_nodes[e]) {
+                s.push_back(' ');
+                AppendInt(s, id + 1);
+            }
+            s.push_back('\n');
+
+            if (s.size() > (1u << 20)) {
+                out.write(s.data(), static_cast<std::streamsize>(s.size()));
+                s.clear();
+            }
+        }
+    }
+    s.append("$EndElements\n");
+    out.write(s.data(), static_cast<std::streamsize>(s.size()));
+}
+
+inline void WriteMeshBlock(std::ostream& out, mfem::Mesh& mesh,
+                           const ExportNodes& nodes, MshVersion version) {
+    WriteMeshFormat(out, version);
+    if (version == MshVersion::V4_1) {
+        WriteMeshBlock41(out, mesh, nodes);
+    } else {
+        WriteMeshBlock22(out, mesh, nodes);
+    }
 }
 
 // Emit one $InterpolationScheme block describing the shape functions for every
@@ -752,19 +927,22 @@ inline View MakeScalarCoefficientView(const std::string& name,
     return v;
 }
 
-/// Writes the mesh and all views to @p path in MSH 2.2 ASCII, using native
+/// Writes the mesh and all views to @p path in Gmsh MSH ASCII, using native
 /// Gmsh Lagrange elements of order @p order.
 ///
-/// @param path   Destination file (will be overwritten).
-/// @param mesh   Mesh to embed. Exported at its own resolution; no refined
-///               copy is made.
-/// @param order  Lagrange order of the emitted elements and of the node layout
-///               every view is sampled on. Typically the solution order.
-/// @param views  Views to emit, in order.
+/// @param path     Destination file (will be overwritten).
+/// @param mesh     Mesh to embed. Exported at its own resolution; no refined
+///                 copy is made.
+/// @param order    Lagrange order of the emitted elements and of the node layout
+///                 every view is sampled on. Typically the solution order.
+/// @param views    Views to emit, in order.
+/// @param version  MSH format of the mesh sections. Defaults to 2.2, which is
+///                 what the downstream C# consumer reads; 4.1 is opt-in.
 inline void WriteGmshResults(const std::string& path,
                              mfem::Mesh& mesh,
                              int order,
-                             const std::vector<View>& views) {
+                             const std::vector<View>& views,
+                             MshVersion version = MshVersion::V2_2) {
     // std::ofstream / fopen will not create missing parent directories on
     // Windows or POSIX; opening "./foo/bar.msh" silently fails with ENOENT
     // when ./foo does not yet exist. Create the parent chain up front so a
@@ -811,7 +989,7 @@ inline void WriteGmshResults(const std::string& path,
     mfem::FiniteElementSpace fes(&mesh, &fec);
     const detail::ExportNodes nodes = detail::BuildExportNodes(mesh, fes, order);
 
-    detail::WriteMeshBlock(out, mesh, nodes);
+    detail::WriteMeshBlock(out, mesh, nodes, version);
 
     // One scheme shared by every view: all views are sampled on the same node
     // layout at the same order, so they interpolate with the same basis.

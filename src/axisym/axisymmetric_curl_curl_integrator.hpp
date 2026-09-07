@@ -70,12 +70,37 @@ public:
    // Ceiling on the extra points added for the 1/r term. Reached only for
    // elements whose inner radius is a tiny fraction of their radial width;
    // see GetRule for what that costs and why it is acceptable.
+   //
+   // Note this ceiling is not what actually limits the rule in practice:
+   // kMaxPositiveWeightSimplexOrder below binds first on simplices, and by a
+   // wide margin. The cap here only matters on tensor-product geometries.
    static constexpr int kMaxRadialExtraOrder = 120;
+
+   // Highest simplex order for which MFEM tabulates a positive-weight rule.
+   // Above this, IntRules.Get falls back to Grundmann-Moller, whose weights
+   // alternate in sign and grow without bound. Those rules are unusable here:
+   // the 1/r factor is largest exactly where the negative weights sit, so the
+   // element matrix loses its positive definiteness to catastrophic
+   // cancellation rather than merely losing digits. A lower-order rule with
+   // positive weights is strictly the better failure mode, so GetRule clamps.
+   //
+   // Measured against MFEM 4.10 by walking IntRules.Get(TRIANGLE, o): the
+   // first rule carrying a negative weight is order 26, and the first with a
+   // point on the element boundary is order 16. Both are properties of the
+   // rule tables, so this constant must be rechecked when MFEM is upgraded.
+   static constexpr int kMaxPositiveWeightSimplexOrder = 25;
 
    // Smallest r_min/width at which the capped rule still meets
    // kRadialQuadratureTolerance. Measured: relative energy error stays near
    // 1e-11 down to this ratio, then degrades (about 1e-8 at 5e-3, 1e-5 at
    // 2e-3). Solvers use this to warn about under-resolved elements.
+   //
+   // This does NOT bracket the clamp above. Inverting RadialExtraOrder for
+   // kRadialQuadratureTolerance = 1e-10 puts the order-26 crossing at
+   // r_min/width ~= 0.21, about 20x looser than this ratio. An element can
+   // therefore hit kMaxPositiveWeightSimplexOrder while still looking well
+   // resolved by this measure. The two thresholds answer different questions:
+   // this one is about accuracy, that one about whether a usable rule exists.
    static constexpr double kResolvedRadiusRatio = 1.0e-2;
 
    /**
@@ -168,14 +193,27 @@ public:
       mfem::real_t min_radius = 0.0;
       mfem::real_t radial_width = 0.0;
       RadialExtent(Trans, min_radius, radial_width);
-      const int order = polynomial_order
+      int order = polynomial_order
          + RadialExtraOrder(min_radius, radial_width);
 
       if (trial_fe.Space() == mfem::FunctionSpace::rQk)
       {
          return mfem::RefinedIntRules.Get(trial_fe.GetGeomType(), order);
       }
-      return mfem::IntRules.Get(trial_fe.GetGeomType(), order);
+
+      // On simplices, refuse to cross into the negative-weight fallback rules;
+      // see kMaxPositiveWeightSimplexOrder. Clamping silently under-integrates
+      // the 1/r term, but it keeps the element matrix positive definite, which
+      // is the property the solver actually depends on. Elements that reach
+      // here are already flagged to the user by the kResolvedRadiusRatio check
+      // in the solvers, so the accuracy loss is reported through that path.
+      const mfem::Geometry::Type geom = trial_fe.GetGeomType();
+      if ((geom == mfem::Geometry::TRIANGLE || geom == mfem::Geometry::TETRAHEDRON)
+          && order > kMaxPositiveWeightSimplexOrder)
+      {
+         order = kMaxPositiveWeightSimplexOrder;
+      }
+      return mfem::IntRules.Get(geom, order);
    }
 
    void AssembleElementMatrix(const mfem::FiniteElement &el,

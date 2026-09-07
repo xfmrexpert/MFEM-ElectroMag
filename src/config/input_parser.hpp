@@ -94,6 +94,7 @@ private:
 
 		prob_config.OutputParaview = GetOutputParaview();
 		prob_config.OutputGmsh = GetOutputGmsh();
+		prob_config.GmshFormat = GetGmshFormat();
 		prob_config.ResultsDirectory = GetResultsDirectory();
 		prob_config.Amr = GetAmrSettings();
 
@@ -254,6 +255,12 @@ private:
 
     [[nodiscard]] bool GetOutputGmsh() const {
         return Get(Sim(), "output_gmsh", false);
+    }
+
+    // MSH version for the results file. Defaults to 2.2, the format the
+    // downstream C# consumer reads; "4.1" is opt-in.
+    [[nodiscard]] std::string GetGmshFormat() const {
+        return Get(Sim(), "gmsh_format", std::string("2.2"));
     }
 
     // Relative paths resolve against the directory holding the config file.

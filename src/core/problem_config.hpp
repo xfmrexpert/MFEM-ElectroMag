@@ -143,6 +143,7 @@ struct ProblemConfig {
 	std::string MeshPath;
 	bool OutputParaview = false;
 	bool OutputGmsh = false;
+	std::string GmshFormat = "2.2";  // MSH version of the results file ("2.2" or "4.1")
 	std::string ResultsDirectory;  // Optional Gmsh results directory (empty = mesh directory)
 	AmrSettings Amr;               // Adaptive mesh refinement controls (disabled by default)
 	std::unordered_map<std::string, EntityGroup> EntityGroups;

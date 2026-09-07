@@ -411,7 +411,8 @@ protected:
 
         FieldExportSet fields = CollectExportFields();
         const SolverFieldWriter writer(mesh, config.ResultsDirectory,
-                                       config.MeshPath, fec->GetOrder());
+                                       config.MeshPath, fec->GetOrder(),
+                                       gmsh_results::ParseMshVersion(config.GmshFormat));
         if (config.OutputParaview) {
             writer.WriteParaview("results_" + std::string(ToString(config.PhysicsType))
                 + "_" + scenario_name, fields);
