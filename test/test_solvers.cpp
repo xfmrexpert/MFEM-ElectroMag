@@ -895,40 +895,36 @@ double ObservedOrder(double coarse_error, double fine_error,
     return std::log(coarse_error / fine_error) / std::log(refinement_ratio);
 }
 
-struct CsvMatrix {
+struct CouplingMatrix {
     std::vector<std::string> labels;
     std::vector<std::vector<double>> values;
 };
 
-CsvMatrix ReadCsvMatrix(const std::string& filename) {
-    std::ifstream input(filename);
-    REQUIRE(input.is_open());
-
-    CsvMatrix matrix;
-    std::string line;
-    REQUIRE(static_cast<bool>(std::getline(input, line)));
-    std::istringstream header(line);
-    std::string cell;
-    REQUIRE(static_cast<bool>(std::getline(header, cell, ',')));
-    while (std::getline(header, cell, ',')) {
-        matrix.labels.push_back(cell);
+CouplingMatrix ReadHdf5Matrix(const std::string& filename,
+                             const std::string& quantity,
+                             std::size_t frequency_index = 0) {
+    HighFive::File file(filename, HighFive::File::ReadOnly);
+    CouplingMatrix matrix;
+    file.getDataSet("/coupling/terminal_names").read(matrix.labels);
+    auto dataset = file.getDataSet("/coupling/" + quantity + "/values");
+    const auto dimensions = dataset.getDimensions();
+    if (dimensions.size() == 2) {
+        dataset.read(matrix.values);
+    } else {
+        REQUIRE(dimensions.size() == 3);
+        REQUIRE(frequency_index < dimensions[0]);
+        std::vector<std::vector<std::vector<double>>> values;
+        dataset.read(values);
+        matrix.values = values[frequency_index];
     }
-
-    while (std::getline(input, line)) {
-        std::istringstream row(line);
-        REQUIRE(static_cast<bool>(std::getline(row, cell, ',')));
-        std::vector<double> values;
-        while (std::getline(row, cell, ',')) {
-            values.push_back(std::stod(cell));
-        }
-        REQUIRE(values.size() == matrix.labels.size());
-        matrix.values.push_back(std::move(values));
+    for (const auto& row : matrix.values) {
+        REQUIRE(row.size() == matrix.labels.size());
     }
     REQUIRE(matrix.values.size() == matrix.labels.size());
     return matrix;
 }
 
-void RequireMatricesEqual(const CsvMatrix& actual, const CsvMatrix& expected,
+void RequireMatricesEqual(const CouplingMatrix& actual, const CouplingMatrix& expected,
                           double tolerance = 1e-10) {
     REQUIRE(actual.labels == expected.labels);
     REQUIRE(actual.values.size() == expected.values.size());
@@ -1717,7 +1713,8 @@ TEST_CASE("Electrostatic solver satisfies dielectric interface conditions",
 TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
           "[solvers][analytic][electrostatic][coupling][reciprocity]") {
     const std::string mesh_file = "test_capacitance_reciprocity.mesh";
-    const std::string matrix_file = "capacitance_matrix.csv";
+    const std::string results_directory = "test_capacitance_hdf5_results";
+    const std::string matrix_file = results_directory + "/nested/coupling_electrostatics.h5";
     constexpr double length = 0.2;
     constexpr double height = 0.05;
     constexpr double relative_permittivity = 2.5;
@@ -1727,6 +1724,7 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
         "electrostatics", mesh_file, 1,
         {{"epsilon_r", relative_permittivity}}, 0.0, 0.0);
     config["simulation"]["analysis_type"] = "coupling_matrix";
+    config["simulation"]["results_path"] = results_directory + "/nested";
     config["boundary_conditions"] = json::array();
     config["terminals"] = json::array({
         {{"name", "Left"}, {"quantity", "voltage"}, {"entity_group", "Left"}},
@@ -1739,7 +1737,7 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
     solver.Run();
     solver.SaveAnalysis();
 
-    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    const auto matrix = ReadHdf5Matrix(matrix_file, "Capacitance");
     REQUIRE(matrix.labels == std::vector<std::string>{"Left", "Right"});
     const double analytic_capacitance =
         Constants::EPSILON_0 * relative_permittivity * height / length;
@@ -1754,6 +1752,7 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
         Catch::Approx(0.0).margin(1e-7 * analytic_capacitance));
 
     fs::remove(matrix_file);
+    fs::remove_all(results_directory);
     fs::remove(mesh_file);
 }
 
@@ -1800,7 +1799,7 @@ TEST_CASE("Coupling matrix units distinguish planar from axisymmetric",
 TEST_CASE("Electrostatic coupling ignores fixed Neumann background",
           "[solvers][electrostatic][coupling][m2]") {
     const std::string mesh_file = "test_es_coupling_background.mesh";
-    const std::string matrix_file = "capacitance_matrix.csv";
+    const std::string matrix_file = "coupling_electrostatics.h5";
     CreatePlanarStripMesh(mesh_file, 0.2, 0.05, 4, 2);
 
     json config = MakePlanarStripConfig(
@@ -1818,16 +1817,16 @@ TEST_CASE("Electrostatic coupling ignores fixed Neumann background",
         solver.Setup();
         solver.Run();
         solver.SaveAnalysis();
-        return ReadCsvMatrix(matrix_file);
+        return ReadHdf5Matrix(matrix_file, "Capacitance");
     };
 
-    const CsvMatrix baseline = solve();
+    const auto baseline = solve();
     config["entity_groups"].push_back(
         {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
     config["boundary_conditions"].push_back(
         {{"name", "BackgroundFlux"}, {"type", "neumann"},
          {"entity_group", "Horizontal"}, {"value", 3.0}});
-    const CsvMatrix with_background = solve();
+    const auto with_background = solve();
 
     RequireMatricesEqual(with_background, baseline);
     fs::remove(matrix_file);
@@ -1841,7 +1840,7 @@ TEST_CASE("Electrostatic coupling ignores fixed Neumann background",
 TEST_CASE("Axisymmetric capacitance matches the analytic coaxial value",
           "[solvers][analytic][electrostatic][coupling][axisymmetric]") {
     const std::string mesh_file = "test_coax_capacitance.mesh";
-    const std::string matrix_file = "capacitance_matrix.csv";
+    const std::string matrix_file = "coupling_electrostatics.h5";
     constexpr double r_inner = 0.01;
     constexpr double r_outer = 0.03;
     constexpr double height = 0.05;
@@ -1857,7 +1856,7 @@ TEST_CASE("Axisymmetric capacitance matches the analytic coaxial value",
     solver.Run();
     solver.SaveAnalysis();
 
-    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    const auto matrix = ReadHdf5Matrix(matrix_file, "Capacitance");
     REQUIRE(matrix.labels == std::vector<std::string>{"Inner", "Outer"});
 
     // Coaxial annulus of axial extent `height` closed by symmetry planes:
@@ -1868,7 +1867,6 @@ TEST_CASE("Axisymmetric capacitance matches the analytic coaxial value",
     REQUIRE(matrix.values[0][0] == Catch::Approx(analytic_capacitance).epsilon(0.01));
     REQUIRE(matrix.values[1][1] == Catch::Approx(analytic_capacitance).epsilon(0.01));
     REQUIRE(matrix.values[0][1] == Catch::Approx(-analytic_capacitance).epsilon(0.01));
-    // Tolerance is set by the CSV's 6 significant digits, not by the solve.
     REQUIRE(matrix.values[0][1] == Catch::Approx(matrix.values[1][0]).epsilon(1e-5));
 
     fs::remove(matrix_file);
@@ -1891,7 +1889,7 @@ TEST_CASE("Axisymmetric coaxial capacitance converges at the expected order",
     for (const int nr : {8, 16, 32}) {
         const std::string mesh_file =
             "test_coax_convergence_" + std::to_string(nr) + ".mesh";
-        const std::string matrix_file = "capacitance_matrix.csv";
+        const std::string matrix_file = "coupling_electrostatics.h5";
         CreateCoaxMesh(mesh_file, r_inner, r_outer, height, nr, 1);
 
         json config = MakeCoaxAmrConfig(mesh_file, 1);
@@ -1904,7 +1902,7 @@ TEST_CASE("Axisymmetric coaxial capacitance converges at the expected order",
         solver.Run();
         solver.SaveAnalysis();
 
-        const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+        const auto matrix = ReadHdf5Matrix(matrix_file, "Capacitance");
         errors.push_back(std::abs(matrix.values[0][0] - analytic_capacitance) /
                          analytic_capacitance);
 
@@ -1931,11 +1929,6 @@ TEST_CASE("Axisymmetric coaxial capacitance converges at the expected order",
     REQUIRE(second_order > 1.8);
     REQUIRE(second_order < 2.2);
 
-    // The CSV carries 6 significant digits, so relative errors approaching
-    // 1e-6 are quantization rather than discretization. The finest mesh sits
-    // at 1.28e-4, two decades clear; assert that margin so a future refinement
-    // level cannot silently start measuring CSV rounding instead of the solve.
-    REQUIRE(errors.back() > 1.0e-5);
 }
 
 // The inductance matrix must be built from each MEASURED terminal's winding
@@ -1944,7 +1937,7 @@ TEST_CASE("Axisymmetric coaxial capacitance converges at the expected order",
 TEST_CASE("Magnetostatic inductance matrix is reciprocal and distinguishes rows",
           "[solvers][magnetostatic][coupling][reciprocity]") {
     const std::string mesh_file = "test_magnetostatic_two_coil.mesh";
-    const std::string matrix_file = "inductance_matrix.csv";
+    const std::string matrix_file = "coupling_magnetostatics.h5";
     CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 4, 2, 2);
 
     json config = MakePlanarStripConfig(
@@ -1969,7 +1962,7 @@ TEST_CASE("Magnetostatic inductance matrix is reciprocal and distinguishes rows"
     solver.Run();
     solver.SaveAnalysis();
 
-    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    const auto matrix = ReadHdf5Matrix(matrix_file, "Inductance");
     REQUIRE(matrix.labels == std::vector<std::string>{"CoilA", "CoilB"});
     REQUIRE(matrix.values[0][0] > 0.0);
     REQUIRE(matrix.values[1][1] > 0.0);
@@ -1986,7 +1979,7 @@ TEST_CASE("Magnetostatic inductance matrix is reciprocal and distinguishes rows"
 TEST_CASE("Magnetostatic loop inductance matches the analytic ring value",
           "[solvers][analytic][magnetostatic][coupling][axisymmetric]") {
     const std::string mesh_file = "test_current_loop_ms.mesh";
-    const std::string matrix_file = "inductance_matrix.csv";
+    const std::string matrix_file = "coupling_magnetostatics.h5";
     CreateCurrentLoopMesh(mesh_file);
 
     json config = MakeCurrentLoopConfig("magnetostatics", mesh_file, 0.0);
@@ -2001,7 +1994,7 @@ TEST_CASE("Magnetostatic loop inductance matches the analytic ring value",
     solver.Run();
     solver.SaveAnalysis();
 
-    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    const auto matrix = ReadHdf5Matrix(matrix_file, "Inductance");
     REQUIRE(matrix.labels == std::vector<std::string>{"LoopCurrent"});
 
     // Truncating the domain at D/a = 40 biases the result low by roughly
@@ -2023,8 +2016,7 @@ TEST_CASE("Magnetostatic loop inductance matches the analytic ring value",
 TEST_CASE("Magnetoquasistatic loop inductance matches the analytic ring value at low frequency",
           "[solvers][analytic][mqs][coupling][axisymmetric]") {
     const std::string mesh_file = "test_current_loop_mqs.mesh";
-    const std::string matrix_file = "inductance_matrix_loop_0_1Hz.csv";
-    const std::string resistance_file = "resistance_matrix_loop_0_1Hz.csv";
+    const std::string matrix_file = "coupling_magnetoquasistatics.h5";
     CreateCurrentLoopMesh(mesh_file);
 
     json config = MakeCurrentLoopConfig("magnetoquasistatics", mesh_file, 5.8e7);
@@ -2043,13 +2035,12 @@ TEST_CASE("Magnetoquasistatic loop inductance matches the analytic ring value at
     solver.SaveAnalysis();
 
     REQUIRE(fs::exists(matrix_file));
-    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    const auto matrix = ReadHdf5Matrix(matrix_file, "Inductance");
     REQUIRE(matrix.labels == std::vector<std::string>{"LoopCurrent"});
     REQUIRE(matrix.values[0][0] ==
         Catch::Approx(AnalyticLoopInductance()).epsilon(0.005));
 
     fs::remove(matrix_file);
-    fs::remove(resistance_file);
     fs::remove(mesh_file);
 }
 
@@ -2069,7 +2060,7 @@ TEST_CASE("Magnetoquasistatic loop inductance matches the analytic ring value at
 TEST_CASE("Magnetostatic loop inductance is mesh-format independent (Netgen)",
           "[solvers][analytic][magnetostatic][coupling][axisymmetric][netgen]") {
     const std::string mesh_file = "test_current_loop_netgen.mesh";
-    const std::string matrix_file = "inductance_matrix.csv";
+    const std::string matrix_file = "coupling_magnetostatics.h5";
     CreateCurrentLoopNetgenMesh(mesh_file);
 
     json config = MakeCurrentLoopConfig("magnetostatics", mesh_file, 0.0);
@@ -2094,7 +2085,7 @@ TEST_CASE("Magnetostatic loop inductance is mesh-format independent (Netgen)",
     solver.Run();
     solver.SaveAnalysis();
 
-    const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+    const auto matrix = ReadHdf5Matrix(matrix_file, "Inductance");
     REQUIRE(matrix.labels == std::vector<std::string>{"LoopCurrent"});
     REQUIRE(matrix.values[0][0] ==
         Catch::Approx(AnalyticLoopInductance()).epsilon(0.005));
@@ -2107,7 +2098,7 @@ TEST_CASE("Magnetostatic loop inductance is mesh-format independent (Netgen)",
 TEST_CASE("Magnetostatic coupling ignores fixed Neumann background",
           "[solvers][magnetostatic][coupling][m2]") {
     const std::string mesh_file = "test_ms_coupling_background.mesh";
-    const std::string matrix_file = "inductance_matrix.csv";
+    const std::string matrix_file = "coupling_magnetostatics.h5";
     CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 4, 2, 2);
 
     json config = MakePlanarStripConfig(
@@ -2131,16 +2122,16 @@ TEST_CASE("Magnetostatic coupling ignores fixed Neumann background",
         MagnetostaticSolver solver(mesh, DecodeConfig(config));
         solver.Setup();
         solver.Run();
-        return ReadCsvMatrix(matrix_file);
+        return ReadHdf5Matrix(matrix_file, "Inductance");
     };
 
-    const CsvMatrix baseline = solve();
+    const auto baseline = solve();
     config["entity_groups"].push_back(
         {{"name", "Horizontal"}, {"dim", 1}, {"attribute_ids", {3}}});
     config["boundary_conditions"].push_back(
         {{"name", "BackgroundFlux"}, {"type", "neumann"},
          {"entity_group", "Horizontal"}, {"value", 2.0}});
-    const CsvMatrix with_background = solve();
+    const auto with_background = solve();
 
     RequireMatricesEqual(with_background, baseline);
     fs::remove(matrix_file);
@@ -2431,10 +2422,7 @@ TEST_CASE("Magnetoquasistatic skin-effect solution converges under mesh refineme
 TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
           "[solvers][mqs][coupling][reciprocity]") {
     const std::string mesh_file = "test_mqs_mixed_conductors.mesh";
-    const std::string low_inductance_file = "inductance_matrix_low_100Hz.csv";
-    const std::string low_resistance_file = "resistance_matrix_low_100Hz.csv";
-    const std::string high_inductance_file = "inductance_matrix_high_1000Hz.csv";
-    const std::string high_resistance_file = "resistance_matrix_high_1000Hz.csv";
+    const std::string matrix_file = "coupling_magnetoquasistatics.h5";
     CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 2, 1, 1);
 
     json config = MakePlanarStripConfig(
@@ -2442,7 +2430,8 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     config["simulation"]["analysis_type"] = "coupling_matrix";
     config["scenarios"] = json::array({
         {{"name", "low"}, {"frequency", 100.0}, {"excitations", json::array()}},
-        {{"name", "high"}, {"frequency", 1000.0}, {"excitations", json::array()}}
+        {{"name", "high"}, {"frequency", 1000.0}, {"excitations", json::array()}},
+        {{"name", "duplicate"}, {"frequency", 100.0}, {"excitations", json::array()}}
     });
     config["entity_groups"].push_back(
         {{"name", "StrandedDomain"}, {"dim", 2}, {"attribute_ids", {1}}});
@@ -2473,14 +2462,20 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     solver.Run();
     solver.SaveAnalysis();
 
-    REQUIRE(fs::exists(low_inductance_file));
-    REQUIRE(fs::exists(low_resistance_file));
-    REQUIRE(fs::exists(high_inductance_file));
-    REQUIRE(fs::exists(high_resistance_file));
-    const CsvMatrix low_inductance = ReadCsvMatrix(low_inductance_file);
-    const CsvMatrix low_resistance = ReadCsvMatrix(low_resistance_file);
-    const CsvMatrix inductance = ReadCsvMatrix(high_inductance_file);
-    const CsvMatrix resistance = ReadCsvMatrix(high_resistance_file);
+    {
+        HighFive::File file(matrix_file, HighFive::File::ReadOnly);
+        std::vector<double> frequencies;
+        file.getDataSet("/coupling/frequency_hz").read(frequencies);
+        REQUIRE(frequencies == std::vector<double>{100.0, 1000.0});
+        REQUIRE(file.getDataSet("/coupling/Inductance/values").getDimensions() ==
+            std::vector<std::size_t>{2, 2, 2});
+        REQUIRE(file.getDataSet("/coupling/Resistance/values").getDimensions() ==
+            std::vector<std::size_t>{2, 2, 2});
+    }
+    const auto low_inductance = ReadHdf5Matrix(matrix_file, "Inductance", 0);
+    const auto low_resistance = ReadHdf5Matrix(matrix_file, "Resistance", 0);
+    const auto inductance = ReadHdf5Matrix(matrix_file, "Inductance", 1);
+    const auto resistance = ReadHdf5Matrix(matrix_file, "Resistance", 1);
     const std::vector<std::string> expected_labels{"Massive", "Stranded"};
     REQUIRE(inductance.labels == expected_labels);
     REQUIRE(resistance.labels == expected_labels);
@@ -2494,18 +2489,14 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     REQUIRE(std::abs(inductance.values[0][0] - low_inductance.values[0][0]) > 1e-12);
     REQUIRE(std::abs(resistance.values[0][0] - low_resistance.values[0][0]) > 1e-12);
 
-    fs::remove(low_resistance_file);
-    fs::remove(low_inductance_file);
-    fs::remove(high_resistance_file);
-    fs::remove(high_inductance_file);
+    fs::remove(matrix_file);
     fs::remove(mesh_file);
 }
 
 TEST_CASE("MQS coupling ignores fixed Neumann background",
           "[solvers][mqs][coupling][m2]") {
     const std::string mesh_file = "test_mqs_coupling_background.mesh";
-    const std::string inductance_file = "inductance_matrix_point_1000Hz.csv";
-    const std::string resistance_file = "resistance_matrix_point_1000Hz.csv";
+    const std::string matrix_file = "coupling_magnetoquasistatics.h5";
     CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 2, 1, 1);
 
     json config = MakePlanarStripConfig(
@@ -2532,7 +2523,8 @@ TEST_CASE("MQS coupling ignores fixed Neumann background",
         solver.Run();
         solver.SaveAnalysis();
         return std::pair{
-            ReadCsvMatrix(inductance_file), ReadCsvMatrix(resistance_file)};
+            ReadHdf5Matrix(matrix_file, "Inductance"),
+            ReadHdf5Matrix(matrix_file, "Resistance")};
     };
 
     const auto baseline = solve();
@@ -2545,8 +2537,7 @@ TEST_CASE("MQS coupling ignores fixed Neumann background",
 
     RequireMatricesEqual(with_background.first, baseline.first);
     RequireMatricesEqual(with_background.second, baseline.second);
-    fs::remove(resistance_file);
-    fs::remove(inductance_file);
+    fs::remove(matrix_file);
     fs::remove(mesh_file);
 }
 
@@ -2564,8 +2555,7 @@ TEST_CASE("MQS coupling ignores fixed Neumann background",
 TEST_CASE("Axisymmetric massive-port resistance matches the analytic DC value",
           "[solvers][analytic][mqs][axisymmetric][conductance]") {
     const std::string mesh_file = "test_mqs_axisym_dc_port.mesh";
-    const std::string inductance_file = "inductance_matrix_dc_0_001Hz.csv";
-    const std::string resistance_file = "resistance_matrix_dc_0_001Hz.csv";
+    const std::string matrix_file = "coupling_magnetoquasistatics.h5";
     constexpr double r_inner = 0.05;
     constexpr double r_outer = 0.08;
     constexpr double height = 0.02;
@@ -2616,7 +2606,7 @@ TEST_CASE("Axisymmetric massive-port resistance matches the analytic DC value",
     solver.Run();
     solver.SaveAnalysis();
 
-    const CsvMatrix resistance = ReadCsvMatrix(resistance_file);
+    const auto resistance = ReadHdf5Matrix(matrix_file, "Resistance");
     REQUIRE(resistance.labels == std::vector<std::string>{"Port"});
     REQUIRE(resistance.values.size() == 1);
 
@@ -2635,8 +2625,7 @@ TEST_CASE("Axisymmetric massive-port resistance matches the analytic DC value",
     REQUIRE(std::abs(expected_resistance - 1.0 / no_radial_weight_conductance) >
             1e-2 * expected_resistance);
 
-    fs::remove(resistance_file);
-    fs::remove(inductance_file);
+    fs::remove(matrix_file);
     fs::remove(mesh_file);
 }
 
@@ -2730,10 +2719,7 @@ TEST_CASE("MQS Joule loss matches the analytic DC value",
 TEST_CASE("MQS heterogeneous massive-port conductance is piecewise and order independent",
           "[solvers][mqs][coupling][conductance]") {
     const std::string mesh_file = "test_mqs_heterogeneous_port.mesh";
-    const std::string inductance_file =
-        "inductance_matrix_heterogeneous_60Hz.csv";
-    const std::string resistance_file =
-        "resistance_matrix_heterogeneous_60Hz.csv";
+    const std::string matrix_file = "coupling_magnetoquasistatics.h5";
     constexpr double length = 0.2;
     constexpr double height = 0.05;
     constexpr double sigma_left = 2.0;
@@ -2775,7 +2761,7 @@ TEST_CASE("MQS heterogeneous massive-port conductance is piecewise and order ind
         solver.Setup();
         solver.Run();
         solver.SaveAnalysis();
-        const CsvMatrix resistance = ReadCsvMatrix(resistance_file);
+        const auto resistance = ReadHdf5Matrix(matrix_file, "Resistance");
         REQUIRE(resistance.labels == std::vector<std::string>{"Port"});
         REQUIRE(resistance.values.size() == 1);
         REQUIRE(resistance.values[0].size() == 1);
@@ -2793,20 +2779,18 @@ TEST_CASE("MQS heterogeneous massive-port conductance is piecewise and order ind
     REQUIRE(reversed == Catch::Approx(expected_resistance).epsilon(1e-6));
     REQUIRE(reversed == Catch::Approx(forward).epsilon(1e-12));
 
-    fs::remove(resistance_file);
-    fs::remove(inductance_file);
+    fs::remove(matrix_file);
     fs::remove(mesh_file);
 }
 
 TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
           "[solvers][mqs][coupling][regions]") {
     const std::string mesh_file = "test_mqs_open_current_region.mesh";
-    const std::string inductance_file = "inductance_matrix_point_f1_1000Hz.csv";
-    const std::string resistance_file = "resistance_matrix_point_f1_1000Hz.csv";
+    const std::string matrix_file = "coupling_magnetoquasistatics.h5";
     const std::string legacy_inductance_file =
-        "inductance_matrix_point_f1_1000Hz_1000Hz.csv";
+        "inductance_matrix_point_f1_1000Hz.csv";
     const std::string legacy_resistance_file =
-        "resistance_matrix_point_f1_1000Hz_1000Hz.csv";
+        "resistance_matrix_point_f1_1000Hz.csv";
     fs::remove(legacy_inductance_file);
     fs::remove(legacy_resistance_file);
     CreateLayeredStripMesh(mesh_file, 0.2, 0.05, 4, 1, 2);
@@ -2839,8 +2823,8 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
     baseline_solver.Setup();
     baseline_solver.Run();
     baseline_solver.SaveAnalysis();
-    const CsvMatrix baseline_inductance = ReadCsvMatrix(inductance_file);
-    const CsvMatrix baseline_resistance = ReadCsvMatrix(resistance_file);
+    const auto baseline_inductance = ReadHdf5Matrix(matrix_file, "Inductance");
+    const auto baseline_resistance = ReadHdf5Matrix(matrix_file, "Resistance");
 
     config["regions"][1]["current_constraint"] = "open";
     mfem::Mesh constrained_mesh(mesh_file.c_str(), 1, 1);
@@ -2848,8 +2832,8 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
     constrained_solver.Setup();
     constrained_solver.Run();
     constrained_solver.SaveAnalysis();
-    const CsvMatrix constrained_inductance = ReadCsvMatrix(inductance_file);
-    const CsvMatrix constrained_resistance = ReadCsvMatrix(resistance_file);
+    const auto constrained_inductance = ReadHdf5Matrix(matrix_file, "Inductance");
+    const auto constrained_resistance = ReadHdf5Matrix(matrix_file, "Resistance");
 
     const std::vector<std::string> expected_labels{"Drive"};
     REQUIRE(constrained_inductance.labels == expected_labels);
@@ -2864,8 +2848,7 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
         constrained_resistance.values[0][0] - baseline_resistance.values[0][0]);
     REQUIRE(inductance_change + resistance_change > 1e-12);
 
-    fs::remove(resistance_file);
-    fs::remove(inductance_file);
+    fs::remove(matrix_file);
     fs::remove(mesh_file);
 }
 
@@ -2884,8 +2867,7 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
 TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
           "[solvers][mqs][coupling][regions][axisymmetric]") {
     const std::string mesh_file = "test_mqs_axisym_shield.mesh";
-    const std::string inductance_file = "inductance_matrix_point_f1_1000Hz.csv";
-    const std::string resistance_file = "resistance_matrix_point_f1_1000Hz.csv";
+    const std::string matrix_file = "coupling_magnetoquasistatics.h5";
     CreateShieldedTurnsMesh(mesh_file, /*r_min=*/0.05, /*r_max=*/0.20,
                             /*height=*/0.04, /*nz=*/8, /*cells_per_band=*/8);
 
@@ -2900,7 +2882,7 @@ TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
     air_solver.Setup();
     air_solver.Run();
     air_solver.SaveAnalysis();
-    const CsvMatrix air_inductance = ReadCsvMatrix(inductance_file);
+    const auto air_inductance = ReadHdf5Matrix(matrix_file, "Inductance");
 
     // Reference 2: a conducting shield with no current constraint. Without a
     // port unknown there is no net-current equation, so the region behaves as a
@@ -2910,7 +2892,7 @@ TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
     shorted_solver.Setup();
     shorted_solver.Run();
     shorted_solver.SaveAnalysis();
-    const CsvMatrix shorted_inductance = ReadCsvMatrix(inductance_file);
+    const auto shorted_inductance = ReadHdf5Matrix(matrix_file, "Inductance");
 
     // Case under test: the shield becomes an open-current region, gaining a
     // port unknown whose net current is pinned to zero. This is the physical
@@ -2921,8 +2903,8 @@ TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
     shielded_solver.Setup();
     shielded_solver.Run();
     shielded_solver.SaveAnalysis();
-    const CsvMatrix shielded_inductance = ReadCsvMatrix(inductance_file);
-    const CsvMatrix shielded_resistance = ReadCsvMatrix(resistance_file);
+    const auto shielded_inductance = ReadHdf5Matrix(matrix_file, "Inductance");
+    const auto shielded_resistance = ReadHdf5Matrix(matrix_file, "Resistance");
 
     // The shield is passive: it never becomes a matrix row/column, so the
     // matrices stay 2x2 over the two driven turns.
@@ -2976,8 +2958,7 @@ TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
         REQUIRE(shorted < 0.9 * open);
     }
 
-    fs::remove(resistance_file);
-    fs::remove(inductance_file);
+    fs::remove(matrix_file);
     fs::remove(mesh_file);
 }
 
@@ -3243,10 +3224,7 @@ TEST_CASE("MQS shielding strengthens with frequency only when current may close"
     // Self inductance of turn A with the shield present, divided by the same
     // quantity with the shield replaced by air. Lower means more flux excluded.
     auto shielding_ratio = [&](double frequency, bool closed) {
-        std::ostringstream tag;
-        tag << "point_f1_" << frequency << "Hz";
-        const std::string inductance_file = "inductance_matrix_" + tag.str() + ".csv";
-        const std::string resistance_file = "resistance_matrix_" + tag.str() + ".csv";
+        const std::string matrix_file = "coupling_magnetoquasistatics.h5";
 
         json config = MakeShieldedTurnsConfig(mesh_file, frequency);
         if (!closed) config["regions"][1]["current_constraint"] = "open";
@@ -3259,15 +3237,15 @@ TEST_CASE("MQS shielding strengthens with frequency only when current may close"
         air_solver.Setup();
         air_solver.Run();
         air_solver.SaveAnalysis();
-        const CsvMatrix air = ReadCsvMatrix(inductance_file);
+        const auto air = ReadHdf5Matrix(matrix_file, "Inductance");
 
         mfem::Mesh shield_mesh(mesh_file.c_str(), 1, 1);
         MagnetoquasistaticSolver shield_solver(shield_mesh, DecodeConfig(config));
         shield_solver.Setup();
         shield_solver.Run();
         shield_solver.SaveAnalysis();
-        const CsvMatrix shielded = ReadCsvMatrix(inductance_file);
-        const CsvMatrix resistance = ReadCsvMatrix(resistance_file);
+        const auto shielded = ReadHdf5Matrix(matrix_file, "Inductance");
+        const auto resistance = ReadHdf5Matrix(matrix_file, "Resistance");
 
         // Guard the discretization: negative extracted loss means the shield is
         // under-resolved against the skin depth and the ratio is meaningless.
@@ -3275,8 +3253,7 @@ TEST_CASE("MQS shielding strengthens with frequency only when current may close"
             REQUIRE(resistance.values[turn][turn] > 0.0);
         }
 
-        fs::remove(inductance_file);
-        fs::remove(resistance_file);
+        fs::remove(matrix_file);
         return shielded.values[0][0] / air.values[0][0];
     };
 
@@ -3612,7 +3589,7 @@ TEST_CASE("Magnetostatic far-field truncation error converges as the boundary re
     constexpr double r_coil_inner = 0.02;
     constexpr double r_coil_outer = 0.03;
     constexpr double z_coil_half  = 0.005;
-    const std::string matrix_file = "inductance_matrix.csv";
+    const std::string matrix_file = "coupling_magnetostatics.h5";
 
     auto self_inductance = [&](int index, double pad) {
         const std::string mesh_file =
@@ -3664,7 +3641,7 @@ TEST_CASE("Magnetostatic far-field truncation error converges as the boundary re
         solver.Run();
         solver.SaveAnalysis();
 
-        const CsvMatrix matrix = ReadCsvMatrix(matrix_file);
+        const auto matrix = ReadHdf5Matrix(matrix_file, "Inductance");
         REQUIRE(matrix.labels == std::vector<std::string>{"Coil"});
         fs::remove(mesh_file);
         return matrix.values[0][0];

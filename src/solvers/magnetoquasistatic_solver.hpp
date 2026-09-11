@@ -69,7 +69,6 @@ class MagnetoquasistaticSolver : public MagneticSolver {
                                         // apply to this formulation.
 
     struct CouplingResult {
-        std::string Name;
         double Frequency;
         std::unique_ptr<mfem::DenseMatrix> Resistance;
         std::unique_ptr<mfem::DenseMatrix> Inductance;
@@ -697,8 +696,8 @@ public:
     }
 
     // Solve + save on the CURRENT mesh/operators. Field analysis performs one
-    // solve per prescribed scenario. Coupling analysis uses each prescribed scenario
-    // as a frequency point and synthesizes one unit-current solve per terminal.
+    // solve per prescribed scenario. Coupling analysis uses each unique frequency
+    // and synthesizes one unit-current solve per terminal.
     void RunOnCurrentMesh() override {
         PrepareAnalysis();
 
@@ -714,11 +713,15 @@ public:
             return;
         }
 
-        for (const auto& [point_name, point] : config.Scenarios) {
-            BeginCouplingPoint(point_name, point.Frequency);
+        std::map<double, std::string> frequency_points;
+        for (const auto& [name, scenario] : config.Scenarios) {
+            frequency_points.emplace(scenario.Frequency, name);
+        }
+        for (const auto& [point_frequency, point_name] : frequency_points) {
+            BeginCouplingPoint(point_frequency);
             for (const auto& [term_name, term] : config.Terminals) {
                 Scenario column;
-                column.Frequency = point.Frequency;
+                column.Frequency = point_frequency;
                 column.Excitations.push_back({ term_name, 1.0 });
                 auto operation = Reporter().Start(
                     "scenario '" + point_name + "', terminal '" + term_name + "'");
@@ -976,10 +979,9 @@ public:
 		}
 	}
 
-    void BeginCouplingPoint(const std::string& name, double point_frequency) {
+    void BeginCouplingPoint(double point_frequency) {
         const int num_terminals = static_cast<int>(config.Terminals.size());
         CouplingResult result;
-        result.Name = name;
         result.Frequency = point_frequency;
         result.Resistance = std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
         result.Inductance = std::make_unique<mfem::DenseMatrix>(num_terminals, num_terminals);
@@ -1003,36 +1005,29 @@ public:
             return;
         }
 
+        std::vector<double> frequencies;
+        std::vector<const mfem::DenseMatrix*> resistance;
+        std::vector<const mfem::DenseMatrix*> inductance;
         for (const CouplingResult& result : coupling_results) {
-            const std::string frequency_label = FrequencyOutputToken(result.Frequency) + "Hz";
-            std::string output_tag = SafeOutputToken(result.Name);
-            if (output_tag.size() < 2 ||
-                output_tag.compare(output_tag.size() - 2, 2, "Hz") != 0) {
-                output_tag += "_" + frequency_label;
-            }
-            SaveCouplingMatrix(*result.Inductance,
-                "Inductance Matrix at " + frequency_label + " " +
-                    CouplingUnitLabel("H"),
-                "inductance_matrix_" + output_tag + ".csv");
-            SaveCouplingMatrix(*result.Resistance,
-                "Resistance Matrix at " + frequency_label + " " +
-                    CouplingUnitLabel("Ohm"),
-                "resistance_matrix_" + output_tag + ".csv");
+            frequencies.push_back(result.Frequency);
+            resistance.push_back(result.Resistance.get());
+            inductance.push_back(result.Inductance.get());
         }
-	}
-
-    static std::string SafeOutputToken(std::string value) {
-        for (char& c : value) {
-            const unsigned char uc = static_cast<unsigned char>(c);
-            if (!std::isalnum(uc) && c != '-' && c != '_') c = '_';
+        auto writer = CreateCouplingWriter();
+        writer.WriteFrequencies(frequencies);
+        writer.WriteMatrixSeries("Inductance", inductance, CouplingUnits("H"));
+        writer.WriteMatrixSeries("Resistance", resistance, CouplingUnits("Ohm"));
+        for (const CouplingResult& result : coupling_results) {
+            std::ostringstream frequency_label;
+            frequency_label << std::setprecision(std::numeric_limits<double>::max_digits10)
+                << result.Frequency << " Hz";
+            PrintCouplingMatrix(*result.Inductance,
+                "Inductance Matrix at " + frequency_label.str() + " " +
+                    CouplingUnitLabel("H"));
+            PrintCouplingMatrix(*result.Resistance,
+                "Resistance Matrix at " + frequency_label.str() + " " +
+                    CouplingUnitLabel("Ohm"));
         }
-        return value;
-    }
-
-    static std::string FrequencyOutputToken(double value) {
-        std::ostringstream stream;
-        stream << std::setprecision(12) << value;
-        return SafeOutputToken(stream.str());
     }
 
     std::pair<double, double> ComputeStrandedFluxLinkage(

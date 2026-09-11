@@ -10,6 +10,7 @@
 #include "../core/problem_config.hpp"
 #include "../io/field_export.hpp"
 #include "../io/matrix_writer.hpp"
+#include "../io/coupling_matrix_writer.hpp"
 #include "../io/solver_field_writer.hpp"
 #include "../io/status_reporter.hpp"
 #include "amr_support.hpp"
@@ -432,18 +433,37 @@ protected:
     // No extrusion length is configurable, so the planar label always carries
     // the "/m" suffix rather than depending on a depth setting.
     [[nodiscard]] std::string CouplingUnitLabel(const std::string& si_unit) const {
-        return geometry == GeometryType::Axisymmetric
-            ? "[" + si_unit + "]"
-            : "[" + si_unit + "/m]";
+        return "[" + CouplingUnits(si_unit) + "]";
     }
 
-    // Shared coupling-matrix serialization: print a labeled table to the console
-    // and write a CSV next to the mesh (same path convention as the field
-    // writers). Each solver supplies the assembled matrix plus the human-readable
-    // title (with unit) and CSV file name; rows/columns are labeled by terminal.
+    [[nodiscard]] std::string CouplingUnits(const std::string& si_unit) const {
+        return geometry == GeometryType::Axisymmetric ? si_unit : si_unit + "/m";
+    }
+
+    matrix_io::CouplingMatrixWriter CreateCouplingWriter() const {
+        namespace fs = std::filesystem;
+        const fs::path directory = config.ResultsDirectory.empty()
+            ? fs::path(config.MeshPath).parent_path()
+            : fs::path(config.ResultsDirectory);
+        if (!directory.empty()) fs::create_directories(directory);
+        const fs::path path = directory /
+            ("coupling_" + std::string(ToString(config.PhysicsType)) + ".h5");
+        return matrix_io::CouplingMatrixWriter(path, TerminalNames(),
+            ToString(config.PhysicsType),
+            geometry == GeometryType::Axisymmetric ? "axisymmetric" : "planar");
+    }
+
+    // Static analyses write one matrix; MQS uses the same writer for a sweep.
     void SaveCouplingMatrix(const mfem::DenseMatrix& M,
-        const std::string& title,
-        const std::string& csv_filename) const {
+        const std::string& title, const std::string& quantity,
+        const std::string& si_unit) const {
+        auto writer = CreateCouplingWriter();
+        writer.WriteMatrix(quantity, M, CouplingUnits(si_unit));
+        PrintCouplingMatrix(M, title);
+    }
+
+    void PrintCouplingMatrix(const mfem::DenseMatrix& M,
+        const std::string& title) const {
         matrix_io::MatrixWriter writer(title, TerminalNames());
         if (Reporter().IsMachineReadable()) {
             std::ostringstream table;
@@ -453,10 +473,6 @@ protected:
         else {
             writer.PrintConsole(M);
         }
-
-        namespace fs = std::filesystem;
-        fs::path out_path = fs::path(config.MeshPath).parent_path() / csv_filename;
-        writer.WriteCsv(M, out_path);
     }
 
     // ---- Base-class internals -----------------------------------------------

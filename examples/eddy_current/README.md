@@ -211,7 +211,9 @@ frequency.
 For a coupling-matrix sweep, set `"analysis_type": "coupling_matrix"` and
 provide one or more frequency scenarios. Terminal excitations in those
 scenarios are ignored because the solver synthesizes each unit-current column;
-each frequency receives its own labeled resistance and inductance CSV files.
+each unique frequency contributes a resistance and inductance matrix to
+`coupling_magnetoquasistatics.h5`. See [the HDF5 schema](../../docs/coupling_hdf5.md)
+for the shared frequency axis and quantity groups.
 
 **Expected trends:**
 - Higher f → smaller δ (stronger skin effect)

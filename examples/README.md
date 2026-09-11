@@ -153,8 +153,9 @@ L = mu_0 * a * (ln(8a / r_eq) - 2)
 For the shipped geometry (`a = 0.1 m`, `w = 0.002 m`) this gives `r_eq = 8.94e-4 m` and
 `L = 6.028e-07 H`. Neither example config computes an inductance by default — both run
 `analysis_type: "field"`. To get the matrix, set `"analysis_type": "coupling_matrix"`,
-which writes `inductance_matrix.csv` (magnetostatics) or
-`inductance_matrix_<scenario>_<freq>Hz.csv` (MQS):
+which writes `coupling_magnetostatics.h5` or `coupling_magnetoquasistatics.h5`.
+Read `/coupling/Inductance/values`; MQS indexes its matrix series by the shared
+`/coupling/frequency_hz` array. See [the HDF5 schema](../docs/coupling_hdf5.md).
 
 | Solve | L [H] | Error vs. analytic |
 |-------|-------|--------------------|

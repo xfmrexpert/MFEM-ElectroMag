@@ -339,8 +339,19 @@ public:
 	}
 
 	void SaveAnalysis() override {
+		// Writes the computed Maxwell (short-circuit) capacitance matrix.
+		// C(k,i) is the charge induced on conductor k when conductor i is held at
+		// 1 V and all other conductors at 0 V. The matrix is symmetric; diagonals
+		// are positive and off-diagonals negative. Each row sums to that
+		// conductor's capacitance to the grounded boundary.
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
-			WriteCouplingMatrix();
+			if (!C) {
+				Reporter().Warning("WriteCouplingMatrix: coupling matrix not computed.");
+				return;
+			}
+
+			SaveCouplingMatrix(*C, "Capacitance Matrix " + CouplingUnitLabel("F"),
+				"Capacitance", "F");
 		}
 	}
 
@@ -374,20 +385,5 @@ private:
 			}
 			(*C)(k, col) = Qk;
 		}
-	}
-
-	// Writes the computed Maxwell (short-circuit) capacitance matrix.
-	// C(k,i) is the charge induced on conductor k when conductor i is held at
-	// 1 V and all other conductors at 0 V. The matrix is symmetric; diagonals
-	// are positive and off-diagonals negative. Each row sums to that
-	// conductor's capacitance to the grounded boundary. 
-	void WriteCouplingMatrix() {
-		if (!C) {
-			Reporter().Warning("WriteCouplingMatrix: coupling matrix not computed.");
-			return;
-		}
-
-		SaveCouplingMatrix(*C, "Capacitance Matrix " + CouplingUnitLabel("F"),
-			"capacitance_matrix.csv");
 	}
 };

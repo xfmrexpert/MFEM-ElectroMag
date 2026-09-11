@@ -88,6 +88,11 @@ not depend on a residual tolerance.
 `frequency` is **not** valid here. It belongs on each scenario; see
 [`scenarios`](#scenarios).
 
+Coupling analyses write `coupling_<physics_type>.h5` under `results_path`
+(default: mesh directory), independently of the field-output flags. CSV matrix
+output is replaced by HDF5. See [the coupling schema](coupling_hdf5.md) for
+quantity groups, units, frequency indexing, and C# dictionary assembly.
+
 ## `simulation.amr`
 
 Object. Optional; absent or `enabled: false` means a single solve.
@@ -212,8 +217,10 @@ the true current distribution including skin and proximity effects.
 
 ## `scenarios`
 
-Array of objects, one per solve. Ignored when `analysis_type` is
-`coupling_matrix`, which synthesizes its own unit-drive scenarios.
+Array of objects, one per field solve. Static `coupling_matrix` analyses ignore
+these scenarios and synthesize unit-drive scenarios. MQS coupling uses their
+unique frequencies, in ascending order, and synthesizes unit-current terminal
+excitations at each frequency; prescribed excitation values are ignored.
 
 | Key | Type | Required | Meaning |
 |-----|------|----------|---------|

@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.14) # FetchContent requires 3.14+
-project(MFEM-ElectroMag VERSION 0.1.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.18) # HDF5 requires 3.18+
+project(MFEM-ElectroMag VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -118,8 +118,52 @@ FetchContent_MakeAvailable(nlohmann_json)
 target_compile_definitions(nlohmann_json
     INTERFACE JSON_DIAGNOSTICS=1 JSON_DIAGNOSTIC_POSITIONS=1)
 
+# HighFive wraps the HDF5 C API; no HDF5 C++ bindings are needed. Scope the
+# generic HDF5 options so disabling its tests and shared libraries does not
+# change BUILD_TESTING or BUILD_SHARED_LIBS for the rest of this project.
+function(configure_hdf5)
+    set(BUILD_TESTING OFF)
+    set(BUILD_SHARED_LIBS OFF)
+    set(BUILD_STATIC_LIBS ON)
+    set(HDF5_BUILD_TOOLS OFF)
+    set(HDF5_BUILD_EXAMPLES OFF)
+    set(HDF5_BUILD_HL_LIB OFF)
+    set(HDF5_BUILD_CPP_LIB OFF)
+    set(HDF5_BUILD_FORTRAN OFF)
+    set(HDF5_BUILD_JAVA OFF)
+    set(HDF5_ENABLE_PARALLEL OFF)
+    set(HDF5_ENABLE_Z_LIB_SUPPORT OFF)
+    set(HDF5_ENABLE_SZIP_SUPPORT OFF)
+    set(HDF5_NO_PACKAGES ON)
+    FetchContent_Declare(
+        hdf5
+        GIT_REPOSITORY https://github.com/HDFGroup/hdf5.git
+        GIT_TAG        hdf5_1.14.6
+        GIT_SHALLOW    TRUE
+        GIT_PROGRESS   TRUE
+        EXCLUDE_FROM_ALL
+    )
+    FetchContent_MakeAvailable(hdf5)
+endfunction()
+configure_hdf5()
+
+# Use the fetched HDF5 target rather than searching for a system installation.
+set(HIGHFIVE_FIND_HDF5 OFF CACHE BOOL "Use the fetched HDF5 library" FORCE)
+set(HIGHFIVE_UNIT_TESTS OFF CACHE BOOL "Build HighFive tests" FORCE)
+set(HIGHFIVE_EXAMPLES OFF CACHE BOOL "Build HighFive examples" FORCE)
+set(HIGHFIVE_BUILD_DOCS OFF CACHE BOOL "Build HighFive documentation" FORCE)
+FetchContent_Declare(
+    highfive
+    GIT_REPOSITORY https://github.com/highfive-devs/highfive.git
+    GIT_TAG        v3.1.1
+    GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+    EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(highfive)
+
 add_executable(mfem-electromag src/main.cpp)
-target_link_libraries(mfem-electromag PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json)
+target_link_libraries(mfem-electromag PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json HighFive::HighFive hdf5-static)
 
 # main.cpp instantiates every solver and writer through heavily templated MFEM
 # and nlohmann/json code, which exceeds the default COFF section limit (65279)
@@ -196,13 +240,14 @@ if(BUILD_TESTING)
         test/test_config_validator.cpp
         test/test_gmsh_interpolation.cpp
         test/test_gmsh_msh_format.cpp
+        test/test_hdf5.cpp
         test/test_input_parser.cpp
         test/test_mqs_port_operator.cpp
         test/test_solvers.cpp
         test/test_status_reporter.cpp
     )
 
-    target_link_libraries(mfem_tests PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json Catch2::Catch2WithMain)
+    target_link_libraries(mfem_tests PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json HighFive::HighFive hdf5-static Catch2::Catch2WithMain)
     target_include_directories(mfem_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
     # Same COFF section limit as mfem-electromag: the solver test translation

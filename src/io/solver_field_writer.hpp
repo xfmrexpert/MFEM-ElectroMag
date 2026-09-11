@@ -11,6 +11,7 @@
 #include "field_export.hpp"
 #include "gmsh_results_writer.hpp"
 #include "status_reporter.hpp"
+#include <highfive/H5File.hpp>
 
 /**
  * @brief Serializes a FieldExportSet to the supported result formats.
@@ -41,6 +42,58 @@ public:
 		  mesh_path(std::move(mesh_path)),
 		  solution_order(solution_order),
 		  gmsh_version(gmsh_version) {}
+
+	void WriteHDF5(const std::string& collection_name, const FieldExportSet& fields) const
+	{
+		namespace fs = std::filesystem;
+		const fs::path results_dir = results_directory.empty()
+			? fs::path(mesh_path).parent_path()
+			: fs::path(results_directory);
+		if (!results_dir.empty()) fs::create_directories(results_dir);
+		const fs::path out_path = results_dir / (collection_name + ".h5");
+		HighFive::File hdf5_file(out_path.string(), HighFive::File::Truncate);
+
+		// Preserve native FE coefficients and enough space metadata to interpret
+		// their ordering on the source mesh. Derived fields follow the ParaView
+		// projection convention rather than serializing lazy coefficient objects.
+		const int l2_order = std::max(0, solution_order - 1);
+		mfem::L2_FECollection fec_l2(l2_order, mesh.Dimension());
+		mfem::FiniteElementSpace fes_l2_scalar(&mesh, &fec_l2);
+		auto write_field = [&](const std::string& name, const std::string& kind,
+							   const mfem::GridFunction& field) {
+			std::vector<double> values(field.Size());
+			for (int i = 0; i < field.Size(); ++i) values[i] = field(i);
+			auto group = hdf5_file.createGroup(name);
+			auto dataset = group.createDataSet(kind, values);
+			const auto* space = field.FESpace();
+			dataset.createAttribute("finite_element_collection", std::string(space->FEColl()->Name()));
+			dataset.createAttribute("vector_dimension", space->GetVDim());
+			dataset.createAttribute("ordering", static_cast<int>(space->GetOrdering()));
+		};
+
+		for (const auto& f : fields.Fields()) {
+			switch (f.kind) {
+			case FieldExport::Kind::Primary:
+				write_field(f.name, "primary", *f.primary);
+				break;
+			case FieldExport::Kind::DerivedScalar: {
+				mfem::GridFunction projected(&fes_l2_scalar);
+				projected.ProjectCoefficient(*f.scalar);
+				write_field(f.name, "scalar", projected);
+				break;
+			}
+			case FieldExport::Kind::DerivedVector: {
+				mfem::FiniteElementSpace space(&mesh, &fec_l2, f.vector->GetVDim());
+				mfem::GridFunction projected(&space);
+				projected.ProjectCoefficient(*f.vector);
+				write_field(f.name, "vector", projected);
+				break;
+			}
+			}
+		}
+
+		Reporter().Diagnostic("Wrote HDF5 collection " + collection_name);
+	}
 
 	// ParaView serializer. Primary scalars are registered at native (high) order
 	// so ParaView's Lagrange cells render them faithfully; derived coefficients

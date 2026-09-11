@@ -20,12 +20,19 @@ A finite element solver for electromagnetic problems using MFEM (Modular Finite 
 
 ### Required
 
-- **CMake** (≥ 3.14): Build system
-- **C++ Compiler**: Supporting C++17 standard
+- **CMake** (>= 3.18): Build system (minimum required by HDF5)
+- **C and C++ Compilers**: C for HDF5 and C++17 support for the solver
   - GCC (≥ 7.0)
   - Clang (≥ 5.0)
   - MSVC (≥ 2017)
 - **MFEM** (v4.7): Automatically downloaded and built by CMake
+- **HDF5** (1.14.6): C library, automatically downloaded and built statically by CMake
+- **HighFive** (3.1.1): Header-only C++ wrapper for HDF5, automatically downloaded by CMake
+
+No separate HDF5 installation is required. The HDF5 build excludes optional tools,
+language bindings, MPI, and zlib/SZip compression dependencies. HDF5 and HighFive
+provide [coupling-matrix output](docs/coupling_hdf5.md) for all three solvers.
+Coupling matrices use HDF5 instead of CSV; field output formats are unchanged.
 
 ### Optional
 
@@ -213,8 +220,10 @@ A sweep uses an inclusive linear or logarithmic range:
 
 `points` includes both endpoints; with `points: 1`, only `start` is solved.
 Field analyses write one result per expanded point. For MQS
-`coupling_matrix` analyses, each scenario defines a frequency point and the
-solver writes a separate frequency-labeled resistance/inductance CSV pair.
+`coupling_matrix` analyses, the solver writes one matrix pair per unique frequency
+to `coupling_magnetoquasistatics.h5`. The `Inductance` and `Resistance` groups
+share a sorted numeric frequency axis. See [the schema and C# indexing
+example](docs/coupling_hdf5.md).
 
 ### Documentation
 
