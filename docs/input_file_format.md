@@ -308,8 +308,13 @@ grounded far-field boundary.
 	"geometry_type": "axisymmetric",
 	"mesh": "capacitor.mesh",
 	"order": 2,
-	"analysis_type": "coupling_matrix",
-	"output_paraview": true
+	"analysis_type": "coupling_matrix"
+  },
+  "output": {
+	"directory": "results",
+	"export_fields_for_coupling_matrix": true,
+	"paraview": {},
+	"hdf5": {}
   },
 
   "entity_groups": [

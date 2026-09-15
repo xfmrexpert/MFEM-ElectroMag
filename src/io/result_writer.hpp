@@ -1,0 +1,71 @@
+#pragma once
+
+#include <iomanip>
+#include <memory>
+#include <optional>
+#include <sstream>
+#include "coupling_matrix_writer.hpp"
+#include "hdf5_results_writer.hpp"
+#include "solver_field_writer.hpp"
+
+class ResultWriter {
+public:
+	ResultWriter(mfem::Mesh& mesh, const ProblemConfig& config)
+		: mesh_(mesh), config_(config), fields_(mesh, config.Order) {}
+
+	void BeginMesh() {
+		next_scenario_ = 0;
+		hdf5_.reset();
+		if (config_.Output.Hdf5File) {
+			hdf5_ = std::make_unique<Hdf5ResultsWriter>(*config_.Output.Hdf5File, mesh_, config_);
+		}
+	}
+
+	bool WantsFields() const {
+		return (config_.AnalysisType != AnalysisType::CouplingMatrix || config_.Output.ExportFieldsForCouplingMatrix)
+			&& (config_.Output.ParaviewDirectory || config_.Output.Gmsh || config_.Output.Hdf5File);
+	}
+
+	void WriteScenario(const std::string& name, const Scenario& scenario,
+		const FieldExportSet& fields, const std::string& driven_terminal = {}) {
+		if (!WantsFields()) return;
+		std::ostringstream identifier;
+		identifier << "scenario_" << std::setfill('0') << std::setw(6) << next_scenario_++;
+		const std::string id = identifier.str();
+		std::string label = name + (driven_terminal.empty() ? "" : "_" + driven_terminal);
+		if (label.size() > 96) label.resize(96);
+		for (char& character : label) {
+			if (!((character >= 'a' && character <= 'z') ||
+				(character >= 'A' && character <= 'Z') ||
+				(character >= '0' && character <= '9') || character == '-' || character == '_')) {
+				character = '_';
+			}
+		}
+		const std::string artifact_name = id + "_" + label;
+		if (config_.Output.ParaviewDirectory) {
+			fields_.WriteParaview(*config_.Output.ParaviewDirectory, artifact_name, fields);
+		}
+		if (config_.Output.Gmsh) {
+			fields_.WriteGmsh(config_.Output.Gmsh->Directory / (artifact_name + ".msh"), fields,
+				gmsh_results::ParseMshVersion(config_.Output.Gmsh->Version));
+		}
+		if (hdf5_) hdf5_->WriteScenario(id, name, scenario, fields, driven_terminal);
+		StatusReporter::Global().Diagnostic("Wrote " + id + " for scenario '" + name + "'"
+			+ (driven_terminal.empty() ? "" : ", terminal '" + driven_terminal + "'"));
+	}
+
+	std::optional<matrix_io::CouplingMatrixWriter> CouplingWriter(
+		const std::vector<std::string>& terminals) {
+		if (!hdf5_) return std::nullopt;
+		return matrix_io::CouplingMatrixWriter(hdf5_->File(), terminals,
+			ToString(config_.PhysicsType),
+			config_.GeometryType == GeometryType::Axisymmetric ? "axisymmetric" : "planar");
+	}
+
+private:
+	mfem::Mesh& mesh_;
+	const ProblemConfig& config_;
+	SolverFieldWriter fields_;
+	std::unique_ptr<Hdf5ResultsWriter> hdf5_;
+	std::size_t next_scenario_ = 0;
+};

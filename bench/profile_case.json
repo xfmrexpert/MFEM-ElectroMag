@@ -7,7 +7,6 @@
     "solver_tolerance": 1E-10,
     "solver_max_iter": 3000,
     "solver_print_level": 0,
-    "output_gmsh": false,
     "amr": {
       "enabled": false,
       "max_iterations": 1,

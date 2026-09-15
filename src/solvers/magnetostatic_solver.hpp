@@ -224,8 +224,8 @@ public:
 	// Solve + save on the CURRENT mesh/operators. Both analysis types flow through
 	// ONE imprint -> solve -> save loop over BuildSolveScenarios() (prescribed
 	// scenarios for Field; synthetic per-terminal unit-current drives for
-	// CouplingMatrix). AMR calls this once more on the converged mesh so the
-	// exported fields match the exported mesh.
+	// CouplingMatrix). Shared output policy controls field serialization and each
+	// AMR pass replaces the previous mesh's results.
 	void RunOnCurrentMesh() override
 	{
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
@@ -248,7 +248,8 @@ public:
 					: ImprintMode::Field);
 			SolveSystem();
 			AccumulateScenarioError();
-			SaveScenario(sc_name);
+			SaveScenario(sc_name, sc, config.AnalysisType == AnalysisType::CouplingMatrix
+				? sc.Excitations.front().TerminalName : "");
 			if (config.AnalysisType == AnalysisType::CouplingMatrix) {
 				// Each scenario is a unit-current drive on one terminal, so the
 				// solution's flux linkage / inductance is the corresponding column
@@ -260,9 +261,6 @@ public:
 					(*L)(row, col) = ComputeFluxLinkage(row_term);
 				}
 			}
-		}
-		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
-			WriteCouplingMatrix();
 		}
 	}
 
@@ -323,7 +321,7 @@ public:
 		return fields;
 	}
 
-	void SaveAnalysis() override
+	void SaveAnalysisResults() override
 	{
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
 			WriteCouplingMatrix();

@@ -11,7 +11,7 @@
 #include "../io/field_export.hpp"
 #include "../io/matrix_writer.hpp"
 #include "../io/coupling_matrix_writer.hpp"
-#include "../io/solver_field_writer.hpp"
+#include "../io/result_writer.hpp"
 #include "../io/status_reporter.hpp"
 #include "amr_support.hpp"
 #include "../axisym/axisymmetric_mesh_validation.hpp"
@@ -46,6 +46,7 @@ protected:
     // docs/boundary_and_terminal_model.md.
     BoundaryConditionSet boundary_conditions;
 private:
+    std::unique_ptr<ResultWriter> result_writer;
     std::vector<amr::AmrIterationInfo> amr_history;
 	// Non-null only while an AMR pass is in flight: the running root-mean-square
 	// of the per-scenario error indicators accumulated by the current scenario
@@ -66,15 +67,21 @@ public:
 
     virtual void Setup() = 0;
     void Run() {
+        result_writer = std::make_unique<ResultWriter>(mesh, config);
         if (config.Amr.Enabled) {
             RunAdaptive();
         }
         else {
             amr_history.clear();
+            result_writer->BeginMesh();
             RunOnCurrentMesh();
         }
     }
-    virtual void SaveAnalysis() = 0;
+    void SaveAnalysis() {
+        if (!result_writer) return;
+        SaveAnalysisResults();
+        result_writer.reset();
+    }
 
     // Post-solve field recovery: each solver declares WHAT to export for the
     // just-solved scenario (primary solution fields + derived coefficients).
@@ -87,6 +94,7 @@ public:
 
     // ---- Virtual methods: each solver supplies its own physics -------------
 protected:
+    virtual void SaveAnalysisResults() = 0;
     virtual void BuildOperators() = 0;
     virtual void RunOnCurrentMesh() = 0;
 
@@ -407,20 +415,10 @@ protected:
     // Shared per-scenario serialization: recover the field set ONCE, then fan it
     // out to whichever formats are enabled. The writer owns the format details;
     // solvers only declare WHAT to export via CollectExportFields().
-    void SaveScenario(const std::string& scenario_name) {
-        if (!config.OutputParaview && !config.OutputGmsh) return;
-
-        FieldExportSet fields = CollectExportFields();
-        const SolverFieldWriter writer(mesh, config.ResultsDirectory,
-                                       config.MeshPath, fec->GetOrder(),
-                                       gmsh_results::ParseMshVersion(config.GmshFormat));
-        if (config.OutputParaview) {
-            writer.WriteParaview("results_" + std::string(ToString(config.PhysicsType))
-                + "_" + scenario_name, fields);
-        }
-        if (config.OutputGmsh) {
-            writer.WriteGmsh(scenario_name, fields);
-        }
+    void SaveScenario(const std::string& scenario_name, const Scenario& scenario,
+        const std::string& driven_terminal = {}) {
+        if (!result_writer || !result_writer->WantsFields()) return;
+        result_writer->WriteScenario(scenario_name, scenario, CollectExportFields(), driven_terminal);
     }
 
     // Unit label for an extracted coupling quantity.
@@ -440,17 +438,8 @@ protected:
         return geometry == GeometryType::Axisymmetric ? si_unit : si_unit + "/m";
     }
 
-    matrix_io::CouplingMatrixWriter CreateCouplingWriter() const {
-        namespace fs = std::filesystem;
-        const fs::path directory = config.ResultsDirectory.empty()
-            ? fs::path(config.MeshPath).parent_path()
-            : fs::path(config.ResultsDirectory);
-        if (!directory.empty()) fs::create_directories(directory);
-        const fs::path path = directory /
-            ("coupling_" + std::string(ToString(config.PhysicsType)) + ".h5");
-        return matrix_io::CouplingMatrixWriter(path, TerminalNames(),
-            ToString(config.PhysicsType),
-            geometry == GeometryType::Axisymmetric ? "axisymmetric" : "planar");
+    std::optional<matrix_io::CouplingMatrixWriter> CreateCouplingWriter() const {
+        return result_writer ? result_writer->CouplingWriter(TerminalNames()) : std::nullopt;
     }
 
     // Static analyses write one matrix; MQS uses the same writer for a sweep.
@@ -458,7 +447,7 @@ protected:
         const std::string& title, const std::string& quantity,
         const std::string& si_unit) const {
         auto writer = CreateCouplingWriter();
-        writer.WriteMatrix(quantity, M, CouplingUnits(si_unit));
+        if (writer) writer->WriteMatrix(quantity, M, CouplingUnits(si_unit));
         PrintCouplingMatrix(M, title);
     }
 
@@ -523,6 +512,7 @@ private:
             errors = 0.0;
             amr_errors = &errors;
             amr_error_samples = 0;
+            result_writer->BeginMesh();
             RunOnCurrentMesh();
             amr_errors = nullptr;
 

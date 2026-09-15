@@ -61,22 +61,22 @@ cmake --build build --config Release
 ./build/mfem-electromag examples/solenoid/config.json
 ```
 
-This config does **not** enable any output; `output_paraview` and `output_gmsh`
-both default to `false`. To write result files, add them to the `simulation`
-block:
+This config does **not** enable file output. Add a top-level `output` block:
 
 ```json
 {
-  "simulation": {
-    "output_paraview": true,
-    "output_gmsh": true
+  "output": {
+    "paraview": {},
+    "gmsh": {},
+    "hdf5": {}
   }
 }
 ```
 
-The single scenario is named `energized`, so ParaView output lands in
-`results_magnetostatics_energized/` and Gmsh output in `energized.results.msh`,
-both written next to the mesh unless `results_path` is set.
+The scenario `energized` produces a collection under
+`results/paraview/scenario_000000_energized/`, a Gmsh file at
+`results/gmsh/scenario_000000_energized.msh`, and a `results/results.h5` archive.
+These paths are relative to the config directory unless `output.directory` is set.
 
 ## Expected Results
 
@@ -90,7 +90,7 @@ The simulation should produce:
 
 ```bash
 # Open in ParaView
-paraview results_magnetostatics_energized/data.pvd
+paraview results/paraview/scenario_000000_energized/scenario_000000_energized.pvd
 ```
 
 **Suggested visualizations:**

@@ -23,8 +23,6 @@ json CanonicalConfig() {
             {"solver_tolerance", 1e-9},
             {"solver_max_iter", 321},
             {"solver_print_level", 2},
-            {"output_paraview", true},
-            {"output_gmsh", true},
             {"amr", {
                 {"enabled", true},
                 {"max_iterations", 4},
@@ -34,6 +32,7 @@ json CanonicalConfig() {
                 {"conforming", true}
             }}
         }},
+        {"output", {{"paraview", json::object()}, {"gmsh", json::object()}}},
         {"entity_groups", json::array({
             {{"name", "Conductor"}, {"dim", 2}, {"attribute_ids", {1, 2}}},
             {{"name", "FarField"}, {"dim", 1}, {"attribute_ids", {3}}}
@@ -78,8 +77,8 @@ TEST_CASE("InputParser decodes the canonical schema", "[input_parser]") {
     REQUIRE(config.SolverTolerance == Catch::Approx(1e-9));
     REQUIRE(config.SolverMaxIter == 321);
     REQUIRE(config.SolverPrintLevel == 2);
-    REQUIRE(config.OutputParaview);
-    REQUIRE(config.OutputGmsh);
+    REQUIRE(config.Output.ParaviewDirectory);
+    REQUIRE(config.Output.Gmsh);
     REQUIRE(config.Amr.Enabled);
     REQUIRE(config.Amr.MaxIterations == 4);
     REQUIRE(config.Amr.MaxDofs == 12345);
@@ -183,7 +182,7 @@ TEST_CASE("InputParser resolves paths relative to the config file", "[input_pars
     fs::create_directories(directory);
 
     json source = CanonicalConfig();
-    source["simulation"]["results_path"] = "results";
+    source["output"]["directory"] = "results";
     {
         std::ofstream output(config_path);
         output << source;
@@ -191,12 +190,12 @@ TEST_CASE("InputParser resolves paths relative to the config file", "[input_pars
 
     const ProblemConfig config = InputParser(config_path.string()).GetProblemConfig();
     REQUIRE(fs::path(config.MeshPath) == directory / "test.msh");
-    REQUIRE(fs::path(config.ResultsDirectory) == directory / "results");
+    REQUIRE(config.Output.Directory == directory / "results");
 
     fs::remove_all(directory);
 }
 
-TEST_CASE("Results path configures an output directory", "[input_parser]") {
+TEST_CASE("Output directory resolves relative to the configuration", "[input_parser]") {
     json test_config = {
         {"simulation", {
             {"physics_type", "electrostatics"},
@@ -204,28 +203,28 @@ TEST_CASE("Results path configures an output directory", "[input_parser]") {
         }}
     };
 
-    SECTION("missing path preserves mesh-directory output") {
+    SECTION("missing path uses results") {
         InputParser parser(test_config);
-        REQUIRE(parser.GetProblemConfig().ResultsDirectory.empty());
+        REQUIRE(parser.GetProblemConfig().Output.Directory == "results");
     }
 
-    SECTION("empty path preserves mesh-directory output") {
-        test_config["simulation"]["results_path"] = "";
+    SECTION("dot explicitly selects the config directory") {
+        test_config["output"]["directory"] = ".";
         InputParser parser(test_config);
-        REQUIRE(parser.GetProblemConfig().ResultsDirectory.empty());
+        REQUIRE(parser.GetProblemConfig().Output.Directory == ".");
     }
 
     SECTION("relative path is resolved from the config directory") {
-        test_config["simulation"]["results_path"] = "results";
+        test_config["output"]["directory"] = "results";
         InputParser parser(test_config);
-        REQUIRE(fs::path(parser.GetProblemConfig().ResultsDirectory) == fs::path(".") / "results");
+        REQUIRE(parser.GetProblemConfig().Output.Directory == "results");
     }
 
     SECTION("absolute path is preserved") {
         const fs::path results_path = fs::temp_directory_path() / "mfem-electromag-results";
-        test_config["simulation"]["results_path"] = results_path.string();
+        test_config["output"]["directory"] = results_path.string();
         InputParser parser(test_config);
-        REQUIRE(fs::path(parser.GetProblemConfig().ResultsDirectory) == results_path);
+        REQUIRE(parser.GetProblemConfig().Output.Directory == results_path);
     }
 }
 
@@ -233,6 +232,43 @@ TEST_CASE("InputParser wraps decoding type failures", "[input_parser]") {
     json source = CanonicalConfig();
     source["simulation"]["order"] = "second";
     REQUIRE_THROWS_AS(InputParser(source).GetProblemConfig(), std::runtime_error);
+}
+
+TEST_CASE("InputParser resolves per-format output destinations", "[input_parser][output]") {
+    json source = CanonicalConfig();
+    source.erase("output");
+    InputParser parser(source);
+    parser.config_dir = "/tmp/configuration";
+
+    SECTION("omitted formats are disabled") {
+        const auto output = parser.GetProblemConfig().Output;
+        REQUIRE(output.Directory == "/tmp/configuration/results");
+        REQUIRE_FALSE(output.ParaviewDirectory);
+        REQUIRE_FALSE(output.Gmsh);
+        REQUIRE_FALSE(output.Hdf5File);
+        REQUIRE_FALSE(output.ExportFieldsForCouplingMatrix);
+    }
+    SECTION("format objects enable defaults beneath the root") {
+        source["output"] = {{"directory", "exports"}, {"export_fields_for_coupling_matrix", true},
+            {"paraview", json::object()}, {"gmsh", json::object()}, {"hdf5", json::object()}};
+        const auto output = parser.GetProblemConfig().Output;
+        REQUIRE(output.ParaviewDirectory == "/tmp/configuration/exports/paraview");
+        REQUIRE(output.Gmsh->Directory == "/tmp/configuration/exports/gmsh");
+        REQUIRE(output.Gmsh->Version == "2.2");
+        REQUIRE(output.Hdf5File == "/tmp/configuration/exports/results.h5");
+        REQUIRE(output.ExportFieldsForCouplingMatrix);
+    }
+    SECTION("absolute destinations are preserved") {
+        source["output"] = {{"directory", "/tmp/run"},
+            {"paraview", {{"directory", "/tmp/vtk"}}},
+            {"gmsh", {{"directory", "mesh"}, {"version", "4.1"}}},
+            {"hdf5", {{"file", "/tmp/archive.h5"}}}};
+        const auto output = parser.GetProblemConfig().Output;
+        REQUIRE(output.ParaviewDirectory == "/tmp/vtk");
+        REQUIRE(output.Gmsh->Directory == "/tmp/run/mesh");
+        REQUIRE(output.Gmsh->Version == "4.1");
+        REQUIRE(output.Hdf5File == "/tmp/archive.h5");
+    }
 }
 
 TEST_CASE("InputParser requires terminal quantity", "[input_parser]") {

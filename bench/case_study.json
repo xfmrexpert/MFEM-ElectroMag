@@ -7,7 +7,6 @@
     "solver_tolerance": 1E-10,
     "solver_max_iter": 3000,
     "solver_print_level": 0,
-    "output_gmsh": true,
     "amr": {
       "enabled": true,
       "max_iterations": 3,
@@ -16,6 +15,10 @@
       "error_tolerance": 0,
       "conforming": true
     }
+  },
+  "output": {
+    "directory": "results",
+    "gmsh": {}
   },
   "entity_groups": [
     {

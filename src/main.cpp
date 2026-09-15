@@ -13,6 +13,7 @@
 #include "solvers/solver_factory.hpp"
 #include "config/config_validator.hpp"
 #include "io/status_reporter.hpp"
+#include "io/mesh_loader.hpp"
 
 namespace {
 
@@ -20,7 +21,7 @@ void PrintUsage(const char* prog) {
     std::cerr <<
         "Usage: " << prog << " <config.json> [options]\n"
         "Options:\n"
-        "  --results-path <directory> Override simulation.results_path. A relative\n"
+        "  --output-directory <dir>   Override output.directory. A relative\n"
         "                             path resolves against the current directory.\n"
         "  --verbosity <0|1|2>        0=status/timing, 1=solver output, 2=diagnostics\n"
         "  --machine-readable         Emit flushed JSON Lines progress on stdout\n"
@@ -78,7 +79,7 @@ int main(int argc, char *argv[]) {
 
     try {
         std::string config_file = "config.json";
-        std::string cli_results_path;
+        std::string cli_output_directory;
         int cli_verbosity = 0;
         bool verbosity_explicit = false;
 
@@ -97,8 +98,8 @@ int main(int argc, char *argv[]) {
             } else if (a == "--version") {
                 std::cout << build_info::Describe() << '\n';
                 return 0;
-            } else if (a == "--results-path") {
-                cli_results_path = need_value(a);
+            } else if (a == "--output-directory") {
+                cli_output_directory = need_value(a);
             } else if (a == "--verbosity") {
                 cli_verbosity = ParseVerbosity(need_value(a));
                 verbosity_explicit = true;
@@ -139,20 +140,18 @@ int main(int argc, char *argv[]) {
         }
         InputParser& parser = *parser_ptr;
 
-        // Inject the CLI override into the shared json so downstream parsing
-        // picks it up (solvers re-run InputParser internally inside Setup()).
+        // Inject the CLI override into the shared json before decoding.
         // const_cast is safe: parser owns the json when constructed from a path.
         json& mutable_json = const_cast<json&>(parser.config);
         if (!mutable_json.contains("simulation") || !mutable_json["simulation"].is_object()) {
             mutable_json["simulation"] = json::object();
         }
-        if (!cli_results_path.empty()) {
-            // InputParser::GetResultsDirectory() resolves relative paths against
-            // the config file's directory, which is right for a path written in
-            // the json but surprising for one typed on the command line. Make it
-            // absolute here so the override keeps ordinary shell semantics.
-            mutable_json["simulation"]["results_path"] =
-                std::filesystem::absolute(cli_results_path).string();
+        if (!cli_output_directory.empty()) {
+            if (mutable_json.contains("output") && !mutable_json["output"].is_object()) {
+                throw std::runtime_error("output must be an object");
+            }
+            mutable_json["output"]["directory"] =
+                std::filesystem::absolute(cli_output_directory).string();
         }
 
         // Validate Configuration (schema and basic semantics before decoding)
@@ -180,24 +179,11 @@ int main(int argc, char *argv[]) {
                 "Mesh file not found or not readable: '" + config.MeshPath + "'");
         }
 
-        // Load without auto-fix so we can diagnose bad meshes uniformly in
-        // Debug and Release (MFEM_ASSERT is a no-op in Release, which would
-        // otherwise let an inconsistent mesh through silently).
-        //
-        // NOTE: the mfem::Mesh(filename, ...) constructor internally calls
-        // Load() -> Finalize() -> CheckBdrElementOrientation(). For meshes
-        // with orphan boundary elements (boundary edges whose endpoints are
-        // not shared by any 2D element), CheckBdrElementOrientation indexes
-        // faces_info[-1] and triggers MFEM_ASSERT. The MFEM_ERROR_THROW action
-        // set at the top of main() turns that into a catchable
-        // mfem::ErrorException instead of an std::abort().
         std::unique_ptr<mfem::Mesh> mesh_ptr;
         {
             auto operation = reporter.Start("mesh loading");
             try {
-                mesh_ptr = std::make_unique<mfem::Mesh>(
-                    config.MeshPath, /*generate_edges=*/1, /*refine=*/0,
-                    /*fix_orientation=*/false);
+                mesh_ptr = mesh_io::LoadMesh(config.MeshPath);
             }
             catch (const mfem::ErrorException& e) {
                 throw std::runtime_error(
@@ -205,20 +191,6 @@ int main(int argc, char *argv[]) {
                     "that the file format is supported and that 2D elements use "
                     "counter-clockwise winding with boundary lines whose nodes "
                     "lie on element edges.\nMFEM detail: " + std::string(e.what()));
-            }
-
-            // Orientation is reported (not repaired) so a bad mesh fails loudly
-            // at its source rather than being silently patched every run.
-            const int bad_el  = mesh_ptr->CheckElementOrientation(/*fix_it=*/false);
-            const int bad_bdr = mesh_ptr->CheckBdrElementOrientation(/*fix_it=*/false);
-            if (bad_el != 0 || bad_bdr != 0) {
-                throw std::runtime_error(
-                    "Invalid mesh '" + config.MeshPath + "': "
-                    + std::to_string(bad_el) + " mis-oriented element(s), "
-                    + std::to_string(bad_bdr)
-                    + " mis-oriented or orphan boundary element(s). "
-                    "Regenerate the mesh with counter-clockwise 2D element "
-                    "winding and boundary lines whose nodes lie on element edges.");
             }
         }
 

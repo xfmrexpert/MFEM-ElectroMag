@@ -5,6 +5,7 @@
 #include <highfive/H5File.hpp>
 #include "io/coupling_matrix_writer.hpp"
 #include "io/solver_field_writer.hpp"
+#include "io/hdf5_results_writer.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -76,7 +77,7 @@ TEST_CASE("Coupling HDF5 stores labeled row-major doubles and metadata", "[hdf5]
 		HighFive::File file(temporary.path.string(), HighFive::File::ReadOnly);
 		int version = 0;
 		file.getAttribute("schema_version").read(version);
-		REQUIRE(version == 1);
+		REQUIRE(version == 2);
 		auto group = file.getGroup("/coupling");
 		std::string physics, geometry, units;
 		group.getAttribute("physics_type").read(physics);
@@ -186,22 +187,51 @@ TEST_CASE("Field HDF5 writes numeric primary and projected derived data", "[hdf5
 	constant(1) = -2.5;
 	constant(2) = 4.0;
 	fields.AddVector("vector_field", std::make_unique<mfem::VectorConstantCoefficient>(constant));
-	SolverFieldWriter writer(mesh, temporary.path.parent_path().string(), "unused.mesh", 2);
-	writer.WriteHDF5(temporary.path.stem().string(), fields);
+	ProblemConfig config;
+	config.Order = 2;
+	Hdf5ResultsWriter writer(temporary.path, mesh, config);
+	Scenario scenario;
+	scenario.Frequency = 50.0;
+	writer.WriteScenario("scenario_000000", "Drive/A", scenario, fields);
+	writer.WriteScenario("scenario_000001", "Drive/A", scenario, fields);
+	mfem::DenseMatrix matrix(1);
+	matrix = 2.5;
+	matrix_io::CouplingMatrixWriter coupling(writer.File(), {"Drive"}, "electrostatics", "planar");
+	coupling.WriteMatrix("Capacitance", matrix, "F/m");
 
 	HighFive::File file(temporary.path.string(), HighFive::File::ReadOnly);
+	REQUIRE(file.exist("coupling/Capacitance/values"));
+	REQUIRE(file.getGroup("scenarios").getNumberObjects() == 2);
+	std::string mesh_text;
+	file.getDataSet("mesh/mfem").read(mesh_text);
+	std::istringstream mesh_stream(mesh_text);
+	mfem::Mesh restored_mesh(mesh_stream, 1, 0, false);
+	REQUIRE(restored_mesh.GetNE() == mesh.GetNE());
+	REQUIRE(restored_mesh.GetNV() == mesh.GetNV());
+	const auto output_fields = file.getGroup("scenarios/scenario_000000/fields");
 	std::vector<double> values;
-	file.getDataSet("potential/primary").read(values);
+	output_fields.getDataSet("potential/values").read(values);
 	REQUIRE(values.size() == primary.Size());
 	for (int i = 0; i < primary.Size(); ++i) REQUIRE(values[i] == primary(i));
+	std::string primary_collection;
+	output_fields.getDataSet("potential/values").getAttribute("finite_element_collection").read(primary_collection);
+	std::unique_ptr<mfem::FiniteElementCollection> restored_collection(
+		mfem::FiniteElementCollection::New(primary_collection.c_str()));
+	mfem::FiniteElementSpace restored_space(&restored_mesh, restored_collection.get());
+	mfem::GridFunction restored(&restored_space);
+	REQUIRE(restored.Size() == values.size());
+	for (int index = 0; index < restored.Size(); ++index) restored(index) = values[index];
+	mfem::IntegrationPoint point;
+	point.Set2(0.37, 0.61);
+	REQUIRE(std::abs(restored.GetValue(0, point) - primary.GetValue(0, point)) < 1.0e-12);
 
 	mfem::L2_FECollection l2_collection(1, 2);
 	mfem::FiniteElementSpace scalar_space(&mesh, &l2_collection);
-	file.getDataSet("magnitude/scalar").read(values);
+	output_fields.getDataSet("magnitude/values").read(values);
 	REQUIRE(values == std::vector<double>(scalar_space.GetVSize(), 3.5));
 
 	mfem::FiniteElementSpace vector_space(&mesh, &l2_collection, 3);
-	auto dataset = file.getDataSet("vector_field/vector");
+	auto dataset = output_fields.getDataSet("vector_field/values");
 	dataset.read(values);
 	REQUIRE(values.size() == vector_space.GetVSize());
 	for (int dof = 0; dof < vector_space.GetNDofs(); ++dof) {

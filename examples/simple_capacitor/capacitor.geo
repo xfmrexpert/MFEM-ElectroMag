@@ -18,7 +18,7 @@
 SetFactory("OpenCASCADE");
 
 // Geometry parameters (all in meters)
-r_min = 0.001;           // Small inner radius (avoid r=0 to prevent shared nodes)
+r_min = 0.001;           // Plate bore radius; the field domain includes the axis
 plate_radius = 0.1;      // Plate outer radius
 plate_thickness = 0.001; // Thin plate (1 mm)
 separation = 0.01;       // Separation between plates (1 cm)
@@ -82,43 +82,36 @@ Rectangle(9) = {plate_radius, z_top_plate_bot, 0, far_field_r - plate_radius, pl
 // Top region
 Rectangle(10) = {plate_radius, z_top_plate_top, 0, far_field_r - plate_radius, far_field_z_top - z_top_plate_top};
 
+BooleanFragments{ Surface{1:15}; Delete; }{}
+bottom_plate_curves[] = Boundary{ Surface{1}; };
+top_plate_curves[] = Boundary{ Surface{3}; };
+bottom_plate_curves[] = Abs(bottom_plate_curves[]);
+top_plate_curves[] = Abs(top_plate_curves[]);
+Delete{ Surface{1, 3}; }
+
 // Define physical surfaces (material attributes)
 Physical Surface("Dielectric", 2) = {2, 13};  // Dielectric between plates (including axis region)
 Physical Surface("Air", 1) = {4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15};  // All air regions
 
-// Boundary conditions - Identify and tag curves by spatial location
-// We need to tag:
-//   1 = Top plate (V = 1000 V): top edge of Rectangle 3
-//   2 = Bottom plate (V = 0 V): bottom edge of Rectangle 1
-//   3 = Far field (V = 0 V): outer boundary at r=far_field_r
-
-// Get all boundary curves
-all_curves[] = Curve "*";
-
 // Select curves by bounding box (with small tolerance)
 tol = 0.0001;
 
-// Bottom plate: curves at z ≈ z_bot_plate (0), r from r_min to plate_radius
-bottom_plate_curves[] = Curve In BoundingBox {r_min - tol, z_bot_plate - tol, -tol,
-                                                plate_radius + tol, z_bot_plate + tol, tol};
-
-// Top plate: curves at z ≈ z_top_plate_top (0.012), r from r_min to plate_radius
-top_plate_curves[] = Curve In BoundingBox {r_min - tol, z_top_plate_top - tol, -tol,
-                                             plate_radius + tol, z_top_plate_top + tol, tol};
-
-// Far field: curves at r ≈ far_field_r, all z
 far_field_curves[] = Curve In BoundingBox {far_field_r - tol, -far_field_z_bot - tol, -tol,
                                              far_field_r + tol, far_field_z_top + tol, tol};
+far_field_top[] = Curve In BoundingBox {-tol, far_field_z_top - tol, -tol,
+                                      far_field_r + tol, far_field_z_top + tol, tol};
+far_field_bottom[] = Curve In BoundingBox {-tol, -far_field_z_bot - tol, -tol,
+                                         far_field_r + tol, -far_field_z_bot + tol, tol};
 
 // Define physical curves
 Physical Curve("TopPlate", 1) = {top_plate_curves[]};
 Physical Curve("BottomPlate", 2) = {bottom_plate_curves[]};
-Physical Curve("FarField", 3) = {far_field_curves[]};
+Physical Curve("FarField", 3) = {far_field_curves[], far_field_top[], far_field_bottom[]};
 
 // Mesh refinement
 // Fine mesh at plates and in dielectric
 Field[1] = Distance;
-Field[1].SurfacesList = {1, 2, 3};  // Distance from plates and dielectric
+Field[1].SurfacesList = {2, 13};
 
 Field[2] = Threshold;
 Field[2].InField = 1;
@@ -140,7 +133,7 @@ Field[4].DistMax = 0.1;
 
 // Refinement near plate edges (fringing field)
 Field[5] = Distance;
-Field[5].CurvesList = {2, 6};  // Outer edges of plates
+Field[5].CurvesList = {top_plate_curves[], bottom_plate_curves[]};
 
 Field[6] = Threshold;
 Field[6].InField = 5;

@@ -151,7 +151,7 @@ OMP_NUM_THREADS=4 ./mfem-electromag config.json
 | Option | Description |
 | --- | --- |
 | `<config.json>` | Path to the configuration file (default: `config.json`) |
-| `--results-path <directory>` | Override `simulation.results_path`. A relative path resolves against the current working directory, not the config file directory. |
+| `--output-directory <directory>` | Override `output.directory`. A relative path resolves against the current working directory, not the config file directory. |
 | `--verbosity <0\|1\|2>` | `0` = status/timing only, `1` = solver output, `2` = diagnostics |
 | `--machine-readable` | Emit flushed JSON Lines progress on stdout. Implies `--verbosity 1` unless `--verbosity` is given explicitly. |
 | `--version` | Print version/build information and exit |
@@ -221,9 +221,26 @@ A sweep uses an inclusive linear or logarithmic range:
 `points` includes both endpoints; with `points: 1`, only `start` is solved.
 Field analyses write one result per expanded point. For MQS
 `coupling_matrix` analyses, the solver writes one matrix pair per unique frequency
-to `coupling_magnetoquasistatics.h5`. The `Inductance` and `Resistance` groups
+to the archive selected by `output.hdf5`. The `Inductance` and `Resistance` groups
 share a sorted numeric frequency axis. See [the schema and C# indexing
 example](docs/coupling_hdf5.md).
+
+Enable result formats in a top-level block:
+
+```json
+"output": {
+  "directory": "results",
+  "export_fields_for_coupling_matrix": false,
+  "paraview": {},
+  "gmsh": {"version": "2.2"},
+  "hdf5": {"file": "results.h5"}
+}
+```
+
+Omitted formats are disabled. The HDF5 archive holds the final mesh, scenario
+fields, and coupling matrices. Coupling fields are disabled by default to keep
+matrix runs compact; set `export_fields_for_coupling_matrix` to true to export every unit-drive
+field in all enabled formats. Relative format paths resolve beneath the root.
 
 ### Documentation
 

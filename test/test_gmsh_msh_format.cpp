@@ -17,8 +17,11 @@
 //           $Entities as a physical tag; these tests pin that mapping.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <filesystem>
+#include <array>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -26,6 +29,7 @@
 
 #include "mfem.hpp"
 #include "io/gmsh_results_writer.hpp"
+#include "io/mesh_loader.hpp"
 
 namespace {
 
@@ -86,7 +90,8 @@ mfem::Mesh LoadMsh(const char* text) {
 	std::string s(text);
 	if (!s.empty() && s.front() == '\n') { s.erase(0, 1); }
 	std::istringstream in(s);
-	return mfem::Mesh(in, /*generate_edges=*/0, /*refine=*/0);
+	auto mesh = mesh_io::LoadMesh(in);
+	return std::move(*mesh);
 }
 
 std::vector<int> Attributes(mfem::Mesh& mesh) {
@@ -142,6 +147,110 @@ TEST_CASE("MSH 4.1 input preserves per-attribute element counts", "[gmsh][msh][i
 	}
 	REQUIRE(n7 == 1);
 	REQUIRE(n12 == 1);
+}
+
+TEST_CASE("Owned mesh loading releases rejected topology", "[gmsh][msh][input][mesh_loader]") {
+	const std::string malformed =
+		"$MeshFormat\n2.2 0 8\n$EndMeshFormat\n"
+		"$Nodes\n4\n1 0 0 0\n2 1 0 0\n3 1 1 0\n4 0 1 0\n$EndNodes\n"
+		"$Elements\n3\n1 1 2 1 1 2 4\n2 2 2 7 7 1 2 3\n"
+		"3 2 2 12 12 1 3 4\n$EndElements\n";
+	for (int attempt = 0; attempt < 3; ++attempt) {
+		std::istringstream input(malformed);
+		REQUIRE_THROWS_WITH(mesh_io::LoadMesh(input),
+			Catch::Matchers::ContainsSubstring("does not match a mesh face"));
+	}
+	std::string valid(kMsh22);
+	std::istringstream input(valid.substr(1));
+	const auto mesh = mesh_io::LoadMesh(input);
+	REQUIRE(mesh->GetNE() == 2);
+}
+
+TEST_CASE("Owned mesh loading normalizes boundary directions", "[gmsh][msh][input][mesh_loader]") {
+	std::istringstream input(
+		"$MeshFormat\n2.2 0 8\n$EndMeshFormat\n"
+		"$Nodes\n3\n1 0 0 0\n2 1 0 0\n3 0 1 0\n$EndNodes\n"
+		"$Elements\n2\n1 1 2 1 1 2 1\n2 2 2 7 7 1 2 3\n$EndElements\n");
+	const auto mesh = mesh_io::LoadMesh(input);
+	REQUIRE(mesh->CheckBdrElementOrientation(false) == 0);
+	REQUIRE(mesh->GetNBE() == 1);
+}
+
+TEST_CASE("Owned mesh loading releases failed parses", "[msh][input][mesh_loader]") {
+	std::string text;
+	SECTION("unknown format") {
+		text = "Not a mesh\n";
+	}
+	SECTION("missing MFEM end tag after allocating topology") {
+		text = "MFEM mesh v1.2\n\ndimension\n2\nelements\n1\n1 2 0 1 2\n"
+			"boundary\n3\n1 1 0 1\n2 1 1 2\n3 1 2 0\n"
+			"vertices\n3\n2\n0 0\n1 0\n0 1\n";
+	}
+	SECTION("invalid attribute after allocating Gmsh elements") {
+		text = "$MeshFormat\n2.2 0 8\n$EndMeshFormat\n"
+			"$Nodes\n4\n1 0 0 0\n2 1 0 0\n3 1 1 0\n4 0 1 0\n$EndNodes\n"
+			"$Elements\n2\n1 2 2 7 7 1 2 3\n2 2 2 0 12 1 3 4\n$EndElements\n";
+	}
+	SECTION("inverted domain element") {
+		text = "$MeshFormat\n2.2 0 8\n$EndMeshFormat\n"
+			"$Nodes\n3\n1 0 0 0\n2 1 0 0\n3 0 1 0\n$EndNodes\n"
+			"$Elements\n1\n1 2 2 7 7 1 3 2\n$EndElements\n";
+	}
+	for (int attempt = 0; attempt < 3; ++attempt) {
+		std::istringstream input(text);
+		REQUIRE_THROWS_AS(mesh_io::LoadMesh(input), mfem::ErrorException);
+	}
+}
+
+TEST_CASE("Capacitor example has connected materials and complete plate boundaries",
+	"[gmsh][input][mesh_loader][examples]") {
+	const auto path = std::filesystem::path(__FILE__).parent_path().parent_path()
+		/ "examples/simple_capacitor/capacitor.mesh";
+	auto mesh = mesh_io::LoadMesh(path.string());
+	REQUIRE(mesh->Dimension() == 2);
+	REQUIRE(mesh->attributes.Size() == 2);
+	REQUIRE(mesh->attributes.Find(1) >= 0);
+	REQUIRE(mesh->attributes.Find(2) >= 0);
+	const auto& adjacency = mesh->ElementToElementTable();
+	std::vector<bool> visited(mesh->GetNE(), false);
+	std::vector<int> pending{0};
+	visited[0] = true;
+	for (std::size_t index = 0; index < pending.size(); ++index) {
+		const int element = pending[index];
+		for (int neighbor = 0; neighbor < adjacency.RowSize(element); ++neighbor) {
+			const int adjacent = adjacency.GetRow(element)[neighbor];
+			if (!visited[adjacent]) {
+				visited[adjacent] = true;
+				pending.push_back(adjacent);
+			}
+		}
+	}
+	REQUIRE(pending.size() == mesh->GetNE());
+	std::array<std::array<bool, 4>, 2> plate_sides{};
+	for (int boundary = 0; boundary < mesh->GetNBE(); ++boundary) {
+		const int attribute = mesh->GetBdrAttribute(boundary);
+		REQUIRE(attribute >= 1);
+		REQUIRE(attribute <= 3);
+		if (attribute == 3) continue;
+		int inside, outside;
+		mesh->GetFaceElements(mesh->GetBdrElementFaceIndex(boundary), &inside, &outside);
+		REQUIRE(inside >= 0);
+		REQUIRE(outside < 0);
+		mfem::Array<int> vertices;
+		mesh->GetBdrElementVertices(boundary, vertices);
+		const double* first = mesh->GetVertex(vertices[0]);
+		const double* second = mesh->GetVertex(vertices[1]);
+		const double bottom = attribute == 1 ? 0.011 : 0.0;
+		const double top = bottom + 0.001;
+		const auto at = [](double value, double expected) { return std::abs(value - expected) < 1e-10; };
+		if (at(first[0], 0.001) && at(second[0], 0.001)) plate_sides[attribute - 1][0] = true;
+		if (at(first[0], 0.1) && at(second[0], 0.1)) plate_sides[attribute - 1][1] = true;
+		if (at(first[1], bottom) && at(second[1], bottom)) plate_sides[attribute - 1][2] = true;
+		if (at(first[1], top) && at(second[1], top)) plate_sides[attribute - 1][3] = true;
+	}
+	for (const auto& plate : plate_sides) {
+		for (bool side : plate) REQUIRE(side);
+	}
 }
 
 TEST_CASE("Results writer defaults to MSH 2.2", "[gmsh][msh][output]") {

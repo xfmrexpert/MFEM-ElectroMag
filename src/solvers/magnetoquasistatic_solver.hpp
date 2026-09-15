@@ -708,7 +708,7 @@ public:
                 SolveSystem();
                 AccumulateScenarioError();
                 ReportRegionLosses();
-                SaveScenario(name);
+                SaveScenario(name, scenario);
             }
             return;
         }
@@ -729,6 +729,7 @@ public:
                 SolveSystem();
                 AccumulateScenarioError();
                 GatherCouplingColumn(column);
+                SaveScenario(point_name, column, term_name);
             }
         }
     }
@@ -992,7 +993,7 @@ public:
         inductance_matrix = coupling_results.back().Inductance.get();
     }
 
-    void SaveAnalysis() override
+    void SaveAnalysisResults() override
 	{
 		if (config.AnalysisType == AnalysisType::CouplingMatrix) {
 			WriteCouplingMatrix();
@@ -1014,9 +1015,11 @@ public:
             inductance.push_back(result.Inductance.get());
         }
         auto writer = CreateCouplingWriter();
-        writer.WriteFrequencies(frequencies);
-        writer.WriteMatrixSeries("Inductance", inductance, CouplingUnits("H"));
-        writer.WriteMatrixSeries("Resistance", resistance, CouplingUnits("Ohm"));
+        if (writer) {
+            writer->WriteFrequencies(frequencies);
+            writer->WriteMatrixSeries("Inductance", inductance, CouplingUnits("H"));
+            writer->WriteMatrixSeries("Resistance", resistance, CouplingUnits("Ohm"));
+        }
         for (const CouplingResult& result : coupling_results) {
             std::ostringstream frequency_label;
             frequency_label << std::setprecision(std::numeric_limits<double>::max_digits10)

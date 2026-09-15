@@ -7,8 +7,13 @@
     "order": 2,
     "solver_tolerance": 1E-12,
     "solver_max_iter": 2000,
-    "solver_print_level": 1,
-    "output_gmsh": true
+    "solver_print_level": 1
+  },
+  "output": {
+    "directory": "results",
+    "export_fields_for_coupling_matrix": true,
+    "gmsh": {},
+    "hdf5": {}
   },
   "entity_groups": [
     {

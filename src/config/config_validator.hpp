@@ -12,6 +12,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <functional>
+#include <filesystem>
 #include <nlohmann/json.hpp>
 #include "mfem.hpp"
 
@@ -97,12 +98,67 @@ private:
         }
     }
 
+    void ValidateOutput(const json& config) {
+        if (!config.contains("output")) return;
+        const auto& output = config["output"];
+        if (!output.is_object()) {
+            AddError("output", "Must be an object");
+            return;
+        }
+        for (const auto& item : output.items()) {
+            if (item.key() != "directory" && item.key() != "export_fields_for_coupling_matrix" &&
+                item.key() != "paraview" && item.key() != "gmsh" && item.key() != "hdf5") {
+                AddError("output." + item.key(), "Unknown output setting");
+            }
+        }
+        const auto check_path = [&](const json& object, const char* key,
+                                    const std::string& field, bool file) {
+            CheckFieldType(object, key, field, ExpectedType::String);
+            if (!object.contains(key) || !object[key].is_string()) return;
+            const std::string path = object[key];
+            if (path.empty() || path.find('\0') != std::string::npos) {
+                AddError(field, "Must be a nonempty path without null characters");
+            } else if (file) {
+                const auto filename = std::filesystem::path(path).filename();
+                if (filename.empty() || filename == "." || filename == "..") {
+                    AddError(field, "Must name a file, not a directory");
+                }
+            }
+        };
+        check_path(output, "directory", "output.directory", false);
+        CheckFieldType(output, "export_fields_for_coupling_matrix", "output.export_fields_for_coupling_matrix", ExpectedType::Boolean);
+        for (const std::string format : {"paraview", "gmsh", "hdf5"}) {
+            if (!output.contains(format)) continue;
+            const auto& target = output[format];
+            const std::string prefix = "output." + format;
+            if (!target.is_object()) {
+                AddError(prefix, "Must be an object; omit the format to disable it");
+                continue;
+            }
+            const char* path_key = format == "hdf5" ? "file" : "directory";
+            check_path(target, path_key, prefix + "." + path_key, format == "hdf5");
+            for (const auto& item : target.items()) {
+                if (item.key() != path_key && !(format == "gmsh" && item.key() == "version")) {
+                    AddError(prefix + "." + item.key(), "Unknown format setting");
+                }
+            }
+            if (format == "gmsh") {
+                CheckFieldType(target, "version", prefix + ".version", ExpectedType::String);
+                if (target.contains("version") && target["version"].is_string() &&
+                    target["version"] != "2.2" && target["version"] != "4.1") {
+                    AddError(prefix + ".version", "Must be '2.2' or '4.1'");
+                }
+            }
+        }
+    }
+
     void ValidateDocumentTypes(const json& config) {
         if (!config.is_object()) {
             AddError("config", "Configuration root must be an object");
             return;
         }
 
+        ValidateOutput(config);
         if (config.contains("simulation") && !config["simulation"].is_object()) {
             AddError("simulation", "Must be an object");
         } else if (config.contains("simulation")) {
@@ -115,10 +171,6 @@ private:
             CheckFieldType(sim, "solver_tolerance", "simulation.solver_tolerance", ExpectedType::Number);
             CheckFieldType(sim, "solver_max_iter", "simulation.solver_max_iter", ExpectedType::Integer);
             CheckFieldType(sim, "solver_print_level", "simulation.solver_print_level", ExpectedType::Integer);
-            CheckFieldType(sim, "output_paraview", "simulation.output_paraview", ExpectedType::Boolean);
-            CheckFieldType(sim, "output_gmsh", "simulation.output_gmsh", ExpectedType::Boolean);
-            CheckFieldType(sim, "gmsh_format", "simulation.gmsh_format", ExpectedType::String);
-            CheckFieldType(sim, "results_path", "simulation.results_path", ExpectedType::String);
             CheckFieldType(sim, "amr", "simulation.amr", ExpectedType::Object);
 
             if (sim.contains("physics")) {
@@ -130,8 +182,11 @@ private:
             if (sim.contains("type")) {
                 AddError("simulation.type", "Unsupported field; use 'physics_type'");
             }
-            if (sim.contains("results_file")) {
-                AddError("simulation.results_file", "Unsupported field; use 'results_path'");
+            for (const std::string key : {"output_paraview", "output_gmsh", "output_hdf5",
+                                         "gmsh_format", "results_path", "results_file", "results_filename", "output"}) {
+                if (sim.contains(key)) {
+                    AddError("simulation." + key, "Unsupported field; configure the top-level 'output' object");
+                }
             }
 
             if (sim.contains("amr") && sim["amr"].is_object()) {
@@ -312,13 +367,6 @@ private:
             std::string a = sim["analysis_type"];
             if (a != "field" && a != "coupling_matrix") {
                 AddError("simulation.analysis_type", "Invalid analysis_type '" + a + "'. Must be 'field' or 'coupling_matrix'");
-            }
-        }
-
-        if (sim.contains("gmsh_format") && sim["gmsh_format"].is_string()) {
-            std::string f = sim["gmsh_format"];
-            if (f != "2.2" && f != "4.1") {
-                AddError("simulation.gmsh_format", "Invalid gmsh_format '" + f + "'. Must be '2.2' or '4.1'");
             }
         }
 

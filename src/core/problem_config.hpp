@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <optional>
 #include <utility>
+#include <filesystem>
 #include "enums.hpp"      // PhysicsType, GeometryType
 #include "constants.hpp"  // Constants::DEFAULT_SOLVER_*
 
@@ -129,6 +130,19 @@ struct AmrSettings {
 	bool   Conforming    = true;     // Require conforming output (always true for now).
 };
 
+struct GmshOutputSettings {
+	std::filesystem::path Directory;
+	std::string Version = "2.2";
+};
+
+struct OutputSettings {
+	std::filesystem::path Directory = "results";
+	std::optional<std::filesystem::path> ParaviewDirectory;
+	std::optional<GmshOutputSettings> Gmsh;
+	std::optional<std::filesystem::path> Hdf5File;
+	bool ExportFieldsForCouplingMatrix = false;
+};
+
 struct ProblemConfig {
 	int Order = 1;
 	::PhysicsType  PhysicsType  = ::PhysicsType::Electrostatics;
@@ -141,10 +155,7 @@ struct ProblemConfig {
 	::LinearSolverType LinearSolver = ::LinearSolverType::Direct;
 
 	std::string MeshPath;
-	bool OutputParaview = false;
-	bool OutputGmsh = false;
-	std::string GmshFormat = "2.2";  // MSH version of the results file ("2.2" or "4.1")
-	std::string ResultsDirectory;  // Optional Gmsh results directory (empty = mesh directory)
+	OutputSettings Output;
 	AmrSettings Amr;               // Adaptive mesh refinement controls (disabled by default)
 	std::unordered_map<std::string, EntityGroup> EntityGroups;
 	std::vector<Region> Regions;

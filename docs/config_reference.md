@@ -76,9 +76,6 @@ Object. **Required** -- the only required section.
 | `solver_tolerance` | number | `1e-12` | (0, 1) |
 | `solver_max_iter` | integer | `1000` | >= 1 |
 | `solver_print_level` | integer | `1` | -- |
-| `output_paraview` | bool | `false` | -- |
-| `output_gmsh` | bool | `false` | -- |
-| `results_path` | string | mesh directory | Relative resolves against the config file's directory |
 | `amr` | object | absent = disabled | See below |
 
 `direct` is the default linear solver because a coupling-matrix run amortizes
@@ -88,10 +85,58 @@ not depend on a residual tolerance.
 `frequency` is **not** valid here. It belongs on each scenario; see
 [`scenarios`](#scenarios).
 
-Coupling analyses write `coupling_<physics_type>.h5` under `results_path`
-(default: mesh directory), independently of the field-output flags. CSV matrix
-output is replaced by HDF5. See [the coupling schema](coupling_hdf5.md) for
-quantity groups, units, frequency indexing, and C# dictionary assembly.
+Output is configured in the separate top-level `output` object below.
+
+## `output`
+
+Optional object. Each format is enabled by including its object, including an
+empty `{}`. Omit a format to disable it. With no formats, no result files are
+written; coupling matrices are still printed to the console.
+
+```json
+"output": {
+  "directory": "results",
+  "export_fields_for_coupling_matrix": false,
+  "paraview": { "directory": "paraview" },
+  "gmsh": { "directory": "gmsh", "version": "2.2" },
+  "hdf5": { "file": "results.h5" }
+}
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `directory` | string | `results` | Root directory, relative to the config file |
+| `export_fields_for_coupling_matrix` | bool | `false` | Export fields for unit-excitation coupling solves in all enabled formats |
+| `paraview` | object | omitted | Enable one ParaView collection per exported scenario |
+| `paraview.directory` | string | `paraview` | Collection directory beneath the root |
+| `gmsh` | object | omitted | Enable one high-order Gmsh file per exported scenario |
+| `gmsh.directory` | string | `gmsh` | Gmsh directory beneath the root |
+| `gmsh.version` | string | `2.2` | `2.2` or `4.1` |
+| `hdf5` | object | omitted | Enable one archive for the entire run |
+| `hdf5.file` | string | `results.h5` | Archive filename/path beneath the root |
+
+Absolute paths are preserved. Relative format destinations resolve beneath
+`output.directory`, not beside the config file. Paths must be nonempty; use
+`.` to select the parent directory. Unknown output settings are rejected.
+The CLI `--output-directory <dir>` overrides the root, resolving relative to
+the current working directory. It does not enable formats or redirect absolute
+per-format destinations.
+
+`export_fields_for_coupling_matrix` has no effect on field analyses. For coupling analyses it
+defaults to false to avoid storing one field set per terminal and frequency.
+HDF5 still contains the mesh and coupling matrices when this switch is false.
+ParaView and Gmsh have no matrix output, so write nothing in that case.
+
+Visualization artifacts use `scenario_000000_<label>` names in solve order,
+with a sanitized, bounded scenario/terminal label. HDF5 uses the stable
+`scenario_000000` ID and preserves full names and frequencies as metadata.
+Each run replaces its archive and same-named visualization artifacts; use a
+new root for independent runs. Files from older runs with different names are
+not removed automatically. AMR replaces results on each mesh pass; a successful
+run leaves only the final mesh and its scenario data in the archive.
+
+See [the HDF5 schema](coupling_hdf5.md) for mesh reconstruction, fields, matrix
+units, frequency indexing, and C# dictionary assembly.
 
 ## `simulation.amr`
 
@@ -317,7 +362,10 @@ Rejected with a message naming the replacement:
 | `simulation.physics` | `simulation.physics_type` |
 | `simulation.type` | `simulation.physics_type` |
 | `simulation.geometry` | `simulation.geometry_type` |
-| `simulation.results_file` | `simulation.results_path` |
+| `simulation.output_paraview`, `simulation.output_gmsh`, `simulation.output_hdf5` | Top-level `output` format objects |
+| `simulation.results_file`, `simulation.results_filename` | `output.hdf5.file` |
+| `simulation.results_path` | `output.directory` |
+| `simulation.gmsh_format` | `output.gmsh.version` |
 | `boundaries` | `boundary_conditions` |
 | entity group `kind` | `dim` |
 | terminal `excitation_type` | `quantity` |

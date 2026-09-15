@@ -278,8 +278,8 @@ public:
 	// Solve + save on the CURRENT mesh/operators. Both analysis types flow through
 	// ONE imprint -> solve loop over BuildSolveScenarios(); only the intrinsic
 	// post-solve action differs: CouplingMatrix gathers an induced-charge column
-	// into C, Field saves the scenario's fields. AMR calls this once more on the
-	// converged mesh so the exported C / fields match the exported mesh.
+	// into C. Shared output policy controls field serialization for either analysis.
+	// Each AMR pass replaces the previous mesh's results.
 	void RunOnCurrentMesh() override {
 		const bool coupling = (config.AnalysisType == AnalysisType::CouplingMatrix);
 		if (coupling) {
@@ -296,7 +296,7 @@ public:
 			SolveSystem();
 			AccumulateScenarioError();
 			if (coupling) { GatherChargeColumn(col++); }
-			else          { SaveScenario(name); }
+			SaveScenario(name, sc, coupling ? sc.Excitations.front().TerminalName : "");
 		}
 	}
 
@@ -338,7 +338,7 @@ public:
 		return fields;
 	}
 
-	void SaveAnalysis() override {
+	void SaveAnalysisResults() override {
 		// Writes the computed Maxwell (short-circuit) capacitance matrix.
 		// C(k,i) is the charge induced on conductor k when conductor i is held at
 		// 1 V and all other conductors at 0 V. The matrix is symmetric; diagonals

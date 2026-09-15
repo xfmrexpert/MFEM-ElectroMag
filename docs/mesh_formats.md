@@ -7,6 +7,12 @@ migration is proposed here; nothing in the codebase depends on Netgen.
 
 ## The portability property we rely on
 
+The application's mesh loader establishes ownership before parsing, so a load
+exception releases the partially loaded mesh. Before MFEM finalization it checks
+that each boundary element maps to an actual mesh face; orphan boundaries are
+rejected in both debug and release builds. Ordinary boundary directions are
+normalized by MFEM, while inverted domain elements are rejected.
+
 A configuration binds a logical name to a set of raw mesh attribute ids:
 
 ```json

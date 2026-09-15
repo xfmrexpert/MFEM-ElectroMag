@@ -446,6 +446,45 @@ TEST_CASE("ConfigValidator enforces canonical simulation field names", "[config_
 	REQUIRE(HasError(validator, "simulation.results_file"));
 }
 
+TEST_CASE("ConfigValidator validates output targets", "[config_validator][output]") {
+	json config = ValidConfig();
+	SECTION("accepts all formats and coupling fields") {
+		config["output"] = {{"directory", "results"}, {"export_fields_for_coupling_matrix", true},
+			{"paraview", json::object()}, {"gmsh", {{"version", "4.1"}}},
+			{"hdf5", {{"file", "run.h5"}}}};
+		ConfigValidator validator;
+		REQUIRE(validator.Validate(config));
+	}
+	SECTION("rejects incorrect types without throwing") {
+		config["output"] = {{"export_fields_for_coupling_matrix", "false"}, {"paraview", false},
+			{"gmsh", {{"version", 4.1}}}, {"hdf5", {{"file", 1}}}};
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		REQUIRE(HasError(validator, "output.export_fields_for_coupling_matrix"));
+		REQUIRE(HasError(validator, "output.paraview"));
+		REQUIRE(HasError(validator, "output.gmsh.version"));
+		REQUIRE(HasError(validator, "output.hdf5.file"));
+	}
+	SECTION("rejects invalid paths versions and unknown options") {
+		config["output"] = {{"directory", ""}, {"fields", true},
+			{"gmsh", {{"version", "3.0"}}}, {"hdf5", {{"file", "folder/"}, {"filename", "x.h5"}}}};
+		ConfigValidator validator;
+		REQUIRE_FALSE(validator.Validate(config));
+		for (const std::string field : {"output.directory", "output.fields", "output.gmsh.version",
+			"output.hdf5.file", "output.hdf5.filename"}) REQUIRE(HasError(validator, field));
+	}
+	SECTION("rejects removed flat settings") {
+		for (const std::string key : {"output_paraview", "output_gmsh", "output_hdf5",
+			"gmsh_format", "results_path", "results_filename"}) {
+			json legacy = config;
+			legacy["simulation"][key] = true;
+			ConfigValidator validator;
+			REQUIRE_FALSE(validator.Validate(legacy));
+			REQUIRE(HasError(validator, "simulation." + key));
+		}
+	}
+}
+
 TEST_CASE("ConfigValidator enforces canonical terminal field names", "[config_validator]") {
 	for (const std::string legacy : {"excitation", "excitation_type"}) {
 		json config = ValidConfig();

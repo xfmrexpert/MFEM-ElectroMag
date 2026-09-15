@@ -76,25 +76,23 @@ cmake --build build --config Release
 ./build/mfem-electromag examples/eddy_current/config.json
 ```
 
-This config does **not** enable any output; `output_paraview` and `output_gmsh`
-both default to `false`. To write result files, add them to the `simulation`
-block:
+This config does **not** enable file output. Add a top-level `output` block:
 
 ```json
 {
-  "simulation": {
-    "output_paraview": true,
-    "output_gmsh": true
+  "output": {
+    "paraview": {},
+    "gmsh": {},
+    "hdf5": {}
   }
 }
 ```
 
-This config defines two scenarios. `PowerFrequency` uses a scalar frequency, so
-it is written under that name verbatim. `FrequencySweep` expands to one solve
-*per frequency point*, each written separately under
+This config defines two scenarios. `PowerFrequency` uses a scalar frequency.
+`FrequencySweep` expands to one solve *per frequency point*, with names
 `<scenario>_f<n>_<frequency>Hz`, with `.` replaced by `p`:
 
-| Scenario | Frequency | Output name |
+| Scenario | Frequency | Scenario label |
 |----------|-----------|-------------|
 | `PowerFrequency` | 60 Hz | `PowerFrequency` |
 | `FrequencySweep` | 10 Hz | `FrequencySweep_f1_10Hz` |
@@ -103,10 +101,11 @@ it is written under that name verbatim. `FrequencySweep` expands to one solve
 | `FrequencySweep` | 316 Hz | `FrequencySweep_f4_316p227766017Hz` |
 | `FrequencySweep` | 1000 Hz | `FrequencySweep_f5_1000Hz` |
 
-ParaView collections are prefixed with the physics type
-(`results_magnetoquasistatics_PowerFrequency/`); Gmsh files use the scenario
-name directly (`PowerFrequency.results.msh`). Output is written next to the mesh
-unless `results_path` is set.
+Visualization names prefix these labels with a stable index, such as
+`scenario_000000_PowerFrequency`. ParaView collections and Gmsh files go under
+`results/paraview/` and `results/gmsh/`, relative to the config directory.
+HDF5 stores every frequency's fields and metadata in one `results/results.h5`
+archive. Set `output.directory` to change the common root.
 
 ## Expected Results
 
@@ -121,7 +120,7 @@ The simulation produces complex-valued fields:
 
 ```bash
 # Open the 60 Hz scenario in ParaView
-paraview results_magnetoquasistatics_PowerFrequency/data.pvd
+paraview results/paraview/scenario_000000_PowerFrequency/scenario_000000_PowerFrequency.pvd
 ```
 
 **Key visualizations:**
@@ -211,8 +210,9 @@ frequency.
 For a coupling-matrix sweep, set `"analysis_type": "coupling_matrix"` and
 provide one or more frequency scenarios. Terminal excitations in those
 scenarios are ignored because the solver synthesizes each unit-current column;
-each unique frequency contributes a resistance and inductance matrix to
-`coupling_magnetoquasistatics.h5`. See [the HDF5 schema](../../docs/coupling_hdf5.md)
+each unique frequency contributes a resistance and inductance matrix to the
+archive enabled by `output.hdf5`. Coupling fields are omitted unless
+`output.export_fields_for_coupling_matrix` is true. See [the HDF5 schema](../../docs/coupling_hdf5.md)
 for the shared frequency axis and quantity groups.
 
 **Expected trends:**

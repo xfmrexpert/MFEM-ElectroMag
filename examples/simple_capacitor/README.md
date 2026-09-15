@@ -7,6 +7,7 @@ This example demonstrates electrostatic field calculation for a simple parallel 
 **Geometry:** (all dimensions in metres -- the solver is SI and assumes a mesh
 in metres; see [Units](../../docs/config_reference.md#units))
 - Two circular plates of radius R = 0.1 m
+- Plate thickness 0.001 m, with a small central bore of radius 0.001 m
 - Separation distance d = 0.01 m (1 cm)
 - Axisymmetric about central axis
 
@@ -14,6 +15,12 @@ in metres; see [Units](../../docs/config_reference.md#units))
 - Top plate: V = 1000 V (Dirichlet)
 - Bottom plate: V = 0 V (Dirichlet, ground)
 - Far field: V = 0 V
+
+The conductor interiors are holes in the field mesh. Every face of each plate,
+including the dielectric-facing face, belongs to its terminal. Air and dielectric
+surfaces are fragmented together before meshing so their interfaces share nodes.
+The outer radial, upper, and lower boundaries are grounded; the axis retains its
+natural symmetry condition.
 
 **Material:**
 - Dielectric between plates: εᵣ = 2.5 (e.g., paper, FR4)
@@ -54,6 +61,7 @@ U = ½ C V² = ½ × 69.5e-12 × 1000² = 34.75 μJ
 
 ```bash
 # From project root
+gmsh -2 -format msh2 examples/simple_capacitor/capacitor.geo -o examples/simple_capacitor/capacitor.mesh
 cmake -S . -B build
 cmake --build build --config Release
 
@@ -61,9 +69,9 @@ cmake --build build --config Release
 ./build/mfem-electromag examples/simple_capacitor/config.json
 ```
 
-This config sets `"output_paraview": true`, so results are written to
-`results_electrostatics_<scenario>/` next to the mesh (both output formats
-default to `false`; set `"output_gmsh": true` for a `.results.msh` file).
+This config includes `"output": {"paraview": {}}`, so collections are written
+under `results/paraview/` beside the config. Add `"gmsh": {}` or `"hdf5": {}`
+inside `output` for Gmsh files or a run archive.
 
 ## Expected Results
 
@@ -76,7 +84,7 @@ The simulation should produce:
 
 ```bash
 # Open in ParaView
-paraview "results_electrostatics_Top Plate/data.pvd"
+paraview results/paraview/scenario_*/*.pvd
 ```
 
 **Suggested visualizations:**

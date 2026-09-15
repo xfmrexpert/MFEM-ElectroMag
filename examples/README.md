@@ -51,7 +51,7 @@ MFEM is fetched and built by CMake, so the first configure takes a while.
 ### 2. Run an example
 
 The config path is the only required argument. Relative paths inside the config
-(mesh file, `results_path`) are resolved against the config file's directory, so the
+(mesh file, `output.directory`) are resolved against the config file's directory, so the
 examples can be run from anywhere:
 
 ```bash
@@ -65,7 +65,7 @@ Useful options:
 
 | Option | Purpose |
 |--------|---------|
-| `--results-path <dir>` | Override `simulation.results_path` (relative paths resolve against the CWD) |
+| `--output-directory <dir>` | Override `output.directory` (relative paths resolve against the CWD) |
 | `--verbosity <0\|1\|2>` | `0` status/timing, `1` solver output, `2` diagnostics |
 | `--machine-readable` | Emit JSON Lines progress on stdout for tooling |
 | `--version` | Print version/build information |
@@ -73,34 +73,39 @@ Useful options:
 
 ### 3. Output
 
-Output is off by default and enabled per format in the config's `simulation` block:
+Output is off by default and enabled per format in a top-level `output` block:
 
 ```json
 {
-  "simulation": {
-	"output_paraview": true,
-	"output_gmsh": true,
-	"results_path": "results"
+  "output": {
+  "directory": "results",
+  "export_fields_for_coupling_matrix": false,
+  "paraview": {},
+  "gmsh": {},
+  "hdf5": {"file": "results.h5"}
   }
 }
 ```
 
-- `output_paraview` writes a ParaView collection per scenario into
-  `results_<physics>_<scenario>/`.
-- `output_gmsh` writes `<scenario>.results.msh` (Gmsh MSH 2.2 ASCII). The mesh is
+- `paraview` writes collections under `results/paraview/scenario_<id>_<label>/`.
+- `gmsh` writes `results/gmsh/scenario_<id>_<label>.msh` (Gmsh MSH 2.2 ASCII). The mesh is
   emitted as native high-order Lagrange elements at the solution order, and the file
   includes an `$InterpolationScheme` block so a consumer can reconstruct fields at
   arbitrary points using the same basis MFEM used.
-- If `results_path` is not set, output is written next to the mesh file.
+- `hdf5` writes one archive with the mesh, scenario fields, and coupling matrices.
+- Format destinations resolve beneath `output.directory`, which defaults to
+  `results` beside the config file. Absolute destinations are preserved.
+- Coupling fields require `export_fields_for_coupling_matrix: true`; otherwise coupling analyses
+  write only the HDF5 mesh/matrices and console tables.
 
-Of the shipped examples only `simple_capacitor` enables output (`output_paraview`);
-add the flags above to the other configs if you want files written.
+`simple_capacitor` enables ParaView; `two_loops` enables Gmsh, HDF5, and coupling
+fields. Other configs require adding format objects to write files.
 
 Visualize with:
 
 ```bash
-paraview examples/simple_capacitor/"results_electrostatics_Top Plate"/data.pvd
-gmsh <scenario>.results.msh
+paraview examples/simple_capacitor/results/paraview/scenario_*/*.pvd
+gmsh results/gmsh/scenario_000000_energized.msh
 ```
 
 ## Cross-checking magnetostatics against MQS
@@ -115,7 +120,7 @@ agree on the same mesh. `current_loop/` exercises this:
 ```
 
 The two configs are identical apart from `physics_type`, the added `frequency`, and the
-conductivity the MQS run needs. Enable `output_gmsh` on both and compare the
+conductivity the MQS run needs. Add `"output": {"gmsh": {}}` on both and compare the
 magnetostatic `A` against the MQS `A_Real` node-for-node. With the shipped mesh:
 
 | Quantity | Result |
@@ -152,8 +157,9 @@ L = mu_0 * a * (ln(8a / r_eq) - 2)
 
 For the shipped geometry (`a = 0.1 m`, `w = 0.002 m`) this gives `r_eq = 8.94e-4 m` and
 `L = 6.028e-07 H`. Neither example config computes an inductance by default — both run
-`analysis_type: "field"`. To get the matrix, set `"analysis_type": "coupling_matrix"`,
-which writes `coupling_magnetostatics.h5` or `coupling_magnetoquasistatics.h5`.
+`analysis_type: "field"`. To get the matrix, set `"analysis_type": "coupling_matrix"`
+and add `"output": {"hdf5": {"file": "inductance.h5"}}`. Use separate output roots
+or filenames for the two runs to retain both archives.
 Read `/coupling/Inductance/values`; MQS indexes its matrix series by the shared
 `/coupling/frequency_hz` array. See [the HDF5 schema](../docs/coupling_hdf5.md).
 
@@ -271,8 +277,8 @@ the config up front and reports unknown or mismatched fields by JSON path.
 
 **"Unknown element type"** — regenerate with `-format msh2`.
 
-**No output files** — set `output_paraview` and/or `output_gmsh` to `true` in the config;
-both default to `false`.
+**No output files**: add format objects under the top-level `output` block.
+For coupling visualization also set `output.export_fields_for_coupling_matrix` to `true`.
 
 **Results look wrong** — check mesh quality in Gmsh, verify material attributes match the
 mesh physical groups, confirm the boundary conditions, and refine the mesh if the solution

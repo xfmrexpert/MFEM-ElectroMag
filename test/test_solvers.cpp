@@ -5,6 +5,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "config/input_parser.hpp"
+#include "io/mesh_loader.hpp"
 #include "solvers/electrostatic_solver.hpp"
 #include "solvers/magnetostatic_solver.hpp"
 #include "solvers/magnetoquasistatic_solver.hpp"
@@ -24,7 +25,7 @@
 
 namespace fs = std::filesystem;
 
-ProblemConfig DecodeConfig(const json& config);
+ProblemConfig DecodeConfig(const json& config, const std::string& archive = {});
 
 namespace {
 void CreatePlanarStripMesh(const std::string& filename,
@@ -247,8 +248,10 @@ TEST_CASE("Axisymmetric magnetic solvers enforce zero A_phi on the axis",
     fs::remove(mesh_file);
 }
 
-ProblemConfig DecodeConfig(const json& config) {
-    return InputParser(config).GetProblemConfig();
+ProblemConfig DecodeConfig(const json& config, const std::string& archive) {
+    json source = config;
+    if (!archive.empty()) source["output"]["hdf5"]["file"] = fs::absolute(archive).string();
+    return InputParser(source).GetProblemConfig();
 }
 
 TEST_CASE("Magnetoquasistatic Neumann data loads only the real field",
@@ -346,7 +349,7 @@ public:
     }
 
     void Setup() override {}
-    void SaveAnalysis() override {}
+    void SaveAnalysisResults() override {}
     FieldExportSet CollectExportFields() const override { return {}; }
 
 protected:
@@ -369,7 +372,7 @@ public:
         BuildOperators();
     }
 
-    void SaveAnalysis() override {}
+    void SaveAnalysisResults() override {}
     FieldExportSet CollectExportFields() const override { return {}; }
 
     int OperatorBuilds() const { return operator_builds; }
@@ -1580,6 +1583,32 @@ TEST_CASE("Electrostatic solver reproduces a uniform field between plates",
     fs::remove(mesh_file);
 }
 
+TEST_CASE("Capacitor example drives the dielectric field", "[solvers][electrostatic][examples]") {
+    const fs::path path = fs::path(__FILE__).parent_path().parent_path()
+        / "examples/simple_capacitor/config.json";
+    ProblemConfig config = InputParser(path.string()).GetProblemConfig();
+    config.Output = {};
+    config.Scenarios.resize(1);
+    auto mesh = mesh_io::LoadMesh(config.MeshPath);
+    ElectrostaticSolver solver(*mesh, config);
+    solver.Setup();
+    solver.Run();
+    const auto fields = solver.CollectExportFields();
+    int sampled = 0;
+    for (int element = 0; element < mesh->GetNE(); ++element) {
+        if (mesh->GetAttribute(element) != 2) continue;
+        mfem::Vector center;
+        mesh->GetElementCenter(element, center);
+        if (center[0] < 0.03 || center[0] > 0.07 || center[1] < 0.004 || center[1] > 0.008) continue;
+        const auto& point = mfem::Geometries.GetCenter(mesh->GetElementBaseGeometry(element));
+        const auto electric = SampleDerivedVector(fields, "E", element, point);
+        REQUIRE(electric[1] == Catch::Approx(-100000.0).epsilon(0.02));
+        REQUIRE(std::abs(electric[0]) < 2000.0);
+        ++sampled;
+    }
+    REQUIRE(sampled > 0);
+}
+
 TEST_CASE("Electrostatic field energy gives analytic capacitance and conserves flux",
           "[solvers][analytic][electrostatic][energy][conservation]") {
     const std::string mesh_file = "test_electrostatic_energy.mesh";
@@ -1724,7 +1753,8 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
         "electrostatics", mesh_file, 1,
         {{"epsilon_r", relative_permittivity}}, 0.0, 0.0);
     config["simulation"]["analysis_type"] = "coupling_matrix";
-    config["simulation"]["results_path"] = results_directory + "/nested";
+    config["output"] = {{"directory", results_directory + "/nested"},
+        {"hdf5", {{"file", "coupling_electrostatics.h5"}}}};
     config["boundary_conditions"] = json::array();
     config["terminals"] = json::array({
         {{"name", "Left"}, {"quantity", "voltage"}, {"entity_group", "Left"}},
@@ -1732,7 +1762,7 @@ TEST_CASE("Electrostatic capacitance matrix is analytic and reciprocal",
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    ElectrostaticSolver solver(mesh, DecodeConfig(config));
+    ElectrostaticSolver solver(mesh, DecodeConfig(config, matrix_file));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -1768,7 +1798,7 @@ TEST_CASE("Coupling matrix units distinguish planar from axisymmetric",
         using PhysicsSolver::CouplingUnitLabel;
         using PhysicsSolver::geometry;
         void Setup() override {}
-        void SaveAnalysis() override {}
+        void SaveAnalysisResults() override {}
         FieldExportSet CollectExportFields() const override { return {}; }
         void BuildOperators() override {}
         void RunOnCurrentMesh() override {}
@@ -1813,7 +1843,7 @@ TEST_CASE("Electrostatic coupling ignores fixed Neumann background",
 
     auto solve = [&]() {
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-        ElectrostaticSolver solver(mesh, DecodeConfig(config));
+        ElectrostaticSolver solver(mesh, DecodeConfig(config, matrix_file));
         solver.Setup();
         solver.Run();
         solver.SaveAnalysis();
@@ -1851,7 +1881,7 @@ TEST_CASE("Axisymmetric capacitance matches the analytic coaxial value",
     config["simulation"]["analysis_type"] = "coupling_matrix";
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    ElectrostaticSolver solver(mesh, DecodeConfig(config));
+    ElectrostaticSolver solver(mesh, DecodeConfig(config, matrix_file));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -1897,7 +1927,7 @@ TEST_CASE("Axisymmetric coaxial capacitance converges at the expected order",
         config["simulation"]["analysis_type"] = "coupling_matrix";
 
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-        ElectrostaticSolver solver(mesh, DecodeConfig(config));
+        ElectrostaticSolver solver(mesh, DecodeConfig(config, matrix_file));
         solver.Setup();
         solver.Run();
         solver.SaveAnalysis();
@@ -1957,7 +1987,7 @@ TEST_CASE("Magnetostatic inductance matrix is reciprocal and distinguishes rows"
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    MagnetostaticSolver solver(mesh, DecodeConfig(config));
+    MagnetostaticSolver solver(mesh, DecodeConfig(config, matrix_file));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -1989,7 +2019,7 @@ TEST_CASE("Magnetostatic loop inductance matches the analytic ring value",
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    MagnetostaticSolver solver(mesh, DecodeConfig(config));
+    MagnetostaticSolver solver(mesh, DecodeConfig(config, matrix_file));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -2029,7 +2059,7 @@ TEST_CASE("Magnetoquasistatic loop inductance matches the analytic ring value at
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config, matrix_file));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -2080,7 +2110,7 @@ TEST_CASE("Magnetostatic loop inductance is mesh-format independent (Netgen)",
     REQUIRE(mesh.attribute_sets.GetAttributeSetNames().empty());
     REQUIRE(mesh.bdr_attribute_sets.GetAttributeSetNames().empty());
 
-    MagnetostaticSolver solver(mesh, DecodeConfig(config));
+    MagnetostaticSolver solver(mesh, DecodeConfig(config, matrix_file));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -2119,9 +2149,10 @@ TEST_CASE("Magnetostatic coupling ignores fixed Neumann background",
 
     auto solve = [&]() {
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-        MagnetostaticSolver solver(mesh, DecodeConfig(config));
+        MagnetostaticSolver solver(mesh, DecodeConfig(config, matrix_file));
         solver.Setup();
         solver.Run();
+        solver.SaveAnalysis();
         return ReadHdf5Matrix(matrix_file, "Inductance");
     };
 
@@ -2457,7 +2488,7 @@ TEST_CASE("MQS coupling supports mixed massive and stranded conductors",
     });
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config, matrix_file));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -2518,7 +2549,7 @@ TEST_CASE("MQS coupling ignores fixed Neumann background",
 
     auto solve = [&]() {
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-        MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+        MagnetoquasistaticSolver solver(mesh, DecodeConfig(config, matrix_file));
         solver.Setup();
         solver.Run();
         solver.SaveAnalysis();
@@ -2601,7 +2632,7 @@ TEST_CASE("Axisymmetric massive-port resistance matches the analytic DC value",
     };
 
     mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+    MagnetoquasistaticSolver solver(mesh, DecodeConfig(config, matrix_file));
     solver.Setup();
     solver.Run();
     solver.SaveAnalysis();
@@ -2757,7 +2788,7 @@ TEST_CASE("MQS heterogeneous massive-port conductance is piecewise and order ind
         });
 
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-        MagnetoquasistaticSolver solver(mesh, DecodeConfig(config));
+        MagnetoquasistaticSolver solver(mesh, DecodeConfig(config, matrix_file));
         solver.Setup();
         solver.Run();
         solver.SaveAnalysis();
@@ -2819,7 +2850,7 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
     });
 
     mfem::Mesh baseline_mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver baseline_solver(baseline_mesh, DecodeConfig(config));
+    MagnetoquasistaticSolver baseline_solver(baseline_mesh, DecodeConfig(config, matrix_file));
     baseline_solver.Setup();
     baseline_solver.Run();
     baseline_solver.SaveAnalysis();
@@ -2828,7 +2859,7 @@ TEST_CASE("MQS coupling keeps open-current regions passive and off-matrix",
 
     config["regions"][1]["current_constraint"] = "open";
     mfem::Mesh constrained_mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver constrained_solver(constrained_mesh, DecodeConfig(config));
+    MagnetoquasistaticSolver constrained_solver(constrained_mesh, DecodeConfig(config, matrix_file));
     constrained_solver.Setup();
     constrained_solver.Run();
     constrained_solver.SaveAnalysis();
@@ -2878,7 +2909,7 @@ TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
     json air_config = config;
     air_config["regions"][1]["material"] = "Air";
     mfem::Mesh air_mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver air_solver(air_mesh, DecodeConfig(air_config));
+    MagnetoquasistaticSolver air_solver(air_mesh, DecodeConfig(air_config, matrix_file));
     air_solver.Setup();
     air_solver.Run();
     air_solver.SaveAnalysis();
@@ -2888,7 +2919,7 @@ TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
     // port unknown there is no net-current equation, so the region behaves as a
     // short-circuited closed loop and shields most strongly.
     mfem::Mesh shorted_mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver shorted_solver(shorted_mesh, DecodeConfig(config));
+    MagnetoquasistaticSolver shorted_solver(shorted_mesh, DecodeConfig(config, matrix_file));
     shorted_solver.Setup();
     shorted_solver.Run();
     shorted_solver.SaveAnalysis();
@@ -2899,7 +2930,7 @@ TEST_CASE("MQS axisymmetric shield stays passive and loads the turns",
     // model for a shield that is not a closed turn.
     config["regions"][1]["current_constraint"] = "open";
     mfem::Mesh shielded_mesh(mesh_file.c_str(), 1, 1);
-    MagnetoquasistaticSolver shielded_solver(shielded_mesh, DecodeConfig(config));
+    MagnetoquasistaticSolver shielded_solver(shielded_mesh, DecodeConfig(config, matrix_file));
     shielded_solver.Setup();
     shielded_solver.Run();
     shielded_solver.SaveAnalysis();
@@ -3233,14 +3264,14 @@ TEST_CASE("MQS shielding strengthens with frequency only when current may close"
         air_config["regions"][1]["material"] = "Air";
 
         mfem::Mesh air_mesh(mesh_file.c_str(), 1, 1);
-        MagnetoquasistaticSolver air_solver(air_mesh, DecodeConfig(air_config));
+        MagnetoquasistaticSolver air_solver(air_mesh, DecodeConfig(air_config, matrix_file));
         air_solver.Setup();
         air_solver.Run();
         air_solver.SaveAnalysis();
         const auto air = ReadHdf5Matrix(matrix_file, "Inductance");
 
         mfem::Mesh shield_mesh(mesh_file.c_str(), 1, 1);
-        MagnetoquasistaticSolver shield_solver(shield_mesh, DecodeConfig(config));
+        MagnetoquasistaticSolver shield_solver(shield_mesh, DecodeConfig(config, matrix_file));
         shield_solver.Setup();
         shield_solver.Run();
         shield_solver.SaveAnalysis();
@@ -3437,7 +3468,8 @@ TEST_CASE("AMR with multiple scenarios writes a shared conforming mesh", "[solve
     fs::copy_file(mesh_file, mesh_in_tmp, fs::copy_options::overwrite_existing);
 
     json config = MakeCoaxAmrConfig(mesh_in_tmp.string(), /*max_iterations=*/3);
-    config["simulation"]["output_gmsh"] = true;
+    config["output"] = {{"directory", tmp_dir.string()},
+        {"gmsh", {{"directory", "."}}}, {"hdf5", json::object()}};
     // Two scenarios; AMR builds ONE shared mesh and writes both results on it.
     config["scenarios"] = json::array({
         json{{"name", "driveA"}, {"excitations", json::array({
@@ -3458,8 +3490,9 @@ TEST_CASE("AMR with multiple scenarios writes a shared conforming mesh", "[solve
 
     REQUIRE(mesh.ncmesh == nullptr);
 
-    const fs::path resA = tmp_dir / "driveA.results.msh";
-    const fs::path resB = tmp_dir / "driveB.results.msh";
+    solver.SaveAnalysis();
+    const fs::path resA = tmp_dir / "scenario_000000_driveA.msh";
+    const fs::path resB = tmp_dir / "scenario_000001_driveB.msh";
     REQUIRE(fs::exists(resA));
     REQUIRE(fs::exists(resB));
 
@@ -3470,9 +3503,115 @@ TEST_CASE("AMR with multiple scenarios writes a shared conforming mesh", "[solve
     REQUIRE(ExtractMshSection(resA.string(), "Elements") ==
             ExtractMshSection(resB.string(), "Elements"));
 
+    {
+        HighFive::File archive((tmp_dir / "results.h5").string(), HighFive::File::ReadOnly);
+        REQUIRE(archive.getGroup("scenarios").getNumberObjects() == 2);
+        std::string mesh_text;
+        archive.getDataSet("mesh/mfem").read(mesh_text);
+        std::istringstream stream(mesh_text);
+        mfem::Mesh saved_mesh(stream, 1, 0, false);
+        REQUIRE(saved_mesh.GetNE() == mesh.GetNE());
+        REQUIRE(saved_mesh.GetNV() == mesh.GetNV());
+        mfem::H1_FECollection collection(1, mesh.Dimension());
+        mfem::FiniteElementSpace space(&saved_mesh, &collection);
+        REQUIRE(archive.getDataSet("scenarios/scenario_000000/fields/V/values").getElementCount()
+            == space.GetVSize());
+    }
+
     fs::remove(mesh_file);
     std::error_code ec;
     fs::remove_all(tmp_dir, ec);
+}
+
+TEST_CASE("Solvers share output destinations and coupling field policy", "[solvers][output][hdf5]") {
+    for (const std::string physics : {"electrostatics", "magnetostatics", "magnetoquasistatics"}) {
+        DYNAMIC_SECTION(physics) {
+            const fs::path root = fs::temp_directory_path() / ("mfem_output_policy_" + physics);
+            fs::remove_all(root);
+            fs::create_directories(root);
+            const std::string mesh_file = (root / "input.mesh").string();
+            CreatePlanarStripMesh(mesh_file, 0.2, 0.1, 3, 2);
+            json source = MakePlanarStripConfig(physics, mesh_file, 1,
+                {{"epsilon_r", 1.0}, {"mu_r", 1.0}, {"sigma", 0.0}}, 0.0, 0.0);
+            source["simulation"]["analysis_type"] = "coupling_matrix";
+            const bool electrostatic = physics == "electrostatics";
+            const bool mqs = physics == "magnetoquasistatics";
+            source["terminals"] = json::array({{
+                {"name", "Drive/A"}, {"quantity", electrostatic ? "voltage" : "current"},
+                {"entity_group", electrostatic ? "Left" : "Domain"}, {"conductor_type", "stranded"}}});
+            if (electrostatic) source["boundary_conditions"].erase(source["boundary_conditions"].begin());
+            source["scenarios"] = json::array({
+                {{"name", "First/point"}, {"frequency", 50.0},
+                 {"excitations", json::array({{{"terminal", "Drive/A"}, {"value", 1.0}}})}},
+                {{"name", "Second/point"}, {"frequency", 100.0},
+                 {"excitations", json::array({{{"terminal", "Drive/A"}, {"value", 2.0}}})}}
+            });
+            source["output"] = {{"directory", (root / "out").string()},
+                {"paraview", {{"directory", "vtk"}}}, {"gmsh", {{"directory", "msh"}}},
+                {"hdf5", {{"file", "archive/run.h5"}}}};
+            bool fields_enabled = false;
+            bool formats_enabled = true;
+            bool field_analysis = false;
+            SECTION("coupling fields default to disabled") {}
+            SECTION("coupling fields can be enabled") {
+                source["output"]["export_fields_for_coupling_matrix"] = true;
+                fields_enabled = true;
+            }
+            SECTION("field analysis supports HDF5 alone") {
+                source["simulation"]["analysis_type"] = "field";
+                source["output"].erase("paraview");
+                source["output"].erase("gmsh");
+                fields_enabled = true;
+                field_analysis = true;
+            }
+            SECTION("omitting formats produces no files") {
+                source["output"] = {{"directory", (root / "out").string()}, {"export_fields_for_coupling_matrix", true}};
+                formats_enabled = false;
+            }
+            {
+                mfem::Mesh mesh(mesh_file.c_str(), 1, 0);
+                auto solver = SolverFactory::Instance().Create(mesh, DecodeConfig(source));
+                solver->Setup();
+                solver->Run();
+                solver->SaveAnalysis();
+                solver->SaveAnalysis();
+            }
+            if (formats_enabled) {
+                HighFive::File archive((root / "out/archive/run.h5").string(), HighFive::File::ReadOnly);
+                REQUIRE(archive.exist("mesh/mfem"));
+                REQUIRE(archive.exist("coupling") == !field_analysis);
+                REQUIRE(archive.exist("scenarios") == fields_enabled);
+                if (fields_enabled) {
+                    const int count = field_analysis || mqs ? 2 : 1;
+                    REQUIRE(archive.getGroup("scenarios").getNumberObjects() == count);
+                    const std::string primary = electrostatic ? "V" : (mqs ? "A_Real" : "A");
+                    REQUIRE(archive.exist("scenarios/scenario_000000/fields/" + primary + "/values"));
+                    if (mqs) {
+                        double frequency = 0.0;
+                        archive.getGroup("scenarios/scenario_000001").getAttribute("frequency_hz").read(frequency);
+                        REQUIRE(frequency == 100.0);
+                    }
+                    if (!field_analysis) {
+                        std::string terminal;
+                        archive.getGroup("scenarios/scenario_000000").getAttribute("driven_terminal").read(terminal);
+                        REQUIRE(terminal == "Drive/A");
+                    }
+                }
+            } else {
+                REQUIRE_FALSE(fs::exists(root / "out"));
+            }
+            const bool visualization = formats_enabled && fields_enabled && !field_analysis;
+            REQUIRE(fs::exists(root / "out/vtk") == visualization);
+            REQUIRE(fs::exists(root / "out/msh") == visualization);
+            if (visualization) {
+                const std::string artifact = mqs ? "scenario_000000_First_point_Drive_A"
+                    : "scenario_000000_CouplingMatrix_Drive_A_Drive_A";
+                REQUIRE(fs::exists(root / "out/vtk" / artifact / (artifact + ".pvd")));
+                REQUIRE(fs::exists(root / "out/msh" / (artifact + ".msh")));
+            }
+            fs::remove_all(root);
+        }
+    }
 }
 
 // Axisymmetric open-boundary mesh: a fixed rectangular coil section (attribute
@@ -3636,7 +3775,7 @@ TEST_CASE("Magnetostatic far-field truncation error converges as the boundary re
         };
 
         mfem::Mesh mesh(mesh_file.c_str(), 1, 1);
-        MagnetostaticSolver solver(mesh, DecodeConfig(config));
+        MagnetostaticSolver solver(mesh, DecodeConfig(config, matrix_file));
         solver.Setup();
         solver.Run();
         solver.SaveAnalysis();

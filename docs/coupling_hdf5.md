@@ -1,21 +1,74 @@
-# Coupling matrices in HDF5
+# Run results in HDF5
 
-`analysis_type: "coupling_matrix"` writes HDF5 instead of CSV. Console tables
-remain available. Field-output flags do not control coupling output.
+Include `"output": {"hdf5": {}}` to enable one archive for the entire run,
+at `results/results.h5` relative to the config file by default. Set
+`output.directory` and `output.hdf5.file` to choose the destination. Missing
+directories are created; each run replaces the archive, rather than appending.
 
-Files are written under `simulation.results_path`, or next to the mesh if that
-setting is omitted. Missing output directories are created. Each save replaces
-the file for that physics type; it does not append results from previous runs.
+Field analyses store every scenario. Coupling analyses store matrices, and
+store unit-excitation scenario fields only when `output.export_fields_for_coupling_matrix` is
+true. This switch applies to ParaView and Gmsh too, and defaults to false.
+Omitting `output.hdf5` disables archive output but not console matrix tables.
 
-| Physics | File | Matrix groups under `/coupling` |
-|---------|------|--------------------------------|
-| Electrostatics | `coupling_electrostatics.h5` | `Capacitance` |
-| Magnetostatics | `coupling_magnetostatics.h5` | `Inductance` |
-| Magnetoquasistatics | `coupling_magnetoquasistatics.h5` | `Inductance`, `Resistance` |
+## Schema version 2
 
-## Schema version 1
+The root has integer `schema_version = 2` and string attributes `physics_type`,
+`geometry_type`, and `analysis_type`, with the same values as the configuration.
+All archived fields reference the final solved mesh. AMR intermediate results
+are replaced on each mesh pass, not retained as extra scenarios.
 
-The file root has an integer `schema_version` attribute equal to `1`.
+### Mesh
+
+`/mesh/mfem` is a scalar string containing the complete MFEM mesh serialization
+at round-trip floating-point precision. It includes curved/high-order geometry
+when present. Read this into `mfem::Mesh` to reconstruct the native FE spaces.
+The original input mesh is not required, including after AMR.
+
+For non-MFEM readers, `/mesh/vertices` is a double array `[vertex, component]`.
+`/mesh/elements` and `/mesh/boundary` each contain one-dimensional integer arrays:
+
+- `offsets`: start offsets into connectivity, with a final sentinel.
+- `vertices`: concatenated zero-based corner vertex indices.
+- `attributes`: material/domain or boundary attribute per element.
+- `geometry`: MFEM geometry codes (point 0, segment 1, triangle 2, square 3,
+  tetrahedron 4, cube 5, prism 6, pyramid 7).
+
+Mesh attributes are `dimension`, `space_dimension`, and `coordinate_units = "m"`.
+Corner connectivity alone is not a high-order geometry description; use the
+MFEM serialization for curved meshes.
+
+### Scenario fields
+
+`/scenarios/scenario_000000`, etc., are stable IDs in solve order. Scenario and
+terminal names are metadata, not path components, so punctuation and repeated
+display names cannot collide. Each scenario group has:
+
+- `name`: original scenario name.
+- `mesh`: `/mesh`.
+- `frequency_hz`: numeric frequency for MQS scenarios.
+- `driven_terminal`: the unit-excited terminal for coupling scenarios.
+- `excitations/terminal_names` and `excitations/values`: aligned drive arrays.
+- `fields/<field>/values`: a one-dimensional double array of FE coefficients.
+
+Each field group has `kind` (`primary`, `scalar`, or `vector`). Each `values`
+dataset has `finite_element_collection`, `vector_dimension`, and `ordering`
+attributes. Ordering is MFEM's `byNODES = 0` or `byVDIM = 1`. Rebuild the named
+collection on `/mesh/mfem`, create its space with that dimension and ordering,
+and load the array into a `GridFunction`. These are native DOFs, not values on
+the corner-vertex array. Derived fields are projected into L2 order
+`max(0, solution_order - 1)`; primary fields retain their native space.
+
+MQS stores `A_Real`, `A_Imag`, `B_Real`, `B_Imag`, `B_Magnitude`, and `P_Loss`.
+Phasors use the peak-amplitude convention; `P_Loss` is time-averaged loss density.
+
+### Coupling matrices
+
+| Physics | Matrix groups under `/coupling` |
+|---------|--------------------------------|
+| Electrostatics | `Capacitance` |
+| Magnetostatics | `Inductance` |
+| Magnetoquasistatics | `Inductance`, `Resistance` |
+
 The `/coupling` group has string attributes `physics_type` and `geometry_type`,
 using the same values as the configuration.
 

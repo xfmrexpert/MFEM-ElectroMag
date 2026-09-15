@@ -6,8 +6,11 @@
     "geometry_type": "axisymmetric",
     "solver_tolerance": 1e-12,
     "solver_max_iter": 2000,
-    "solver_print_level": 1,
-    "output_paraview": true
+    "solver_print_level": 1
+  },
+  "output": {
+    "directory": "results",
+    "paraview": {}
   },
   "entity_groups": [
     { "name": "Air", "dim": 2, "attribute_ids": [1] },

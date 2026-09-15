@@ -18,10 +18,16 @@ public:
 						 const std::vector<std::string>& terminals,
 						 const std::string& physics,
 						 const std::string& geometry)
-		: file_(path.string(), HighFive::File::Truncate),
+		: CouplingMatrixWriter(HighFive::File(path.string(), HighFive::File::Truncate),
+			terminals, physics, geometry) {}
+
+	CouplingMatrixWriter(const HighFive::File& file,
+		const std::vector<std::string>& terminals,
+		const std::string& physics, const std::string& geometry)
+		: file_(file),
 		  group_(file_.createGroup("/coupling")),
 		  terminal_count_(terminals.size()) {
-		file_.createAttribute("schema_version", 1);
+		if (!file_.hasAttribute("schema_version")) file_.createAttribute("schema_version", 2);
 		group_.createAttribute("physics_type", physics);
 		group_.createAttribute("geometry_type", geometry);
 		group_.createDataSet("terminal_names", terminals);
@@ -86,6 +92,7 @@ private:
 		auto dataset = quantity_group.createDataSet<double>("values", HighFive::DataSpace(dimensions));
 		dataset.write_raw(values.data());
 		dataset.createAttribute("units", units);
+		file_.flush();
 	}
 };
 

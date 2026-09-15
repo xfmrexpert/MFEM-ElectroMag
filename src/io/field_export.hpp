@@ -4,7 +4,7 @@
 // FieldExportSet: the single, format-agnostic description of WHAT a solver
 // wants serialized for a scenario. It is built once in a post-solve step
 // (PhysicsSolver::CollectExportFields) and handed to format-specific writers
-// (field_writers.hpp) that decide HOW to sample/serialize it.
+// that decide HOW to sample/serialize it.
 //
 // A field is one of:
 //   - Primary: a solution GridFunction, borrowed. Writers that can render it at
@@ -17,8 +17,8 @@
 //
 // Derived coefficients are LAZY: nothing is projected here. Each writer projects
 // them onto its own target mesh, because the formats deliberately sample on
-// different meshes (ParaView: native; Gmsh: refined-to-linear). "Compute once"
-// therefore means one field DEFINITION, not one numeric projection.
+// different representations (ParaView/HDF5: native FE spaces; Gmsh: high-order
+// element-node samples). "Compute once" means one definition, not one projection.
 //
 // The set OWNS the derived coefficients (and any intermediate coefficients they
 // reference, parked via Own()) so they outlive the per-format projection. Raw
