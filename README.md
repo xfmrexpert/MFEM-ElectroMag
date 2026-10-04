@@ -1,13 +1,13 @@
 # MFEM-ElectroMag
 
-A finite element solver for electromagnetic problems using MFEM (Modular Finite Element Methods). This solver supports electrostatic, magnetostatic, and magnetoquasistatic problems in both axisymmetric and planar geometries.
+A finite element solver for electromagnetic problems using MFEM (Modular Finite Element Methods). This solver supports electrostatic, magnetostatic, and magnetoquasistatic problems in axisymmetric and planar 2D geometries and in full 3D.
 
 ## Features
 
 - **Electrostatics**: Solves for electric potential and field distributions
 - **Magnetostatics**: Solves for magnetic vector potential and field distributions
 - **Magnetoquasistatics**: Time-harmonic eddy current problems
-- **Axisymmetric and Planar**: Supports both 2D coordinate systems
+- **Axisymmetric, Planar and 3D**: Both 2D coordinate systems, plus full 3D for every physics type
 - **JSON Configuration**: Easy problem setup via JSON files
 - **ParaView Output**: Direct visualization of results
 - **Comprehensive Testing**: Unit and integration tests with Catch2
@@ -28,6 +28,8 @@ A finite element solver for electromagnetic problems using MFEM (Modular Finite 
 - **MFEM** (v4.7): Automatically downloaded and built by CMake
 - **HDF5** (1.14.6): C library, automatically downloaded and built statically by CMake
 - **HighFive** (3.1.1): Header-only C++ wrapper for HDF5, automatically downloaded by CMake
+- **Eigen** (3.4.0): Header-only sparse direct solvers (MPL2 subset only), automatically downloaded by CMake
+- **AMGCL** (1.5.0): Header-only algebraic multigrid (MIT) for the iterative solver, automatically downloaded by CMake
 
 No separate HDF5 installation is required. The HDF5 build excludes optional tools,
 language bindings, MPI, and zlib/SZip compression dependencies. HDF5 and HighFive
@@ -36,9 +38,12 @@ Coupling matrices use HDF5 instead of CSV; field output formats are unchanged.
 
 ### Optional
 
-- **HYPRE**: For advanced preconditioners and solvers
-- **METIS**: For mesh partitioning
-- **OpenMP**: For parallel assembly (usually included with compiler)
+- **MPI** (OpenMPI, MPICH, or MS-MPI on Windows): only for the MPI build
+  (`-DUSE_MPI=ON`), which adds HYPRE's BoomerAMG and AMS solvers
+- **HYPRE** (v3.0.0): built automatically in the MPI build, or supplied via `HYPRE_DIR`
+- **METIS** (5.x): optional in the MPI build, supplied via `METIS_DIR`; only
+  needed for multi-rank partitioning, which is not implemented yet
+- **OpenMP**: threads the linear algebra (usually included with the compiler); see [Threads](#threads)
 - **Doxygen**: For generating API documentation
 - **Catch2**: For running tests (automatically downloaded)
 
@@ -119,15 +124,41 @@ cmake .. -G "MinGW Makefiles"
 mingw32-make -j
 ```
 
-## Building with MFEM Options
+## MPI/HYPRE Build
 
-MFEM will be automatically downloaded and configured. To enable optional MFEM features:
+The default build is serial and needs no MPI. The MPI build links MFEM against
+MPI and HYPRE, which the 3D magnetic solvers need for their iterative
+(AMS-preconditioned) solves:
 
 ```bash
-# In the build directory
-cmake .. -DMFEM_USE_METIS=ON
-make -j
+sudo apt-get install -y openmpi-bin libopenmpi-dev   # or mpich
+cmake -S . -B build-mpi -DCMAKE_BUILD_TYPE=Release -DUSE_MPI=ON
+cmake --build build-mpi -j
 ```
+
+The first configure fetches and builds HYPRE into `build-mpi/tpl/hypre`
+(a few minutes, once). To use an existing HYPRE instead, pass
+`-DHYPRE_DIR=<prefix>`; with vcpkg on Windows, install the `msmpi` and `hypre`
+ports and point `HYPRE_DIR` at the vcpkg installation. `-DMETIS_DIR=<prefix>`
+enables METIS.
+
+An MPI build currently runs on **one rank**: run the executable directly or
+with `mpirun -np 1`. Starting more ranks is rejected, since the solvers and
+result writers are not distributed yet. `--version` reports whether a binary
+is a `serial` or `MPI/HYPRE` build.
+
+### Threads
+
+With `USE_OPENMP` (on by default) the linear algebra is threaded over
+`OMP_NUM_THREADS` threads (default: every core): the Krylov solvers' matrix
+and vector operations (MFEM's OpenMP backend), AMGCL's multigrid and, in the
+MPI build, HYPRE's AMS and BoomerAMG. Assembly and the rest stay serial. On
+four cores the TEAM 7 eddy-current solve (0.9M complex unknowns) runs 2.5x
+faster than on one (168 s against 428 s).
+
+Under `mpirun`, Open MPI binds a rank to one core, which leaves every thread
+sharing it. Run the executable directly, or pass `--bind-to none`
+(`mpirun --bind-to none -np 1 ./mfem-electromag config.json`).
 
 ## Usage
 

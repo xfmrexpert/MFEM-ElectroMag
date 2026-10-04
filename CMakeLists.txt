@@ -12,7 +12,14 @@ endif()
 # Build options
 option(BUILD_TESTING "Build tests" ON)
 option(ENABLE_NATIVE_ARCH "Enable -march=native for Release builds" OFF)
-option(USE_OPENMP "Enable OpenMP for parallel assembly" ON)
+# OpenMP threads the linear algebra: AMGCL, MFEM's sparse matrix-vector
+# products and vector operations (the Krylov solvers' own work), and, in the
+# MPI build, HYPRE. OMP_NUM_THREADS sets the thread count.
+option(USE_OPENMP "Thread the linear algebra with OpenMP" ON)
+# MPI build: MFEM with MPI and HYPRE (BoomerAMG, AMS, ...). Off by default;
+# the serial build needs no MPI installation. HYPRE is built automatically
+# unless HYPRE_DIR points at an existing install; see cmake/ParallelTPLs.cmake.
+option(USE_MPI "Build with MPI and HYPRE" OFF)
 
 # Compiler flags for different build types
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -63,6 +70,11 @@ set(MFEM_USE_EXCEPTIONS ON CACHE BOOL "Throw mfem::ErrorException on MFEM errors
 # build's looser behavior. Must be set before FetchContent_MakeAvailable(mfem).
 # set(MFEM_DEBUG ON CACHE BOOL "Enable MFEM internal debug checks" FORCE)
 
+# MFEM's OpenMP backend, used once an "omp" Device is configured (see
+# parallel::Initialize). The deprecated MFEM_USE_LEGACY_OPENMP is not used:
+# it requires MFEM_THREAD_SAFE and gave wrong results here.
+set(MFEM_USE_OPENMP ${USE_OPENMP} CACHE BOOL "MFEM OpenMP backend" FORCE)
+
 # Automatically download and build MFEM
 FetchContent_Declare(
   mfem
@@ -74,11 +86,18 @@ FetchContent_Declare(
   EXCLUDE_FROM_ALL  # Don't build MFEM's miniapps/examples as part of "Build All"
 )
 
+if(USE_MPI)
+    include(${CMAKE_SOURCE_DIR}/cmake/ParallelTPLs.cmake)
+endif()
+
 # This creates the 'mfem' target available for linking.
 # EXCLUDE_FROM_ALL above keeps MFEM out of the default build set so Visual
 # Studio's Output window isn't dominated by MFEM compile messages; the 'mfem'
 # library is still built on demand when mfem-electromag links it.
 FetchContent_MakeAvailable(mfem)
+if(USE_MPI)
+    electromag_wrap_build_tree_tpl_includes(mfem)
+endif()
 
 # Eigen supplies the sparse Cholesky (SimplicialLDLT) behind the "direct"
 # linear solver option. Eigen is header-only, so SOURCE_SUBDIR points at a
@@ -99,6 +118,26 @@ FetchContent_MakeAvailable(eigen)
 add_library(eigen_headers INTERFACE)
 target_include_directories(eigen_headers SYSTEM INTERFACE ${eigen_SOURCE_DIR})
 target_compile_definitions(eigen_headers INTERFACE EIGEN_MPL2_ONLY)
+
+# AMGCL supplies the algebraic multigrid preconditioner behind the "iterative"
+# linear solver of the static solvers. Header-only and MIT-licensed, and
+# threaded with OpenMP (when enabled below) rather than MPI, so it adds no
+# build requirement. As with Eigen, its own CMake project is skipped and only
+# the headers are used. AMGCL_NO_BOOST drops its optional Boost.PropertyTree
+# runtime-configuration interface; parameters are set in code instead.
+FetchContent_Declare(
+  amgcl
+  GIT_REPOSITORY https://github.com/ddemidov/amgcl.git
+  GIT_TAG        1.5.0  # Pin to a stable version for reproducibility
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE   # See MFEM block above for rationale.
+  SOURCE_SUBDIR  do-not-configure-amgcl
+)
+FetchContent_MakeAvailable(amgcl)
+
+add_library(amgcl_headers INTERFACE)
+target_include_directories(amgcl_headers SYSTEM INTERFACE ${amgcl_SOURCE_DIR})
+target_compile_definitions(amgcl_headers INTERFACE AMGCL_NO_BOOST)
 
 # nlohmann/json supplies the configuration parser. Fetched rather than vendored
 # so its version is pinned in one visible place, consistent with MFEM and Eigen.
@@ -163,7 +202,10 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(highfive)
 
 add_executable(mfem-electromag src/main.cpp)
-target_link_libraries(mfem-electromag PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json HighFive::HighFive hdf5-static)
+target_link_libraries(mfem-electromag PRIVATE mfem eigen_headers amgcl_headers nlohmann_json::nlohmann_json HighFive::HighFive hdf5-static)
+if(USE_MPI)
+    target_link_libraries(mfem-electromag PRIVATE MPI::MPI_CXX)
+endif()
 
 # main.cpp instantiates every solver and writer through heavily templated MFEM
 # and nlohmann/json code, which exceeds the default COFF section limit (65279)
@@ -237,18 +279,46 @@ if(BUILD_TESTING)
         test/test_main.cpp
         test/test_axisymmetric_axis.cpp
         test/test_axisymmetric_quadrature.cpp
+        test/test_coaxial_rings.cpp
         test/test_config_validator.cpp
         test/test_gmsh_interpolation.cpp
         test/test_gmsh_msh_format.cpp
         test/test_hdf5.cpp
         test/test_input_parser.cpp
+        test/test_electrostatic_3d.cpp
+        test/test_magnetostatic_3d.cpp
+        test/test_magnetoquasistatic_3d.cpp
         test/test_mqs_port_operator.cpp
+        test/test_probes.cpp
         test/test_solvers.cpp
         test/test_status_reporter.cpp
+        test/test_team7.cpp
+        test/test_team15.cpp
+        test/test_team21a.cpp
+        test/test_hypre.cpp
     )
 
-    target_link_libraries(mfem_tests PRIVATE mfem eigen_headers nlohmann_json::nlohmann_json HighFive::HighFive hdf5-static Catch2::Catch2WithMain)
+    # The test runner supplies its own main (test_main.cpp) so an MPI build
+    # can initialize MPI and HYPRE around the Catch2 session.
+    target_link_libraries(mfem_tests PRIVATE mfem eigen_headers amgcl_headers nlohmann_json::nlohmann_json HighFive::HighFive hdf5-static Catch2::Catch2)
+    if(USE_MPI)
+        target_link_libraries(mfem_tests PRIVATE MPI::MPI_CXX)
+    endif()
+    # Tests run the same threaded solver paths as the executable.
+    if(USE_OPENMP AND OpenMP_CXX_FOUND)
+        target_link_libraries(mfem_tests PRIVATE OpenMP::OpenMP_CXX)
+    endif()
     target_include_directories(mfem_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    # Committed test inputs (meshes and the Gmsh scripts that generate them).
+    target_compile_definitions(mfem_tests PRIVATE
+        MFEM_ELECTROMAG_TEST_DATA="${CMAKE_SOURCE_DIR}/test/data"
+        MFEM_ELECTROMAG_EXAMPLES="${CMAKE_SOURCE_DIR}/examples")
+    # Gmsh, for the on-demand benchmarks whose meshes are generated rather
+    # than committed (they skip without it).
+    find_program(GMSH_EXECUTABLE gmsh)
+    if(GMSH_EXECUTABLE)
+        target_compile_definitions(mfem_tests PRIVATE MFEM_ELECTROMAG_GMSH="${GMSH_EXECUTABLE}")
+    endif()
 
     # Same COFF section limit as mfem-electromag: the solver test translation
     # units instantiate the full solver/writer stack.

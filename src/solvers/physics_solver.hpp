@@ -15,7 +15,7 @@
 #include "../io/status_reporter.hpp"
 #include "amr_support.hpp"
 #include "../axisym/axisymmetric_mesh_validation.hpp"
-#include "../axisym/axisymmetric_boundary_lf_integrator.hpp"
+#include "geometry_model.hpp"
 #include "../core/marked_boundary_condition.hpp"
 
 /**
@@ -122,6 +122,71 @@ protected:
 
     StatusReporter& Reporter() const {
         return StatusReporter::Global();
+    }
+
+    // The coordinate model of this run: measure, scalar integrators, required
+    // mesh dimension and output units. Built on demand from `geometry` so the
+    // enum stays the single piece of state.
+    [[nodiscard]] GeometryModel Geometry() const { return GeometryModel(geometry); }
+
+    // Adopt the configured coordinate model and reject a mesh of the wrong
+    // dimension. Every solver's Setup() starts here, before anything reads
+    // `geometry` or assembles on the mesh.
+    void InitializeGeometry() {
+        geometry = config.GeometryType;
+        Geometry().VerifyMeshDimension(mesh);
+    }
+
+    // Solve an SPD system with preconditioned CG, used by the static solvers'
+    // iterative path.
+    //
+    // solver_tolerance is the RELATIVE residual ||b - A x|| / ||b||, the same
+    // meaning it has in the MQS GMRES path. (The mfem::PCG convenience function
+    // previously used here squares-roots its tolerance argument, so a
+    // configured 1e-12 used to mean 1e-6 for these solvers only.)
+    //
+    // Non-convergence is reported rather than silent: mfem::PCG returned the
+    // last iterate without comment, which reads exactly like a converged run.
+    void SolveSpdIteratively(const mfem::Operator& A, mfem::Solver& preconditioner,
+                             const mfem::Vector& B, mfem::Vector& X) const {
+        mfem::CGSolver cg;
+        cg.SetOperator(A);
+        cg.SetPreconditioner(preconditioner);
+        cg.SetRelTol(config.SolverTolerance);
+        cg.SetAbsTol(0.0);
+        cg.SetMaxIter(config.SolverMaxIter);
+        cg.SetPrintLevel(Reporter().SolverPrintLevel(config.SolverPrintLevel));
+        cg.Mult(B, X);
+
+        std::ostringstream msg;
+        msg << std::scientific << std::setprecision(3);
+        if (cg.GetConverged()) {
+            msg << "CG converged in " << cg.GetNumIterations()
+                << " iterations (relative residual " << cg.GetFinalRelNorm() << ").";
+            Reporter().Diagnostic(msg.str());
+        }
+        else {
+            msg << "CG did not converge: relative residual " << cg.GetFinalRelNorm()
+                << " after " << cg.GetNumIterations() << " iterations, above "
+                   "solver_tolerance " << config.SolverTolerance << ". Raise "
+                   "solver_max_iter, loosen solver_tolerance, or use the direct "
+                   "solver; results may be inaccurate.";
+            Reporter().Warning(msg.str());
+        }
+    }
+
+    // Eigen's simplicial LDL^T is fine for 2D meshes but its fill-in grows much
+    // faster in 3D: measured on a P2 Laplacian, 14 s / 0.24 GB at 36k unknowns
+    // and 346 s / 1.5 GB at 118k. Warn before a 3D factorization that size so
+    // the run does not just appear to hang.
+    void WarnOnLargeDirectSolve(int true_dofs) const {
+        constexpr int kLarge3DDirectDofs = 50000;
+        if (config.LinearSolver != LinearSolverType::Direct) return;
+        if (geometry != GeometryType::Cartesian3D || true_dofs <= kLarge3DDirectDofs) return;
+        Reporter().Warning("Direct factorization of a 3D system with " +
+            std::to_string(true_dofs) + " unknowns may take many minutes and "
+            "gigabytes of memory. Set simulation.linear_solver to 'iterative' "
+            "(algebraic multigrid), the default for geometry_type '3d'.");
     }
 
     // Marker (1/0 over domain attributes) for a set of element attribute ids.
@@ -281,19 +346,29 @@ protected:
         return info;
     }
 
+    // Whether this formulation assembles Robin conditions. A Robin term is part
+    // of the operator, so a solver that ignored one would silently apply the
+    // homogeneous Neumann condition instead; solvers without it reject Robin.
+    virtual bool SupportsRobin() const { return false; }
+
     BoundaryConditionSet BuildBoundaryConditions() const {
         BoundaryConditionSet bcs;
         for (const auto& bc : config.BoundaryConditions) {
-            MFEM_VERIFY(bc.Type != BoundaryConditionType::Robin,
-                "Robin boundary conditions are reserved but not implemented. "
-                "Use Dirichlet or Neumann for boundary group '" +
+            MFEM_VERIFY(bc.Type != BoundaryConditionType::Robin || SupportsRobin(),
+                "Robin boundary conditions are not implemented for " +
+                std::string(ToString(config.PhysicsType)) +
+                ". Use Dirichlet or Neumann for boundary group '" +
                 bc.EntityGroupName + "'.");
             bcs.Add(MarkerFromGroup(bc.EntityGroupName), bc);
         }
         return bcs;
     }
 
-    mfem::Vector AssembleNeumannBoundaryLoad() {
+    // The fixed natural boundary load: integral(g v) over every Neumann
+    // boundary (g = prescribed outward flux) and every Robin boundary (g = the
+    // Robin data value). This is boundary DATA, so coupling analyses omit it;
+    // the Robin operator term (RobinCoeff * u, v) is assembled by the solver.
+    mfem::Vector AssembleNaturalBoundaryLoad() {
         mfem::LinearForm load(fespace.get());
         std::vector<std::unique_ptr<mfem::ConstantCoefficient>> coefficients;
         // MFEM binds the marker by non-const reference and keeps the pointer, so
@@ -301,19 +376,13 @@ protected:
         std::vector<std::unique_ptr<mfem::Array<int>>> markers;
 
         for (const auto& bc : boundary_conditions) {
-            if (!bc.IsNeumann() || bc.Condition.Value == 0.0) continue;
+            if (!(bc.IsNeumann() || bc.IsRobin()) || bc.Condition.Value == 0.0) continue;
             coefficients.push_back(
                 std::make_unique<mfem::ConstantCoefficient>(bc.Condition.Value));
             markers.push_back(std::make_unique<mfem::Array<int>>(bc.Marker));
-            if (geometry == GeometryType::Axisymmetric) {
-                load.AddBoundaryIntegrator(
-                    new AxisymmetricBoundaryLFIntegrator(*coefficients.back()),
-                    *markers.back());
-            } else {
-                load.AddBoundaryIntegrator(
-                    new mfem::BoundaryLFIntegrator(*coefficients.back()),
-                    *markers.back());
-            }
+            load.AddBoundaryIntegrator(
+                Geometry().NewBoundaryLFIntegrator(*coefficients.back()),
+                *markers.back());
         }
 
         load.Assemble();
@@ -416,26 +485,21 @@ protected:
     // out to whichever formats are enabled. The writer owns the format details;
     // solvers only declare WHAT to export via CollectExportFields().
     void SaveScenario(const std::string& scenario_name, const Scenario& scenario,
-        const std::string& driven_terminal = {}) {
+        const std::string& driven_terminal = {}, const std::vector<RegionLoss>& losses = {}) {
         if (!result_writer || !result_writer->WantsFields()) return;
-        result_writer->WriteScenario(scenario_name, scenario, CollectExportFields(), driven_terminal);
+        result_writer->WriteScenario(scenario_name, scenario, CollectExportFields(), driven_terminal,
+            losses);
     }
 
-    // Unit label for an extracted coupling quantity.
-    //
-    // Axisymmetric assembly carries the full revolved measure 2*pi*r dr dz, so
-    // the extracted quantity is absolute. Planar assembly integrates over the
-    // (x, y) cross-section only, which is equivalent to a unit out-of-plane
-    // depth: the model is translationally invariant in z and describes an
-    // infinitely long structure, so the result is a per-unit-length quantity.
-    // No extrusion length is configurable, so the planar label always carries
-    // the "/m" suffix rather than depending on a depth setting.
+    // Unit label for an extracted coupling quantity: absolute for the
+    // axisymmetric and 3D models, per unit length for planar. See
+    // GeometryModel::IsPerUnitLength.
     [[nodiscard]] std::string CouplingUnitLabel(const std::string& si_unit) const {
         return "[" + CouplingUnits(si_unit) + "]";
     }
 
     [[nodiscard]] std::string CouplingUnits(const std::string& si_unit) const {
-        return geometry == GeometryType::Axisymmetric ? si_unit : si_unit + "/m";
+        return Geometry().CouplingUnits(si_unit);
     }
 
     std::optional<matrix_io::CouplingMatrixWriter> CreateCouplingWriter() const {

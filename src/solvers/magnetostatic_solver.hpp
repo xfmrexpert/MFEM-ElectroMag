@@ -16,6 +16,7 @@
 #include "../config/boundary_validation.hpp"
 #include "../core/constants.hpp"
 #include "../io/gmsh_results_writer.hpp"
+#include "../linalg/amg_preconditioner.hpp"
 #include "../linalg/sparse_direct_solver.hpp"
 
 class MagnetostaticSolver : public MagneticSolver
@@ -42,6 +43,9 @@ private:
 	// as A_op. Null when the iterative solver is configured.
 	std::unique_ptr<SparseDirectSolver> direct_solver;
 
+	// Multigrid preconditioner for the iterative path; see ElectrostaticSolver.
+	std::unique_ptr<AmgPreconditioner> amg;
+
 	std::unique_ptr<mfem::DenseMatrix> L; // Inductance matrix (coupling matrix) for the current mesh
 
 public:
@@ -52,8 +56,7 @@ public:
 		int order = config.Order;
 		const int dim = mesh.Dimension();
 
-		// Axisymmetric or Planar
-		geometry = config.GeometryType;
+		InitializeMagneticGeometry();
 		for (const auto& [term_name, term] : config.Terminals) {
 			MFEM_VERIFY(term.DriveQuantity == Quantity::Current,
 				"Magnetostatic terminal '" + term_name +
@@ -68,8 +71,7 @@ public:
 		fec = std::make_unique<mfem::H1_FECollection>(order, dim);
 
 		// Material Properties (Reluctivity nu = 1/mu), keyed by mesh DOMAIN attribute.
-		nu_coeff = MaterialCoefficient(1.0 / Constants::MU_0, [](const Material& m) {
-			return 1.0 / (Constants::MU_0 * m.RelPermeability); });
+		BuildReluctivity();
 
 		boundary_conditions = BuildBoundaryConditions();
 		BuildEssentialBoundaryMarker();
@@ -89,7 +91,7 @@ public:
 
 		A = std::make_unique<mfem::GridFunction>(fespace.get());
 		*A = 0.0;
-		neumann_rhs = AssembleNeumannBoundaryLoad();
+		neumann_rhs = AssembleNaturalBoundaryLoad();
 
 		a = std::make_unique<mfem::BilinearForm>(fespace.get());
 		a->AddDomainIntegrator(MakeStiffnessIntegrator()); // a takes ownership
@@ -106,9 +108,17 @@ public:
 		// cost is paid once per mesh instead of once per scenario. AMR rebuilds it
 		// implicitly by re-running BuildOperators() after each refinement.
 		direct_solver.reset();
+		amg.reset();
 		if (config.LinearSolver == LinearSolverType::Direct) {
+			WarnOnLargeDirectSolve(fespace->GetTrueVSize());
 			auto operation = Reporter().Start("sparse direct factorization");
 			direct_solver = std::make_unique<SparseDirectSolver>(SystemMatrix());
+		}
+		else {
+			// Built once per mesh like the factorization, and reused for every
+			// scenario's right-hand side.
+			auto operation = Reporter().Start("algebraic multigrid setup");
+			amg = std::make_unique<AmgPreconditioner>(SystemMatrix());
 		}
 	}
 
@@ -206,15 +216,8 @@ public:
 		// RHS
 		b = std::make_unique<mfem::LinearForm>(fespace.get());
 
-		if (geometry == GeometryType::Axisymmetric)
-		{
-			// Integrates J * v * r  (global 2π omitted consistently)
-			b->AddDomainIntegrator(new AxisymmetricLFIntegrator(*j_coeff));
-		}
-		else
-		{
-			b->AddDomainIntegrator(new mfem::DomainLFIntegrator(*j_coeff));
-		}
+		// Integrates J * v under the geometry's measure (2*pi*r for axisymmetric).
+		b->AddDomainIntegrator(Geometry().NewDomainLFIntegrator(*j_coeff));
 		b->Assemble();
 		if (mode == ImprintMode::Field) {
 			*b += neumann_rhs;
@@ -284,12 +287,7 @@ public:
 			direct_solver->Mult(B, X);
 		}
 		else {
-			mfem::GSSmoother M(SystemMatrix());
-			mfem::PCG(*A_op, M, B, X,
-				Reporter().SolverPrintLevel(config.SolverPrintLevel),
-				config.SolverMaxIter,
-				config.SolverTolerance,
-				0.0);
+			SolveSpdIteratively(*A_op, *amg, B, X);
 		}
 
 		a->RecoverFEMSolution(X, *b, *A);
@@ -354,17 +352,11 @@ private:
 		mfem::PWConstCoefficient unit_density_coeff(unit_density);
 
 		mfem::LinearForm winding_functional(fespace.get());
-		if (geometry == GeometryType::Axisymmetric) {
-			winding_functional.AddDomainIntegrator(
-				new AxisymmetricLFIntegrator(unit_density_coeff));
-		}
-		else {
-			winding_functional.AddDomainIntegrator(
-				new mfem::DomainLFIntegrator(unit_density_coeff));
-		}
+		winding_functional.AddDomainIntegrator(
+			Geometry().NewDomainLFIntegrator(unit_density_coeff));
 		winding_functional.Assemble();
 
-		// Both integrators carry the full geometric measure, so this is webers.
+		// The integrator carries the full geometric measure, so this is webers.
 		return winding_functional * *A;
 	}
 

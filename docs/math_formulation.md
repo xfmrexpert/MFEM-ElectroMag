@@ -19,7 +19,7 @@ rather than a presentation choice. See
 
 ## Integration Measure and Output Units
 
-The two geometry modes differ only in the measure applied during assembly, and
+The geometry modes differ only in the measure applied during assembly, and
 that difference propagates directly into the units of every extracted quantity.
 The full convention, including which `2*pi` factors are *not* part of the
 measure, is given under "Integration Measure Convention" below.
@@ -40,9 +40,19 @@ measure, is given under "Integration Measure Convention" below.
   effects are negligible, which is the assumption the planar model already
   makes).
 
+- **3D (`geometry_type: 3d`).** Assembly integrates over the true volume of a
+  3D mesh, so extracted quantities are absolute (F, H, Ohm). Electrostatics
+  keeps its scalar potential; the magnetic formulations above are
+  scalar-potential 2D reductions, so 3D magnetics uses separate solvers in a
+  vector (H(curl)) potential (the "3D Form" sections).
+
+The measure, the matching scalar integrators, the required mesh dimension and
+the output units are all defined in one place, `GeometryModel`
+(`src/solvers/geometry_model.hpp`).
+
 No extrusion length is configurable, so planar results are always reported per
 unit length. Output labels reflect this: `PhysicsSolver::CouplingUnitLabel`
-appends `/m` in planar mode, so a written matrix is never ambiguous about which
+appends `/m` in planar mode only, so a written matrix is never ambiguous about which
 convention produced it.
 
 ## 1. Electrostatics
@@ -110,7 +120,10 @@ u = ½ ε |E⃗|²
 - **Neumann:** `n̂ · (ε ∇V) = g` on `∂Ω_N`. The configured `value`
   is this outward natural flux and is added to the weak-form boundary RHS.
   A zero value is the implicit natural condition and requires no assembled term.
-- **Robin:** Reserved in the input schema but not yet implemented by the solvers.
+- **Robin:** `n̂ · (ε ∇V) + α V = g` on `∂Ω_R`, with `α = robin_coefficient`
+  ≥ 0 and `g = value`. It adds `∫ α V v dS` to the operator (under the
+  geometry's measure) and `∫ g v dS` to the RHS. Charge extraction uses the
+  domain stiffness alone, so the Robin term never enters `Q = K₀ V`.
 
 For axisymmetric problems, a nonzero Neumann load is integrated with the
 meridional boundary measure `2πr ds`, the same full measure carried by the
@@ -227,11 +240,74 @@ u = ½ B⃗ · H⃗ = ½ ν |B⃗|²
   formulation,
   `g = ν[n_r(∂A_φ/∂r + A_φ/r) + n_z ∂A_φ/∂z]`. The `A_φ/r` contribution is
   part of the radial natural flux and cannot be replaced by `n̂ · (ν∇A_φ)`.
-- **Robin:** Reserved in the input schema but not yet implemented.
+- **Robin:** Electrostatics only; the magnetic solvers reject it.
 
 For an axisymmetric magnetic problem that reaches `r = 0`, regularity requires
 `A_φ = 0` on the axis. The solver detects that boundary and applies this
 essential constraint automatically; it is not a natural Neumann condition.
+
+### 3D Form
+
+`geometry_type: 3d` uses a separate formulation (`MagnetostaticSolver3D`),
+because in 3D the potential is a full vector field:
+
+```
+∇ × (ν ∇ × A) = J,   A ∈ H(curl),   B = ∇ × A
+```
+
+`A` is discretized with Nédélec (edge) elements, so the tangential component of
+`A`, and therefore the normal component of `B`, is continuous across every face.
+Boundary conditions are homogeneous only: `dirichlet` 0 means `n × A = 0` (flux
+tangent: `B·n = 0`), and `neumann` 0 or no entry means the natural `n × H = 0`
+(flux normal). In an eddy-current solve an `n × A = 0` wall also acts as a
+perfect electrical contact for any conductor touching it (see the 3D
+magnetoquasistatic form).
+
+The curl-curl operator is singular: it annihilates every gradient.
+
+- `iterative` (MPI/HYPRE build): CG preconditioned by hypre's AMS solves the
+  singular system directly. It is consistent because every load is projected
+  (below). Afterwards the gradient part of `A` is removed,
+  `A ← A − Gψ` with `(GᵀMG)ψ = GᵀMA`, which is the discrete Coulomb gauge.
+- `direct`: the factorization needs a nonsingular matrix, so `β (A, w)` is
+  added with `β = 10⁻⁶ ν_min / L²` (`L` the bounding-box diagonal). With a
+  divergence-free source this selects the same Coulomb gauge and perturbs `B`
+  by about 10⁻⁶ relative.
+
+Every current terminal is a conductor with a direction field `w = −∇v`,
+from a unit conduction potential `v` (analytic `w = φ̂ / (Θr)` for
+`azimuthal`, `Θ` the conductor's angular extent: `2π` for a full ring, less
+for a sector bounded by symmetry planes; solved on the conductor for `electrodes` and `cut`, with `σ`
+weighting for a massive conductor). A stranded conductor carries
+`J = (I / A_cs) w / |w|` with `A_cs = ∫|w| dV` (for azimuthal,
+`∫ dV / (Θr)`, the meridional area); a massive one its DC distribution
+`J = σ w I / G` with `G = ∫σ|w|² dV` its conductance. Each unit-current
+load `b` is made discretely divergence-free before use: with `G` the discrete
+gradient from the matching H1 space and `M_c` the Nédélec mass matrix over the
+terminal's own conductor, `(GᵀM_cG) ψ = Gᵀ b` and `b' = b − M_c G ψ`, with `ψ`
+free on the conductor's DOFs except where it touches an `n × A = 0` wall. Then
+`Gᵀ b' = 0` for every gradient of the mesh (`b'` only sees a gradient through
+the conductor's DOFs), and the correction `−∇ψ` stays inside the conductor with
+no normal flux at its surface, so any imbalance is redistributed within it
+rather than made up by current in the surroundings. It carries no current
+along the path (`∫∇ψ·w = 0` for the harmonic path `w`). The fraction of the
+current density removed is reported when above 2%.
+
+The stranded direction `w/|w|` is not divergence-free in general, even though
+`w` is: `∇·(w/|w|) = −(w/|w|)·∇ln|w|`, which vanishes only where `|w|` is
+constant along each field line (an azimuthal path, a straight bar). On a
+solved path through a cut or between electrodes `|w|` varies along the field
+lines wherever the conductor turns at different radii across its section --
+a racetrack's corners, where it grows like `1/r` inwards -- and the projection
+then removes that part, so the source is the projected field rather than a
+uniform winding current. In TEAM 7's racetrack coil this is 2.6% on any mesh
+(see `examples/team7/README.md` for the measurements), 4.7% in TEAM 21a's.
+Its effect on the results is about the square of that fraction: solving with
+the exact winding current instead moves TEAM 7's fields by 0.12-0.17% and the
+TEAM 21a losses by 0.3-0.4%. A construction that avoids it is an open issue. The flux linkage of
+terminal `k` is `λ_k = ∫ A · J_k dV = b'_k · A` (with `J_k` its unit-current
+density), and the inductance matrix `L = B'ᵀ K⁻¹ B'` is symmetric by
+construction.
 
 ## 3. Magnetoquasistatics (Eddy Currents)
 
@@ -297,10 +373,13 @@ The real and imaginary parts of `A_φ` represent:
 B⃗ = B⃗_real + j B⃗_imag = ∇ × A⃗
 ```
 
-**RMS magnitude:**
+**Magnitude (`B_Magnitude`):**
 ```
 |B⃗| = √(|B⃗_real|² + |B⃗_imag|²)
 ```
+With peak phasors this is √2 times the RMS of `B(t)`; for a field whose
+direction rotates in time (elliptical polarization) it is not the time peak
+of `|B(t)|` either.
 
 **Time-domain fields:**
 ```
@@ -363,10 +442,12 @@ through the general expression rather than through a separate code path. Note
 that this makes the "frequently quoted simplification" above exactly correct for
 unported conductors, and wrong only for driven ones.
 
-Stranded terminals are excluded: they model a bundle of fine insulated strands
-carrying an imposed current, with eddy effects deliberately not represented, so
-the field-based expression does not describe them even when the bulk material
-property is conductive.
+Stranded terminals dissipate nothing here. A stranded conductor is a winding of
+insulated strands in series: the connection fixes every strand's current and
+none crosses between strands, so its current is the imposed source alone and
+the `jωσA` term is omitted there, whatever the material's `σ` (which is the
+wire conductivity, relevant to the winding's own resistance and in-strand
+losses, neither of which is modelled).
 
 **Verification:** the DC limit gives `P → I²/(2 G_dc)` for a single massive port,
 and global power balance `Σ_regions P = ½ Re(Σ_p V_p I_p*)` holds to
@@ -382,7 +463,60 @@ Same essential/natural split as magnetostatics:
   boundary value is currently zero.
 - **Neumann:** The configured real outward natural flux is assembled into the
   real field RHS. A zero value remains implicit.
-- **Robin:** Reserved in the input schema but not yet implemented.
+- **Robin:** Electrostatics only; the magnetic solvers reject it.
+
+### 3D Form
+
+`geometry_type: 3d` (`MagnetoquasistaticSolver3D`) solves for the complex
+Nédélec potential `A` with the same conductors and boundary conditions as 3D
+magnetostatics:
+
+```
+∇ × (ν ∇ × A) + jωσA = J_s + σ V w
+```
+
+- Stranded terminals are sources `J_s = I (w/|w|) / A_cs`, projected as in
+  magnetostatics.
+- A massive terminal is a port: in the conductor `E = V w − jωA`, and the
+  voltage `V` is the unknown that makes its net current `∫σE·w dV = I`,
+  i.e. `G V − jω cᵀA = I` with `c_i = ∫σ w·N_i dV`. The block system is the
+  same `MqsMassivePortOperator` as in 2D.
+- Every other conducting region carries `−jωσA`. `A` is the modified
+  potential of the A-formulation: in a conductor its gradient part carries the
+  electric scalar potential, so the eddy current is weakly divergence-free with
+  no normal component at the conductor surface, with no extra unknown.
+
+Both linear solvers solve a regularized system: in the nonconducting regions
+curl-curl alone is singular. Tested with a gradient, the regularized equation is
+`∫(β + jωσ) A·∇ψ = 0`, so `β` enters charge conservation in and at the surface
+of every conductor, off by a relative `β/(ωσ)`. The static `β` is harmless for
+good conductors but not for weak ones (it overstated the loss of a 1 S/m block
+at 50 Hz by 68%), and confining it to the nonconducting regions does not help,
+since the surface term remains. MQS therefore uses
+`β = 10⁻⁶ min(ν_min/L², ω_min σ_min)` over all scenario frequencies and
+conducting regions, which keeps `β/(ωσ) ≤ 10⁻⁶`, floored at `10⁻⁶` of the
+static weight to stay above round-off (with a warning if the floor binds).
+
+`direct` factors the packed real form once per frequency (sparse LU); `iterative` is GMRES with the
+block-diagonal preconditioner `diag(P, P)`, `P ≈ (K + ωM_σ)⁻¹` by AMS, plus the
+exact inverse of the port corner.
+
+Coupling rows: a massive terminal's `Z = V/I` from its solved voltage, a
+stranded terminal's `Z = jω λ` with `λ = b'·A`; `R = Re Z`, `L = Im Z / ω`.
+The loss density is `½σ|V w − jωA|²`. For the discrete solution the total loss
+equals the real input power `½ Re(Σ_k V_k I_k*)` (with `V_k = jωλ_k` for a
+stranded terminal) by the Galerkin energy identity, but only as exactly as the
+quadratures agree: `G`, the port columns `c` and the loss integral use their own
+rules, which are exact on affine elements and approximate on curved ones, so on
+a curved mesh the balance holds to quadrature error. Stranded regions do not
+conduct in the field solve, so they add nothing to either side.
+
+**Conductors touching an `n × A = 0` wall.** `n × A = 0` makes the tangential
+`E = −jωA` vanish on the wall, so the wall behaves like a perfect electrical
+contact: eddy current may flow from a conductor into it and return elsewhere
+through it. That is right on a symmetry plane that current crosses normally,
+but on an outer box it shorts the conductor's surface to the box. MQS warns
+when a conductor touches such a wall outside its own electrodes.
 
 ## Finite Element Discretization
 
